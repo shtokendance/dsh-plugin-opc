@@ -5,7 +5,7 @@ const url = log.match(/http:\/\/127\.0\.0\.1:3080\/\?token=[^\s]+/)?.[0]
 if (!url) throw new Error('Host URL unavailable')
 const browser = await chromium.launch({ headless: true, channel: "chrome" })
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
-const panel = process.env.OPC_PANEL ?? '企业知识库'
+const panel = process.env.OPC_PANEL ?? 'OPC 知识库'
 const errors = []
 page.on('pageerror', error => errors.push(error.message))
 page.on('console', message => { if (message.type() === 'error' || message.text().includes('OPC')) errors.push(message.text()) })
