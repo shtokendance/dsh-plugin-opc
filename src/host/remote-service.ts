@@ -10,19 +10,31 @@ declare module '@deepseek-ai/cordis' { interface Context { opc: OpcRemoteService
 
 /** Business documents are JSON strings on the wire; credentials never enter this service. */
 export class OpcRemoteService extends TypertRemoteService {
-  static inject = ['mcpManager']
   private pendingApprovals = new Map<string, { contextId: string; prompt: { serviceId: string; toolName: string; arguments: Record<string, unknown> }; resolve: (outcome: 'allowed-once' | 'rejected' | 'cancelled') => void }>()
-  private readonly mounts: ManagedMcpMounts
+  private mounts?: ManagedMcpMounts
+  private manager?: Context['mcpManager']
   constructor(ctx: Context, private readonly core: OpcCore) {
     super(ctx, 'opc')
-    this.mounts = new ManagedMcpMounts(core, (name, entry) => ctx.mcpManager.register(name, entry), this.requestApproval)
-    ctx.effect(() => () => this.mounts.dispose())
-    ctx.on('mcp-manager/status', () => { core.emit('change') })
+    ctx.inject(['mcpManager'], child => {
+      const manager = child.mcpManager
+      const mounts = new ManagedMcpMounts(core, (name, entry) => manager.register(name, entry), this.requestApproval)
+      this.manager = manager
+      this.mounts = mounts
+      core.emit('change')
+      child.on('mcp-manager/status', () => { core.emit('change') })
+      child.effect(() => () => {
+        this.manager = undefined
+        this.mounts = undefined
+        mounts.dispose()
+        core.emit('change')
+      })
+    })
   }
   @Remote
   async state(): Promise<string> {
     const state = this.core.auth.state
-    return JSON.stringify({ ...state, mcpConnections: Object.fromEntries(this.mounts.list().map(id => { const status = this.ctx.mcpManager.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), mountedServices: this.mounts.list(), approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), context: state.context ? { ...state.context, contextId: contextId(state.context), epoch: this.core.auth.contexts.epoch } : null })
+    const mounted = this.mounts?.list() ?? []
+    return JSON.stringify({ ...state, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), context: state.context ? { ...state.context, contextId: contextId(state.context), epoch: this.core.auth.contexts.epoch } : null })
   }
   @Remote({ mode: 'stream' })
   async *watchState(signal: AbortSignal): AsyncIterable<string> {
@@ -117,9 +129,9 @@ export class OpcRemoteService extends TypertRemoteService {
     if (prompt.signal.aborted) abort(); else this.core.emit('change')
   })
   @Remote
-  async mountMcpService(serviceId: string, expectedContextId: string): Promise<void> { await this.mounts.mount(serviceId, expectedContextId) }
+  async mountMcpService(serviceId: string, expectedContextId: string): Promise<void> { if (!this.mounts) throw new OpcError('MCP_MOUNT_UNAVAILABLE'); await this.mounts.mount(serviceId, expectedContextId) }
   @Remote
-  async unmountMcpService(serviceId: string, expectedContextId: string): Promise<void> { this.core.auth.contexts.capture(expectedContextId); this.mounts.unmount(serviceId) }
+  async unmountMcpService(serviceId: string, expectedContextId: string): Promise<void> { this.core.auth.contexts.capture(expectedContextId); this.mounts?.unmount(serviceId) }
   @Remote
   async decideDebugInvocation(id: string, allowed: boolean, expectedContextId: string): Promise<void> {
     this.core.auth.contexts.capture(expectedContextId)
