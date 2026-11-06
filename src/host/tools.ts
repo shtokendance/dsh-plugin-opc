@@ -26,7 +26,7 @@ export function registerTools(ctx: Context, core: OpcCore): void {
   }
   const output = { schema: { type: 'string' as const }, render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }] }
   ctx.effect(() => ctx.tools.register(defineTool({
-    name: 'opc_knowledge_search', description: '检索当前企业空间知识库；遇到 OPC 企业知识库引用时用本工具检索，再用 opc_knowledge_read 读取命中正文并注明文档名。',
+    name: 'opc_knowledge_search', description: '检索当前企业空间知识库；遇到 OPC 知识库引用时只传 query，宿主从本轮引用确定空间和知识库；再用 opc_knowledge_read 读取命中正文并注明文档名。',
     parameters: { query: { type: 'string', required: true }, space: { type: 'string' }, knowledge_base_id: { type: 'string' } },
     output,
     async execute(args, exec) { const s = scope(exec); return JSON.stringify(await core.search(s.session, s.turn, args.query, args.space, args.knowledge_base_id)) },
