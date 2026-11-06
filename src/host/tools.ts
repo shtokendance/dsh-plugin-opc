@@ -6,23 +6,27 @@ import { OpcCore } from './core.ts'
 import { OpcError } from './context.ts'
 
 export function registerTools(ctx: Context, core: OpcCore): void {
-  const turns = new Map<string, string>()
+  const turns = new Map<string, { turn: string; epoch: number }>()
   const scope = (exec: ToolRunContext) => {
     if (!exec.agent) throw new OpcError('AGENT_REQUIRED')
     const session = String(exec.agent.session.id)
     const boundary = ctx.agents.turnBoundaryOf(exec.agent.session)
     if (boundary.openTurnStartSeq === null) throw new OpcError('TURN_REQUIRED')
     const turn = String(boundary.openTurnStartSeq)
-    if (turns.get(session) !== turn) {
-      const old = turns.get(session)
-      if (old) core.scopes.end(session, old)
-      core.scopes.begin(session, turn); turns.set(session, turn)
+    const old = turns.get(session)
+    if (old?.turn !== turn || old.epoch !== core.auth.contexts.epoch) {
+      if (old) core.scopes.end(session, old.turn)
+      const messages = exec.agent.session.snapshotEvents().slice(boundary.openTurnStartSeq)
+      const prompt = messages.flatMap(event => event.type === 'user/message' && event.data.source.kind === 'user'
+        ? event.data.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('\n')
+      core.scopes.begin(session, turn, prompt)
+      turns.set(session, { turn, epoch: core.auth.contexts.epoch })
     }
     return { session, turn }
   }
   const output = { schema: { type: 'string' as const }, render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }] }
   ctx.effect(() => ctx.tools.register(defineTool({
-    name: 'opc_knowledge_search', description: '检索当前企业空间知识库；遵守用户限定的知识库范围。',
+    name: 'opc_knowledge_search', description: '检索当前企业空间知识库；遇到 OPC 企业知识库引用时用本工具检索，再用 opc_knowledge_read 读取命中正文并注明文档名。',
     parameters: { query: { type: 'string', required: true }, space: { type: 'string' }, knowledge_base_id: { type: 'string' } },
     output,
     async execute(args, exec) { const s = scope(exec); return JSON.stringify(await core.search(s.session, s.turn, args.query, args.space, args.knowledge_base_id)) },

@@ -15,8 +15,16 @@ export class KnowledgeScopes {
     this.#pins.set(session, { ...scope, epoch: snapshot.epoch })
   }
   pins(): Record<string, string> { return Object.fromEntries([...this.#pins].filter(([, scope]) => scope.epoch === this.contexts.epoch).map(([session, scope]) => [session, scope.knowledgeBaseId])) }
-  begin(session: string, turn: string): void {
-    const scope = this.#pins.get(session)
+  begin(session: string, turn: string, prompt = ''): void {
+    let scope = this.#pins.get(session)
+    const refs = new Set(Array.from(prompt.matchAll(/\[OPC 知识库\]\(opc-kb:([^)]+)\)/g), match => match[1]))
+    if (refs.size > 1) throw new OpcError('MULTIPLE_KNOWLEDGE_BASES', '每轮提问请选择一个知识库')
+    for (const ref of refs) {
+      const match = /^([a-f0-9]{32})\/([^/]+)$/.exec(ref)
+      if (!match) throw new OpcError('INVALID_KNOWLEDGE_REFERENCE')
+      const snapshot = this.contexts.capture(match[1])
+      scope = { tenantId: snapshot.context.tenant, knowledgeBaseId: decodeURIComponent(match[2]), epoch: snapshot.epoch }
+    }
     if (!scope || scope.epoch !== this.contexts.epoch) { this.#turns.get(session)?.delete(turn); return }
     const turns = this.#turns.get(session) ?? new Map<string, Turn>()
     turns.set(turn, { ...scope, hits: new Set() })

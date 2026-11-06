@@ -1,3 +1,5 @@
+import { registerMentions } from './mentions.ts'
+import { labels, OpcIcon } from './branding.tsx'
 import React from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -43,10 +45,11 @@ function registerPanels(ctx: Context): void {
     invokeMcpTool: (...args) => unwrap(wire.invokeMcpTool(...args)),
     decideDebugInvocation: (...args) => unwrap(wire.decideDebugInvocation(...args)),
   }
-  const labels: Record<PanelKind, string> = { knowledge: '企业知识库', skills: '企业技能', mcp: '企业 MCP' }
+  ctx.inject(['inputTriggers'], child => registerMentions(child, api))
   for (const [index, kind] of (['knowledge', 'skills', 'mcp'] as const).entries()) {
     const id = `@opc/dsh-plugin-opc/${kind}`
-    ctx.effect(() => ctx.sidebarRightTabs.register({ id, kind: `opc-${kind}`, priority: 'extension', title: () => labels[kind], guide: [{ id: `opc-${kind}`, order: 10 + index, title: () => labels[kind], description: () => 'OPC 企业工作空间' }] }))
+    ctx.effect(() => ctx.sidebarRightTabs.register({ id, kind: `opc-${kind}`, priority: 'extension', title: () => labels[kind], guide: [{ id: `opc-${kind}`, order: 10 + index, icon: OpcIcon, title: () => labels[kind], description: () => 'OPC 工作空间' }] }))
+    ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {labels[kind]}</>)))
     ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: id, inject: sessionId => ({ api, sessionId: String(sessionId), kind }) }, Panel)))
   }
 }
