@@ -39,7 +39,8 @@
   },
   "files": [
     "lib",
-    "README.md"
+    "README.md",
+    "config/overlay.example.yml"
   ],
   "dsh": {
     "client": {
@@ -48,6 +49,9 @@
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
+    },
+    "bundle": {
+      "patch": "./config/overlay.example.yml"
     }
   },
   "peerDependencies": {
