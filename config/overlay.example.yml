@@ -1,0 +1,9 @@
+- insert:
+    - id: opc-enterprise
+      # 本地开发替换为插件 lib/index.js 的绝对路径。
+      name: '@opc/dsh-plugin-opc'
+      config:
+        platformBaseUrl: https://shtokendance.benlai.com
+        clientId: work-desktop
+        # 留空使用 DSH home；可显式指定本机受管技能目录。
+        dataHome: ''
