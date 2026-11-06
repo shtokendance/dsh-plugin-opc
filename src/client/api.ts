@@ -23,6 +23,7 @@ export interface OpcApi {
 export interface AuthState {
   pinnedScopes?: Record<string, string>
   mcpConnections?: Record<string, { state: string; toolCount: number }>
+  knowledgeMentionScopeVersion?: number
   mountAvailable?: boolean
   mountedServices?: string[]
   approvals?: { id: string; contextId: string; serviceId: string; toolName: string; arguments: Record<string, unknown> }[]

@@ -9,11 +9,11 @@ export function registerMentions(ctx: Context, api: OpcApi) {
     async candidates(_session, { query, signal, quoted }) {
       if (quoted || signal.aborted) return []
       const state: AuthState = JSON.parse(await api.state())
-      if (!state.context) return []
+      if (!state.context || state.knowledgeMentionScopeVersion !== 1) return []
       const term = query.replace(/^opc\s*/i, '')
       const rows: Resource[] = JSON.parse(await api.listKnowledgeBases(term))
       const after: AuthState = JSON.parse(await api.state())
-      if (signal.aborted || after.context?.contextId !== state.context.contextId) return []
+      if (signal.aborted || after.knowledgeMentionScopeVersion !== 1 || after.context?.contextId !== state.context.contextId) return []
       return rows.filter(row => row.knowledge_base_id && row.tenant_id === state.context!.tenant).map(row => ({
         name: 'opc ' + row.name, label: row.name, section: 'OPC 知识库', icon: OpcIcon,
         value: 'opc-kb:' + state.context!.contextId + '/' + encodeURIComponent(row.knowledge_base_id!),
