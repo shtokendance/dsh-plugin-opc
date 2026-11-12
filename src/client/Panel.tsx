@@ -1276,22 +1276,6 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
         </>
       })()}
 
-      {/* Approvals */}
-      {state.approvals?.map(pending => (
-        <div className="notice" key={pending.id} style={{ background: '#fffbeb', borderColor: '#f59e0b' }}>
-          <strong>待审批企业操作：{pending.toolName}</strong>
-          <pre style={{ margin: '8px 0', fontSize: 12 }}>{JSON.stringify(pending.arguments, null, 2)}</pre>
-          <div className="row">
-            <button className="primary" onClick={() => void api.decideDebugInvocation(pending.id, true, pending.contextId).catch(e => setError(String(e)))}>
-              允许一次
-            </button>
-            <button onClick={() => void api.decideDebugInvocation(pending.id, false, pending.contextId).catch(e => setError(String(e)))}>
-              拒绝
-            </button>
-          </div>
-        </div>
-      ))}
-
       {/* MCP Services View - 方案二：独立指令栏与分类Pills */}
       {kind === 'mcp' && (() => {
         const connectedCount = services.filter(s => state.mountedServices?.includes(String(s.service_id))).length
@@ -1315,7 +1299,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
 
         return <>
           <p className="notice">
-            AI 可按权限调用以下企业服务（已为您自动挂载并保持连接）。需要审批的高危操作会请求确认；{state.mountAvailable ? '挂载服务的审批会直接显示在 OPC 面板。' : '当前客户端可在下方在线调试工具。'}
+            AI 可按权限调用以下企业服务（已为您自动挂载并保持连接）。企微登录后直接可用，无需每次手动确认审批。
           </p>
 
           {/* 指令栏 */}
@@ -1443,5 +1427,5 @@ function McpDebug({ api, serviceId, toolName, contextId }: { api: OpcApi; servic
   return <details style={{ marginTop: 6 }}><summary style={{ fontSize: 12, color: '#245c9f', cursor: 'pointer' }}>在线调试调用</summary><textarea style={{ width: '100%', minHeight: 60, marginTop: 6, fontSize: 12 }} aria-label={`${toolName} JSON 参数`} value={args} onChange={e => setArgs(e.target.value)}/><button style={{ marginTop: 6 }} disabled={pending} onClick={() => {
     const current = generation.current; setPending(true); setResult('')
     void api.invokeMcpTool(serviceId, toolName, args, contextId).then(value => { if (current === generation.current) setResult(value) }, error => { if (current === generation.current) setResult(String(error)) }).finally(() => { if (current === generation.current) setPending(false) })
-  }}>{pending ? '等待执行或审批…' : '调用'}</button>{result && <pre style={{ marginTop: 6, fontSize: 11, background: '#f1f5f9', padding: 8, borderRadius: 4, overflowX: 'auto' }}>{result}</pre>}</details>
+  }}>{pending ? '执行中…' : '调用'}</button>{result && <pre style={{ marginTop: 6, fontSize: 11, background: '#f1f5f9', padding: 8, borderRadius: 4, overflowX: 'auto' }}>{result}</pre>}</details>
 }
