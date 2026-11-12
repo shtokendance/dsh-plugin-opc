@@ -261,77 +261,260 @@ const css = `
 }
 .doc-box img { max-width: 100%; }
 
-/* Knowledge Base Top Search Section */
-.kb-top-card {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-bottom: 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-}
-.kb-search-tabs {
+/* ========================================================
+   方案二：通用微交互与组件体系 (基于 opc-knowledge & opc-plugin 设计)
+   ======================================================== */
+
+/* 知识库方案二：双Tab独立微型栏 */
+.s2-kb-tabs {
   display: flex;
-  background: #f1f5f9;
-  padding: 3px;
-  border-radius: 8px;
-  gap: 4px;
-  margin-bottom: 10px;
+  align-items: center;
+  gap: 24px;
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: 14px;
+  padding-bottom: 0;
 }
-.kb-tab-btn {
-  flex: 1;
+.s2-kb-tab {
+  background: none;
   border: none;
-  background: transparent;
-  padding: 6px 12px;
+  border-bottom: 2px solid transparent;
+  padding: 0 0 10px;
   font-size: 12px;
   font-weight: 500;
   color: #64748b;
-  border-radius: 6px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.kb-tab-btn:hover:not(.active) {
-  color: #1e293b;
-  background: rgba(255, 255, 255, 0.5);
-}
-.kb-tab-btn.active {
-  background: #ffffff;
+.s2-kb-tab:hover:not(.active) {
   color: #0f172a;
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
-.kb-search-row {
+.s2-kb-tab.active {
+  color: #2563eb;
+  border-bottom-color: #2563eb;
+  font-weight: 650;
+}
+.s2-badge-rec {
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+.s2-panel-full {
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: 12px;
+  padding: 10px 12px;
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   flex-wrap: wrap;
-  margin: 0;
+  margin-bottom: 14px;
 }
-.kb-scope-select {
-  flex: 0 0 auto;
-  max-width: 180px;
-  min-width: 135px;
+.s2-scope-select {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   font-size: 12px;
-  padding: 6px 8px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #f8fafc;
+  padding: 7px 10px;
   color: #334155;
+  font-weight: 500;
+  max-width: 180px;
+  min-width: 140px;
   cursor: pointer;
 }
-.kb-search-input {
-  flex: 1 1 160px;
-  min-width: 140px;
+.s2-input-full {
+  flex: 1 1 180px;
+  min-width: 150px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   font-size: 12px;
+  padding: 7px 12px;
+  color: #0f172a;
 }
+.s2-input-full:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+.s2-btn-blue {
+  background: #2563eb;
+  color: #ffffff;
+  border: 1px solid #2563eb;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 16px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.2);
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.s2-btn-blue:hover:not(:disabled) {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+.s2-panel-catalog {
+  background: rgba(254, 243, 199, 0.35);
+  border: 1px solid rgba(253, 230, 138, 0.7);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.s2-input-catalog {
+  flex: 1 1 200px;
+  min-width: 160px;
+  background: #ffffff;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  font-size: 12px;
+  padding: 7px 12px;
+  color: #1e293b;
+}
+.s2-input-catalog:focus {
+  outline: none;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+}
+.s2-btn-amber {
+  background: #d97706;
+  color: #ffffff;
+  border: 1px solid #d97706;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 16px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(217, 119, 6, 0.2);
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.s2-btn-amber:hover:not(:disabled) {
+  background: #b45309;
+  border-color: #b45309;
+}
+
+/* 技能与 MCP 方案二：独立指令栏与分类 Pills */
+.s2-command-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 12px;
+}
+.s2-command-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 13px;
+  color: #2563eb;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+}
+.s2-command-input {
+  width: 100%;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 8px 105px 8px 36px;
+  font-size: 12px;
+  color: #0f172a;
+  font-weight: 500;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.s2-command-input:focus {
+  background: #ffffff;
+  border-color: #3b82f6;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+.s2-command-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #0f172a;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.s2-command-btn:hover:not(:disabled) {
+  background: #2563eb;
+}
+.s2-command-clear {
+  position: absolute;
+  right: 76px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.s2-command-clear:hover {
+  color: #0f172a;
+}
+.s2-pills-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  margin-bottom: 14px;
+}
+.s2-pills-label {
+  font-size: 11px;
+  color: #94a3b8;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.s2-pill {
+  font-size: 11px;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  background: #f1f5f9;
+  color: #475569;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.s2-pill:hover:not(.active) {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+.s2-pill.active {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.25);
+}
+
+/* 结果卡片与小按钮 */
 .kb-results-card {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  border-radius: 12px;
   padding: 12px 14px;
   margin: 10px 0 14px;
 }
@@ -353,7 +536,7 @@ const css = `
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin: 14px 0 6px;
+  margin: 14px 0 8px;
   padding-bottom: 4px;
 }
 .kb-section-title {
@@ -366,8 +549,8 @@ const css = `
 }
 .btn-sm {
   font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
   border: 1px solid #cbd5e1;
   background: #ffffff;
   color: #475569;
@@ -631,6 +814,8 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
   const [kbSearchMode, setKbSearchMode] = useState<'doc' | 'kb'>('doc')
   const [docQuery, setDocQuery] = useState('')
   const [hasSearchedDoc, setHasSearchedDoc] = useState(false)
+  const [mcpSearch, setMcpSearch] = useState('')
+  const [mcpFilter, setMcpFilter] = useState<'all' | 'connected' | 'unmounted'>('all')
   const docInputRef = useRef<HTMLInputElement>(null)
   const topSearchCardRef = useRef<HTMLDivElement>(null)
   const pin = state.pinnedScopes?.[sessionId] ?? ''
@@ -668,7 +853,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
   }, [api, kind, q])
 
   useEffect(() => {
-    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setBusy(false); setError('')
+    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setBusy(false); setError('')
     if (state.signedIn) void run(load)
   }, [state.context?.contextId, sessionId, kind])
 
@@ -749,36 +934,37 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
         />
       )}
 
-      {/* Knowledge Base View */}
+      {/* Knowledge Base View - 方案二：双Tab独立微型栏 */}
       {kind === 'knowledge' && <>
-        {/* Top Search Card: Integrated Document Search & Knowledge Base Filter */}
-        <div className="kb-top-card" ref={topSearchCardRef}>
-          <div className="kb-search-tabs">
-            <button
-              type="button"
-              className={`kb-tab-btn ${kbSearchMode === 'doc' ? 'active' : ''}`}
-              onClick={() => {
-                setKbSearchMode('doc')
-                setTimeout(() => docInputRef.current?.focus(), 50)
-              }}
-            >
-              <span>📄</span>
-              <span>文档全文检索</span>
-              {hits.length > 0 && <span className="badge badge-ok" style={{ fontSize: 10, padding: '1px 5px' }}>{hits.length}</span>}
-            </button>
-            <button
-              type="button"
-              className={`kb-tab-btn ${kbSearchMode === 'kb' ? 'active' : ''}`}
-              onClick={() => setKbSearchMode('kb')}
-            >
-              <span>📚</span>
-              <span>知识库目录筛选</span>
-              {q && <span className="badge badge-warn" style={{ fontSize: 10, padding: '1px 5px' }}>已筛选</span>}
-            </button>
-          </div>
+        {/* Tab Header */}
+        <div className="s2-kb-tabs">
+          <button
+            type="button"
+            className={`s2-kb-tab ${kbSearchMode === 'doc' ? 'active' : ''}`}
+            onClick={() => {
+              setKbSearchMode('doc')
+              setTimeout(() => docInputRef.current?.focus(), 50)
+            }}
+          >
+            <span>📄 文档全文检索模式</span>
+            <span className="s2-badge-rec">推荐</span>
+            {hits.length > 0 && <span className="badge badge-ok" style={{ fontSize: 10, padding: '1px 5px' }}>{hits.length}</span>}
+          </button>
+          <button
+            type="button"
+            className={`s2-kb-tab ${kbSearchMode === 'kb' ? 'active' : ''}`}
+            onClick={() => setKbSearchMode('kb')}
+          >
+            <span>📂 知识库目录筛选模式</span>
+            {q && <span className="badge badge-warn" style={{ fontSize: 10, padding: '1px 5px' }}>已筛选</span>}
+          </button>
+        </div>
 
-          {kbSearchMode === 'doc' ? (
-            <form onSubmit={e => {
+        {/* Tab 1: 文档全文检索模式 */}
+        {kbSearchMode === 'doc' && (
+          <form
+            className="s2-panel-full"
+            onSubmit={e => {
               e.preventDefault()
               if (!docQuery.trim()) return
               const version = epoch.current
@@ -789,63 +975,74 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
                   setHasSearchedDoc(true)
                 }
               })
-            }}>
-              <div className="kb-search-row">
-                <select
-                  aria-label="检索知识库范围"
-                  className="kb-scope-select"
-                  value={kb}
-                  onChange={e => setKb(e.target.value)}
-                >
-                  <option value="">当前空间全部知识库</option>
-                  {items.map(item => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}
-                </select>
-                <input
-                  ref={docInputRef}
-                  required
-                  className="kb-search-input"
-                  aria-label="文档检索词"
-                  placeholder="输入要查找的文档关键词或片段..."
-                  value={docQuery}
-                  onChange={e => setDocQuery(e.target.value)}
-                />
-                <button className="primary" disabled={busy}>检索</button>
-                {(docQuery || hits.length > 0 || hasSearchedDoc) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDocQuery('')
-                      setHits([])
-                      setDoc('')
-                      setHasSearchedDoc(false)
-                    }}
-                  >
-                    清空
-                  </button>
-                )}
-              </div>
-            </form>
-          ) : (
-            <form onSubmit={e => { e.preventDefault(); void run(load) }}>
-              <div className="kb-search-row">
-                <input
-                  aria-label="搜索知识库"
-                  className="kb-search-input"
-                  placeholder="搜索知识库名称或描述..."
-                  value={q}
-                  onChange={e => setQ(e.target.value)}
-                />
-                <button className="primary" disabled={busy}>搜索</button>
-                {q && <button type="button" onClick={() => { setQ(''); void run(load) }}>清除</button>}
-              </div>
-            </form>
-          )}
-        </div>
+            }}
+          >
+            <select
+              aria-label="检索知识库范围"
+              className="s2-scope-select"
+              value={kb}
+              onChange={e => setKb(e.target.value)}
+            >
+              <option value="">当前空间全部知识库</option>
+              {items.map(item => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}
+            </select>
+            <input
+              ref={docInputRef}
+              required
+              className="s2-input-full"
+              aria-label="文档检索词"
+              placeholder="输入全文关键词或代码片段进行向量检索..."
+              value={docQuery}
+              onChange={e => setDocQuery(e.target.value)}
+            />
+            <button className="s2-btn-blue" disabled={busy}>开始检索</button>
+            {(docQuery || hits.length > 0 || hasSearchedDoc) && (
+              <button
+                type="button"
+                className="btn-sm"
+                onClick={() => {
+                  setDocQuery('')
+                  setHits([])
+                  setDoc('')
+                  setHasSearchedDoc(false)
+                }}
+              >
+                清空
+              </button>
+            )}
+          </form>
+        )}
+
+        {/* Tab 2: 知识库目录筛选模式 */}
+        {kbSearchMode === 'kb' && (
+          <form
+            className="s2-panel-catalog"
+            onSubmit={e => { e.preventDefault(); void run(load) }}
+          >
+            <input
+              aria-label="筛选知识库"
+              className="s2-input-catalog"
+              placeholder="输入知识库名称或描述进行快速过滤..."
+              value={q}
+              onChange={e => setQ(e.target.value)}
+            />
+            <button className="s2-btn-amber" disabled={busy}>应用筛选</button>
+            {q && (
+              <button
+                type="button"
+                className="btn-sm"
+                onClick={() => { setQ(''); void run(load) }}
+              >
+                清除
+              </button>
+            )}
+          </form>
+        )}
 
         {/* Empty Doc Search Feedback */}
         {hasSearchedDoc && hits.length === 0 && !busy && (
           <div className="notice" style={{ background: '#f8fafc', borderColor: '#94a3b8', color: '#64748b', fontSize: 12, margin: '8px 0' }}>
-            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或将检索范围调整为「当前空间全部知识库」。
+            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或在上方选择「当前空间全部知识库」。
           </div>
         )}
 
@@ -869,7 +1066,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
               <div key={String(hit.knowledge_id) + i} className="resource-card" style={{ marginBottom: 8, padding: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <button
-                    style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', fontWeight: 600, color: '#245c9f', cursor: 'pointer' }}
+                    style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', fontWeight: 600, color: '#2563eb', cursor: 'pointer' }}
                     onClick={action(async () => {
                       const version = epoch.current
                       const result = JSON.parse(await api.readKnowledgeDocument(sessionId, String(hit.knowledge_id), context.contextId))
@@ -930,7 +1127,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
               <div>
                 <div className="card-header">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                    <div className="card-icon">📖</div>
+                    <div className="card-icon" style={{ background: '#f8fafc', color: '#334155' }}>📖</div>
                     <h3 className="card-title">{item.name}</h3>
                   </div>
                   <span className={`badge ${item.availability === 'available' ? 'badge-ok' : ''}`}>
@@ -948,6 +1145,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
                   限定问答范围
                 </button>
                 <button
+                  style={{ background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0' }}
                   onClick={() => {
                     setKb(item.knowledge_base_id!)
                     setKbSearchMode('doc')
@@ -965,70 +1163,118 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
         </div>
       </>}
 
-      {/* Skills View */}
-      {kind === 'skills' && <>
-        <div className="row" style={{ justifyContent: 'space-between' }}>
-          <form style={{ display: 'flex', gap: 6, flex: 1, minWidth: 200 }} onSubmit={e => { e.preventDefault(); void run(load) }}>
+      {/* Skills View - 方案二：独立指令栏与分类Pills */}
+      {kind === 'skills' && (() => {
+        const installedCount = items.filter(it => !!it.installed).length
+        const uninstalledCount = items.length - installedCount
+        const filteredItems = items.filter(item => {
+          if (filter === 'installed') return !!item.installed
+          if (filter === 'new') return !item.installed
+          return true
+        })
+
+        return <>
+          {/* 指令栏 */}
+          <form
+            className="s2-command-bar"
+            onSubmit={e => { e.preventDefault(); void run(load) }}
+          >
+            <span className="s2-command-icon">⚡</span>
             <input
               aria-label="搜索技能"
-              placeholder="搜索技能名称或描述..."
+              className="s2-command-input"
+              placeholder="输入关键词查找技能组件、描述或指令..."
               value={q}
               onChange={e => setQ(e.target.value)}
             />
-            <button className="primary" disabled={busy}>搜索</button>
+            {q && (
+              <button
+                type="button"
+                className="s2-command-clear"
+                onClick={() => { setQ(''); void run(load) }}
+                title="清除"
+              >
+                ✕
+              </button>
+            )}
+            <button className="s2-command-btn" disabled={busy}>立即检索</button>
           </form>
-          <select aria-label="安装状态筛选" style={{ width: 110 }} value={filter} onChange={e => setFilter(e.target.value)}>
-            <option value="all">全部技能</option>
-            <option value="installed">已安装</option>
-            <option value="new">未安装</option>
-          </select>
-        </div>
 
-        <div className="cards-grid">
-          {items.filter(item => filter === 'all' || (filter === 'installed' ? !!item.installed : !item.installed)).map(item => <div key={item.catalog_id} className="resource-card">
-            <div>
-              <div className="card-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                  <div className="card-icon" style={{ background: '#f0fdf4', borderColor: '#bbf7d0', color: '#16a34a' }}>⚡</div>
-                  <div>
-                    <h3 className="card-title">/{item.name}</h3>
-                    <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>v{item.version}</span>
+          {/* 快捷分类 Pills */}
+          <div className="s2-pills-row">
+            <span className="s2-pills-label">🏷️ 快捷标签：</span>
+            <button
+              type="button"
+              className={`s2-pill ${filter === 'all' ? 'active' : ''}`}
+              onClick={() => setFilter('all')}
+            >
+              全部 ({items.length})
+            </button>
+            <button
+              type="button"
+              className={`s2-pill ${filter === 'installed' ? 'active' : ''}`}
+              onClick={() => setFilter('installed')}
+            >
+              已安装 ({installedCount})
+            </button>
+            <button
+              type="button"
+              className={`s2-pill ${filter === 'new' ? 'active' : ''}`}
+              onClick={() => setFilter('new')}
+            >
+              未安装 ({uninstalledCount})
+            </button>
+          </div>
+
+          <div className="cards-grid">
+            {filteredItems.map(item => (
+              <div key={item.catalog_id} className="resource-card">
+                <div>
+                  <div className="card-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <div className="card-icon" style={{ background: '#f0fdf4', borderColor: '#bbf7d0', color: '#16a34a' }}>⚡</div>
+                      <div>
+                        <h3 className="card-title">/{item.name}</h3>
+                        <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace' }}>v{item.version}</span>
+                      </div>
+                    </div>
+                    <span className={`badge ${item.installed ? (item.installed.enabled ? 'badge-ok' : '') : ''}`}>
+                      {item.installed ? (item.installed.enabled ? '已启用' : '已停用') : '未安装'}
+                    </span>
                   </div>
+                  <p className="card-desc">{item.description || '暂无技能说明'}</p>
                 </div>
-                <span className={`badge ${item.installed ? (item.installed.enabled ? 'badge-ok' : '') : ''}`}>
-                  {item.installed ? (item.installed.enabled ? '已启用' : '已停用') : '未安装'}
-                </span>
+                <div className="card-actions">
+                  {(!item.installed || item.installed.active_sha256 !== item.bundle_sha256) && (
+                    <button
+                      className="primary"
+                      disabled={busy || item.availability !== 'available'}
+                      onClick={action(async () => { await api.installSkill(item.catalog_id!, item.bundle_sha256!, context.contextId); await load() })}
+                    >
+                      {item.installed ? '更新版本' : '下载安装'}
+                    </button>
+                  )}
+                  {item.installed && <>
+                    <button
+                      disabled={busy}
+                      onClick={action(async () => { await api.setSkillEnabled(item.catalog_id!, !item.installed!.enabled, context.contextId); await load() })}
+                    >
+                      {item.installed.enabled ? '停用' : '启用'}
+                    </button>
+                    <button
+                      disabled={busy}
+                      style={{ color: '#dc2626', borderColor: '#fecaca', background: '#fef2f2' }}
+                      onClick={action(async () => { await api.uninstallSkill(item.catalog_id!, context.contextId); await load() })}
+                    >
+                      卸载
+                    </button>
+                  </>}
+                </div>
               </div>
-              <p className="card-desc">{item.description || '暂无技能说明'}</p>
-            </div>
-            <div className="card-actions">
-              {(!item.installed || item.installed.active_sha256 !== item.bundle_sha256) && (
-                <button
-                  className="primary"
-                  disabled={busy || item.availability !== 'available'}
-                  onClick={action(async () => { await api.installSkill(item.catalog_id!, item.bundle_sha256!, context.contextId); await load() })}
-                >
-                  {item.installed ? '更新版本' : '下载安装'}
-                </button>
-              )}
-              {item.installed && <>
-                <button
-                  disabled={busy}
-                  onClick={action(async () => { await api.setSkillEnabled(item.catalog_id!, !item.installed!.enabled, context.contextId); await load() })}
-                >
-                  {item.installed.enabled ? '停用' : '启用'}
-                </button>
-                <button
-                  disabled={busy}
-                  onClick={action(async () => { await api.uninstallSkill(item.catalog_id!, context.contextId); await load() })}
-                >
-                  卸载
-                </button>
-              </>}
-            </div>
-          </div>)}
-        </div>
-      </>}
+            ))}
+          </div>
+        </>
+      })()}
 
       {/* Approvals */}
       {state.approvals?.map(pending => (
@@ -1046,58 +1292,136 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
         </div>
       ))}
 
-      {/* MCP Services View */}
-      {kind === 'mcp' && <>
-        <p className="notice">
-          AI 可按权限调用以下企业服务（已为您自动挂载并保持连接）。需要审批的高危操作会请求确认；{state.mountAvailable ? '挂载服务的审批会直接显示在 OPC 面板。' : '当前客户端可在下方在线调试工具。'}
-        </p>
-        <div className="cards-grid">
-          {services.map(service => <div key={String(service.service_id)} className="resource-card">
-            <div>
-              <div className="card-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div className="card-icon" style={{ background: '#faf5ff', borderColor: '#e9d5ff', color: '#9333ea' }}>🔌</div>
-                  <h3 className="card-title">{String(service.name ?? service.service_id)}</h3>
+      {/* MCP Services View - 方案二：独立指令栏与分类Pills */}
+      {kind === 'mcp' && (() => {
+        const connectedCount = services.filter(s => state.mountedServices?.includes(String(s.service_id))).length
+        const unmountedCount = services.length - connectedCount
+        const filteredServices = services.filter(service => {
+          const isMounted = state.mountedServices?.includes(String(service.service_id))
+          if (mcpFilter === 'connected') return isMounted
+          if (mcpFilter === 'unmounted') return !isMounted
+          return true
+        }).filter(service => {
+          if (!mcpSearch.trim()) return true
+          const term = mcpSearch.trim().toLowerCase()
+          const name = String(service.name ?? service.service_id).toLowerCase()
+          const desc = String(service.description ?? '').toLowerCase()
+          const toolMatches = (Array.isArray(service.tools) ? service.tools : []).some(t => {
+            const tName = (typeof t === 'string' ? t : t.name).toLowerCase()
+            return tName.includes(term)
+          })
+          return name.includes(term) || desc.includes(term) || toolMatches
+        })
+
+        return <>
+          <p className="notice">
+            AI 可按权限调用以下企业服务（已为您自动挂载并保持连接）。需要审批的高危操作会请求确认；{state.mountAvailable ? '挂载服务的审批会直接显示在 OPC 面板。' : '当前客户端可在下方在线调试工具。'}
+          </p>
+
+          {/* 指令栏 */}
+          <div className="s2-command-bar">
+            <span className="s2-command-icon">🔌</span>
+            <input
+              aria-label="搜索 MCP 服务"
+              className="s2-command-input"
+              placeholder="输入关键词查找企业 MCP 服务或工具名称..."
+              value={mcpSearch}
+              onChange={e => setMcpSearch(e.target.value)}
+            />
+            {mcpSearch && (
+              <button
+                type="button"
+                className="s2-command-clear"
+                onClick={() => setMcpSearch('')}
+                title="清除"
+              >
+                ✕
+              </button>
+            )}
+            <button
+              type="button"
+              className="s2-command-btn"
+              onClick={() => {}}
+            >
+              立即检索
+            </button>
+          </div>
+
+          {/* 快捷分类 Pills */}
+          <div className="s2-pills-row">
+            <span className="s2-pills-label">🏷️ 快捷标签：</span>
+            <button
+              type="button"
+              className={`s2-pill ${mcpFilter === 'all' ? 'active' : ''}`}
+              onClick={() => setMcpFilter('all')}
+            >
+              全部 ({services.length})
+            </button>
+            <button
+              type="button"
+              className={`s2-pill ${mcpFilter === 'connected' ? 'active' : ''}`}
+              onClick={() => setMcpFilter('connected')}
+            >
+              已连接 ({connectedCount})
+            </button>
+            <button
+              type="button"
+              className={`s2-pill ${mcpFilter === 'unmounted' ? 'active' : ''}`}
+              onClick={() => setMcpFilter('unmounted')}
+            >
+              未挂载 ({unmountedCount})
+            </button>
+          </div>
+
+          <div className="cards-grid">
+            {filteredServices.map(service => <div key={String(service.service_id)} className="resource-card">
+              <div>
+                <div className="card-header">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div className="card-icon" style={{ background: '#faf5ff', borderColor: '#e9d5ff', color: '#9333ea' }}>🔌</div>
+                    <h3 className="card-title">{String(service.name ?? service.service_id)}</h3>
+                  </div>
+                  {state.mcpConnections?.[String(service.service_id)] && (
+                    <span className={`badge ${state.mcpConnections[String(service.service_id)].state === 'connected' ? 'badge-ok' : ''}`}>
+                      {state.mcpConnections[String(service.service_id)].state === 'connected' ? `已连接 (${state.mcpConnections[String(service.service_id)].toolCount})` : state.mcpConnections[String(service.service_id)].state}
+                    </span>
+                  )}
                 </div>
-                {state.mcpConnections?.[String(service.service_id)] && (
-                  <span className={`badge ${state.mcpConnections[String(service.service_id)].state === 'connected' ? 'badge-ok' : ''}`}>
-                    {state.mcpConnections[String(service.service_id)].state === 'connected' ? `已连接 (${state.mcpConnections[String(service.service_id)].toolCount})` : state.mcpConnections[String(service.service_id)].state}
-                  </span>
+                <p className="card-desc">{String(service.description ?? '')}</p>
+              </div>
+              <div className="card-actions">
+                {state.mountAvailable && (
+                  <button
+                    disabled={busy}
+                    style={state.mountedServices?.includes(String(service.service_id)) ? {} : { background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
+                    onClick={action(() => state.mountedServices?.includes(String(service.service_id))
+                      ? api.unmountMcpService(String(service.service_id), context.contextId)
+                      : api.mountMcpService(String(service.service_id), context.contextId)
+                    )}
+                  >
+                    {state.mountedServices?.includes(String(service.service_id)) ? '取消挂载' : '挂载到 DSH'}
+                  </button>
                 )}
               </div>
-              <p className="card-desc">{String(service.description ?? '')}</p>
-            </div>
-            <div className="card-actions">
-              {state.mountAvailable && (
-                <button
-                  disabled={busy}
-                  onClick={action(() => state.mountedServices?.includes(String(service.service_id))
-                    ? api.unmountMcpService(String(service.service_id), context.contextId)
-                    : api.mountMcpService(String(service.service_id), context.contextId)
-                  )}
-                >
-                  {state.mountedServices?.includes(String(service.service_id)) ? '取消挂载' : '挂载到 DSH'}
-                </button>
-              )}
-            </div>
-            <details style={{ marginTop: 10 }}>
-              <summary style={{ fontSize: 12, color: '#475569', cursor: 'pointer' }}>查看可用工具与调试 ({(Array.isArray(service.tools) ? service.tools : []).length})</summary>
-              <div style={{ marginTop: 8 }}>
-                {(Array.isArray(service.tools) ? service.tools : []).map((tool, i) => (
-                  <div key={i} style={{ borderTop: '1px solid #f1f5f9', paddingTop: 8, marginTop: 8 }}>
-                    <strong>{typeof tool === 'string' ? tool : tool.name}</strong>
-                    {typeof tool !== 'string' && <>
-                      <p style={{ margin: '2px 0 6px', fontSize: 12, color: '#64748b' }}>{tool.description}</p>
-                      {tool.risk && <span className="badge" style={{ marginBottom: 6 }}>{tool.risk === 'read' ? '只读' : tool.risk}{tool.require_approval ? ' · 需审批' : ''}</span>}
-                    </>}
-                    <McpDebug api={api} serviceId={String(service.service_id)} toolName={typeof tool === 'string' ? tool : tool.name} contextId={context.contextId}/>
-                  </div>
-                ))}
-              </div>
-            </details>
-          </div>)}
-        </div>
-      </>}
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>查看可用工具与调试 ({(Array.isArray(service.tools) ? service.tools : []).length})</summary>
+                <div style={{ marginTop: 8 }}>
+                  {(Array.isArray(service.tools) ? service.tools : []).map((tool, i) => (
+                    <div key={i} style={{ borderTop: '1px solid #f1f5f9', paddingTop: 8, marginTop: 8 }}>
+                      <strong>{typeof tool === 'string' ? tool : tool.name}</strong>
+                      {typeof tool !== 'string' && <>
+                        <p style={{ margin: '2px 0 6px', fontSize: 12, color: '#64748b' }}>{tool.description}</p>
+                        {tool.risk && <span className="badge" style={{ marginBottom: 6 }}>{tool.risk === 'read' ? '只读' : tool.risk}{tool.require_approval ? ' · 需审批' : ''}</span>}
+                      </>}
+                      <McpDebug api={api} serviceId={String(service.service_id)} toolName={typeof tool === 'string' ? tool : tool.name} contextId={context.contextId}/>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            </div>)}
+          </div>
+        </>
+      })()}
 
       {kind !== 'apps' && !busy && (kind === 'mcp' ? services.length === 0 : items.length === 0) && (
         <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94a3b8' }}>
