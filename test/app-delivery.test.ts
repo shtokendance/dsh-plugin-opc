@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { EventEmitter } from 'node:events'
 import { AppDelivery, fingerprint, worker } from '../src/host/app-delivery.ts'
+import { AppSkillProvider } from '../src/host/app-skills.ts'
 import { ContextStore } from '../src/host/context.ts'
 import type { OpcCore } from '../src/host/core.ts'
 
@@ -330,6 +331,201 @@ test('propose_file staging, route/storage/credential inspection, and rollback hi
     const afterRb = (await delivery.list(expected))[0]
     assert.equal(afterRb.status, 'verified')
     assert.equal(afterRb.version, 1)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>(r => server.close(() => r()))
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('work-opc full parity: original secret preservation, loopback guard, unconditional storage mounts, single active skill with SKILL.md, local version archive fallback, build failure context, and transient 502 probe retry', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-app-parity-'))
+  let lookupAttempts = 0
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/healthz') {
+      res.end(JSON.stringify({ service: 'parity-app' }))
+      return
+    }
+    lookupAttempts++
+    if (lookupAttempts === 1) {
+      res.statusCode = 502
+      res.end(JSON.stringify({ error: 'bad gateway transient' }))
+      return
+    }
+    res.end(JSON.stringify({ ok: true, items: ['parity'] }))
+  })
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const address = server.address() as { port: number }, url = `http://127.0.0.1:${address.port}`
+  try {
+    const source = join(home, 'source')
+    await mkdir(join(source, 'data'), { recursive: true })
+    await writeFile(join(source, 'data', 'seed.db'), 'sqlite-seed')
+    await writeFile(join(source, 'config.json'), JSON.stringify({ API_SECRET: 'orig-secret-123' }))
+    await writeFile(
+      join(source, 'main.py'),
+      'import os, sqlite3\nDB_PATH = "data/seed.db"\n'
+    )
+    const contexts = new ContextStore(), context = { issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 }
+    contexts.replace(context)
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const storedCreds: Record<string, Record<string, string>> = {}
+    const delivery = new AppDelivery(core, join(home, 'data'), {
+      async read(id) { return storedCreds[id] ?? {} },
+      async write(id, values) { storedCreds[id] = values },
+    })
+    const expected = contexts.applicationContextId!
+
+    let publishedDockerfile = ''
+    let publishedAppConfig: { key: string; value: string }[] = []
+    let publishVersion = 0
+    let deployed: Record<string, any> = {}
+
+    delivery.platform = async (path, _expected, options) => {
+      contexts.captureApplication(_expected)
+      if (path === '/check-slug') return { available: true, app_url: url }
+      if (path === '/publish') {
+        publishVersion++
+        publishedDockerfile = String(options?.form?.get('dockerfile_content') ?? '')
+        publishedAppConfig = JSON.parse(String(options?.form?.get('app_config') ?? '[]'))
+        return { app_url: url, version: publishVersion, status: 'building' }
+      }
+      if (path === '/parity-app/rollback' && options?.method === 'POST') {
+        deployed.current_version = 1
+        deployed.status = 'running'
+        return { slug: 'parity-app', previous_version: 2, current_version: 1, message: 'rolled back to v1' }
+      }
+      if (path.includes('/artifacts/skill.zip')) {
+        throw new Error('404 artifact not on remote')
+      }
+      return deployed
+    }
+
+    const created = await delivery.create({ name: '对齐测试', slug: 'parity-app', source }, 'session', expected)
+    delivery.analyze = async (job, directory, _feedback, signal) => {
+      // Do NOT call scan_routes_and_pages first — verify unconditional enrichment still detects storage_mounts & reports!
+      const p = proposal(url)
+      p.contract.slug = 'parity-app'
+      p.contract.build_context = ['Dockerfile', 'main.py', 'config.json', 'data/seed.db']
+      p.contract.health.json_contains = { service: 'parity-app' }
+      p.changes = [
+        { path: 'Dockerfile', reason: '容器化', content: 'FROM python:3.11-alpine\nCOPY main.py /app.py\nCMD ["python", "/app.py"]\n' },
+        { path: 'config.json', reason: '移除硬编码密钥并改由环境变量注入', content: JSON.stringify({ API_SECRET: '' }) },
+        { path: 'main.py', reason: '环境变量读取配置', content: 'import os, sqlite3\nAPI_SECRET = os.getenv("API_SECRET", "")\nDB_PATH = os.getenv("APP_DATA_DIR", "data") + "/seed.db"\n' },
+      ]
+      // First attempt without configs[].source for modified secret file must be rejected by secret preservation gate
+      p.contract.configs = [
+        { key: 'API_SECRET', default: '', secret: true, required: true, description: '密钥' } as any,
+        { key: 'DATABASE_URL', default: 'postgres://localhost:5432/app', secret: false, required: false, description: '数据库连接' } as any,
+      ]
+      await assert.rejects(delivery.submit(job, directory, p, signal), /原有敏感配置必须保留并通过 source 引用注入/)
+
+      // Now include source locator for API_SECRET
+      p.contract.configs[0] = { key: 'API_SECRET', source: { path: 'config.json', keys: ['API_SECRET'] }, default: '', secret: true, required: true, description: '密钥' } as any
+      await delivery.submit(job, directory, p, signal)
+    }
+
+    await delivery.startAnalysis(created.id, '', expected)
+    for (let i = 0; i < 100; i++) {
+      const state = (await delivery.list(expected))[0]
+      if (state.status !== 'analyzing') break
+      await new Promise(r => setTimeout(r, 20))
+    }
+    const reviewed = (await delivery.list(expected))[0]
+    assert.equal(reviewed.status, 'review', reviewed.error)
+    assert.ok(reviewed.discoveryReport, 'discoveryReport should be unconditionally populated')
+    assert.ok(reviewed.transformationReport, 'transformationReport should be unconditionally populated')
+    assert.ok(Array.isArray(reviewed.proposal.contract.storage_mounts) && reviewed.proposal.contract.storage_mounts.length > 0, 'storage_mounts should be auto-detected from data/seed.db')
+    assert.ok(reviewed.proposal.changes.some((c: any) => c.diff?.includes('--- main.py (原始)')), 'unified diff should be computed for modified files')
+
+    const ready = await delivery.prepare(created.id, reviewed.proposalHash, expected)
+    assert.equal(ready.status, 'ready', ready.error)
+    const secretCfg = ready.proposal.contract.configs.find((c: any) => c.key === 'API_SECRET')
+    assert.equal(secretCfg.has_original_value, true, 'secret config should mark has_original_value=true without exposing secret')
+    assert.equal(secretCfg.default, '', 'secret value must not be exposed in public contract')
+
+    // Loopback guard rejects localhost DATABASE_URL unless local_connection_confirmed is true
+    await assert.rejects(
+      delivery.publish(created.id, {
+        artifactHash: ready.artifactHash,
+        config: [
+          { key: 'API_SECRET', value: '' },
+          { key: 'DATABASE_URL', value: 'postgres://localhost:5432/app' },
+        ],
+      }, expected),
+      /指向应用容器自己/
+    )
+
+    // Confirming local connection and leaving API_SECRET blank auto-fills original secret from source
+    await delivery.publish(created.id, {
+      artifactHash: ready.artifactHash,
+      version_note: 'v1 初始发布',
+      config: [
+        { key: 'API_SECRET', value: '' },
+        { key: 'DATABASE_URL', value: 'postgres://localhost:5432/app', local_connection_confirmed: true },
+      ],
+    }, expected)
+    assert.ok(publishedDockerfile.includes('FROM python:3.11-alpine'), 'dockerfile_content should be uploaded on publish')
+    assert.equal(publishedAppConfig.find(c => c.key === 'API_SECRET')?.value, 'orig-secret-123', 'original secret value should be auto-filled on publish')
+
+    // Simulate container build failure first -> verify records failedRevision and failureContext
+    deployed = { status: 'failed', app_url: url, current_version: 1, error_message: 'pip install failed', build_log: 'ERROR: No matching distribution' }
+    const failedBuild = await delivery.verify(created.id, expected)
+    assert.equal(failedBuild.status, 'failed')
+    assert.match(String(failedBuild.error), /pip install failed/)
+
+    // Now container succeeds and transient 502 on first /lookup probe is automatically retried
+    deployed = {
+      status: 'running',
+      app_url: url,
+      current_version: 1,
+      build_log: ['app.tar', 'skill.zip'].map(name => `[Artifact] ${name}:${ready.hashes[name]}\n`).join(''),
+    }
+    const verifiedV1 = await delivery.verify(created.id, expected)
+    assert.equal(verifiedV1.status, 'verified')
+    assert.ok(lookupAttempts >= 2, 'probe should have retried after first 502 response')
+
+    // Deploy a second job (v2) for the same slug -> v1 is demoted so only one active skill per slug exists
+    deployed.can_manage = true
+    const createdV2 = await delivery.create({ name: '对齐测试 v2', slug: 'parity-app', source, upgrade: true }, 'session', expected)
+    await delivery.startAnalysis(createdV2.id, '', expected)
+    for (let i = 0; i < 100; i++) {
+      const state = (await delivery.list(expected)).find((j: any) => j.id === createdV2.id)
+      if (state?.status !== 'analyzing') break
+      await new Promise(r => setTimeout(r, 20))
+    }
+    const reviewedV2 = (await delivery.list(expected)).find((j: any) => j.id === createdV2.id)
+    const readyV2 = await delivery.prepare(createdV2.id, reviewedV2.proposalHash, expected)
+    await delivery.publish(createdV2.id, {
+      artifactHash: readyV2.artifactHash,
+      config: [{ key: 'API_SECRET', value: '' }],
+    }, expected)
+    deployed = {
+      status: 'running',
+      app_url: url,
+      current_version: 2,
+      build_log: ['app.tar', 'skill.zip'].map(name => `[Artifact] ${name}:${readyV2.hashes[name]}\n`).join(''),
+    }
+    await delivery.verify(createdV2.id, expected)
+
+    const allJobs = await delivery.list(expected)
+    const verifiedJobs = allJobs.filter((j: any) => j.status === 'verified')
+    assert.equal(verifiedJobs.length, 1, 'only one job per slug should remain verified')
+    assert.equal(verifiedJobs[0].id, createdV2.id)
+
+    const abortController = new AbortController()
+    const provider = new AppSkillProvider(delivery, { invalidate() {}, signal: abortController.signal })
+    const candidates = await provider.list({ signal: abortController.signal } as any)
+    assert.equal(candidates.length, 1)
+    const skillDoc = await provider.get(candidates[0], { signal: abortController.signal } as any)
+    assert.ok(skillDoc?.content.includes('## DSH 调用方式'), 'AppSkillProvider should include SKILL.md and DSH invocation guide')
+
+    // Rollback to v1 when remote skill.zip returns 404 falls back to local archived versions/parity-app/v1/skill.zip
+    deployed.build_log = ['app.tar', 'skill.zip'].map(name => `[Artifact] ${name}:${ready.hashes[name]}\n`).join('')
+    const rb = await delivery.rollback('parity-app', 1, '回退到 v1', expected)
+    assert.equal(rb.local_skill_synced, true)
+    assert.equal(rb.local_skill_verified, true)
+    abortController.abort()
   } finally {
     server.closeAllConnections()
     await new Promise<void>(r => server.close(() => r()))
