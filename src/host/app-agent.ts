@@ -18,7 +18,18 @@ function loadBundledSkillText(relativePath: string): string {
   }
 }
 
-function formatToolStep(action: string, path?: string, language?: string): string {
+function normalizeDisplayPath(raw?: string): string {
+  if (!raw) return ''
+  let cleaned = raw.replace(/\\/g, '/')
+  // Remove garbled or redundant top-level directory prefixes
+  cleaned = cleaned.replace(/^[^/]+(?=\/(?:src|bff|app|lib|config|packages|server|client|api|doc|Dockerfile|package\.json))/i, '')
+  // Strip non-ascii and non-chinese path segments (e.g. corrupted zip encoding bytes)
+  cleaned = cleaned.replace(/^[^\s/]*[^\x00-\x7f\u4e00-\u9fa5\s/]+[^\s/]*\/+/g, '')
+  return cleaned.replace(/^\/+/, '') || raw
+}
+
+function formatToolStep(action: string, rawPath?: string, language?: string): string {
+  const path = normalizeDisplayPath(rawPath)
   if (action === 'inventory') return `🔍 正在扫描源码目录结构${path ? ` (${path})` : ''}`
   if (action === 'scan_routes_and_pages') return '🧭 正在全量扫描应用后端 API 路由与前端页面视图'
   if (action === 'read') return path ? `📖 正在深入分析源码文件: ${path}` : '📖 正在读取源码文件'
