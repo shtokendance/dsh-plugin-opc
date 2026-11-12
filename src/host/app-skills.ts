@@ -15,7 +15,14 @@ export class AppSkillProvider implements SkillProvider {
     if (!expected) return []
     const jobs = await this.delivery.list(expected)
     options.signal?.throwIfAborted()
-    return jobs.filter(job => job.status === 'verified').map(job => ({ name: `app-${job.slug}`, description: `[OPC 应用] ${job.name}：${job.proposal?.contract?.description ?? ''}`,
+    const seenSlugs = new Set<string>()
+    const activeVerified = jobs.filter(job => {
+      if (job.status !== 'verified') return false
+      if (seenSlugs.has(job.slug)) return false
+      seenSlugs.add(job.slug)
+      return true
+    })
+    return activeVerified.map(job => ({ name: `app-${job.slug}`, description: `[OPC 应用] ${job.name}：${job.proposal?.contract?.description ?? ''}`,
       source: 'opc-apps', provider: this.name, rank: 350,
       invocation: { modelInvocable: true, userInvocable: true }, locator: { id: job.id, context: expected, version: job.version } }))
   }
@@ -25,7 +32,11 @@ export class AppSkillProvider implements SkillProvider {
     if (job.version !== locator.version) return undefined
     options.signal?.throwIfAborted()
     const contract = job.proposal!.contract
-    return { ...candidate, content: `# ${job.name}\n${contract.description}\n应用地址：${job.url}\n只读业务 API 已验证；页面未验证。\n使用 opc_app_invoke，job_id=${job.id}。参数 JSON 传 params，正文 JSON 传 body；不要直接读取凭据或使用 shell 调用。非只读操作会请求用户批准，失败时不得重复执行结果未知的写操作。\n接口与页面：\n${JSON.stringify({ apis: contract.apis, pages: contract.pages, workflows: contract.workflows }, null, 2)}` }
+    const invokeGuide = `使用 opc_app_invoke，job_id=${job.id}。参数 JSON 传 params，正文 JSON 传 body；不要直接读取凭据或使用 shell 调用。非只读操作会请求用户批准，失败时不得重复执行结果未知的写操作。`
+    const body = job.skillMarkdown?.trim()
+      ? `${job.skillMarkdown.trim()}\n\n## DSH 调用方式\n- ${invokeGuide}\n- 应用地址：${job.url}\n`
+      : `# ${job.name}\n${contract.description}\n应用地址：${job.url}\n只读业务 API 已验证；页面未验证。\n${invokeGuide}\n接口与页面：\n${JSON.stringify({ apis: contract.apis, pages: contract.pages, workflows: contract.workflows }, null, 2)}`
+    return { ...candidate, content: body }
   }
 }
 
