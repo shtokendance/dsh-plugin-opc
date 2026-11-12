@@ -85,6 +85,14 @@ function isLoopbackConnection(key: string, value: string): boolean {
   return /(^|\/\/|@)(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/i.test(value.trim())
 }
 
+function cleanEventText(text: string): string {
+  if (!text) return ''
+  return text
+    .replace(/([:\s])(?:[^\s/]*[^\x00-\x7f\u4e00-\u9fa5\s/]+[^\s/]*(?:\/|\s))+/g, '$1')
+    .replace(/([:\s])([^/:\s]+(?=\/(?:src|bff|app|lib|config|packages|server|client|api|doc|Dockerfile|package\.json)))/gi, '$1')
+    .replace(/:\s+\//g, ': ')
+}
+
 export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: OpcApi; sessionId: string; contextId: string; refreshSignal?: number }) {
   const [catalog, setCatalog] = useState<CatalogApp[]>([])
   const [catalogError, setCatalogError] = useState('')
@@ -105,6 +113,14 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
   const live = useRef(true)
   const [deployment, setDeployment] = useState<{ status: string; current_version: number; build_log?: string; error_message?: string }>()
   const job = jobs.find(j => j.id === selected)
+  const eventsScrollRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (eventsScrollRef.current) {
+      eventsScrollRef.current.scrollTop = eventsScrollRef.current.scrollHeight
+    }
+  }, [job?.events?.length, job?.status])
+  const currentStep = adding ? 1 : !job ? 0 : ['draft', 'analyzing', 'review'].includes(job.status) ? 2 : job.status === 'ready' ? 3 : 4
+
   async function load() {
     const value = JSON.parse(await api.appList(contextId))
     if (live.current) setJobs(value)
@@ -189,34 +205,84 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
     </div>
     {error && <p role="alert" className="error">{error}</p>}
     {notice && <p role="status" className="notice">{notice}</p>}
-    {adding && <form onSubmit={e => { e.preventDefault(); void run(async () => {
-      let zip: string | undefined
-      if (file) {
-        if (file.size > 64 * 1024 * 1024) throw new Error('请选择小于 64 MiB 的 ZIP 文件')
-        zip = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file) })
-      }
-      const parsedPort = containerPort.trim() ? Number(containerPort.trim()) : undefined
-      const created = JSON.parse(await api.appCreate(JSON.stringify({
-        name,
-        slug,
-        description: description.trim() || undefined,
-        container_port: parsedPort && Number.isInteger(parsedPort) ? parsedPort : undefined,
-        source,
-        zip,
-        upgrade: upgrading || undefined,
-      }), sessionId, contextId))
-      setSelected(created.id); setAdding(false); setUpgrading(false)
-    }) }}>
-      <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 650 }}>{upgrading ? `1. 升级已有应用 (${slug})` : '1. 选择要部署的应用'}</h3>
-      <label>应用名称<input required value={name} onChange={e => setName(e.target.value)} placeholder="例如：订单查询助手" /></label>
-      <label>英文标识<input required disabled={upgrading} pattern="[a-z][a-z0-9-]{2,39}" value={slug} onChange={e => setSlug(e.target.value)} placeholder="例如：order-helper" /></label>
-      <label>应用简介（可选）<input value={description} onChange={e => setDescription(e.target.value)} placeholder="简要说明应用业务用途" /></label>
-      <label>容器监听端口（可选，留空由 AI 自动识别）<input type="number" min={1} max={65535} value={containerPort} onChange={e => setContainerPort(e.target.value)} placeholder="例如：8080" /></label>
-      <label>源码 ZIP<input type="file" accept=".zip" onChange={e => setFile(e.target.files?.[0])}/></label>
-      <label>或本机源码文件夹<input disabled={!!file} value={source} onChange={e => setSource(e.target.value)} placeholder="/Users/你的名字/Projects/my-app" /></label>
-      <div className="notice" style={{ margin: '12px 0' }}>系统将在隔离副本中进行分析改造，原项目不受影响；本地扫描依赖本机 Python 3.9+ 环境。</div>
-      <div className="row"><button className="primary" disabled={busy || (!file && !source)}>导入源码</button><button type="button" onClick={() => { setAdding(false); setUpgrading(false) }}>取消</button></div>
-    </form>}
+    {(adding || !!job) && (
+      <div className="wizard-header">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flexWrap: 'wrap' }}>
+            <button className="btn-back" type="button" onClick={() => { setSelected(''); setAdding(false); setUpgrading(false) }}>
+              ← 返回应用列表
+            </button>
+            <span style={{ fontSize: 15, fontWeight: 650, color: '#0f172a' }}>
+              {upgrading ? `升级应用 · ${name || slug}` : job ? `部署应用 · ${job.name}` : '新建并部署应用'}
+            </span>
+            {job && (
+              <span className={`badge ${active.has(job.status) ? 'badge-warn' : job.status === 'failed' ? 'badge-danger' : job.status === 'ready' || job.status === 'verified' ? 'badge-ok' : ''}`}>
+                {active.has(job.status) && <span className="status-dot dot-warn" />}
+                {statusText[job.status] ?? job.status}
+              </span>
+            )}
+          </div>
+          {job?.url && (
+            <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>{job.url}</span>
+          )}
+        </div>
+
+        {/* 4-Step Indicator Tabs */}
+        <div className="stepper-grid">
+          {[
+            { s: 1, title: '1. 选择应用' },
+            { s: 2, title: '2. 与 AI 改造应用' },
+            { s: 3, title: '3. 核对部署内容' },
+            { s: 4, title: '4. 部署与使用' },
+          ].map(({ s, title }) => {
+            const isCurrent = currentStep === s
+            const isCompleted = currentStep > s
+            return (
+              <div key={s} className={`stepper-step ${isCurrent ? 'active' : isCompleted ? 'completed' : 'pending'}`}>
+                {isCompleted ? `✓ ${title.slice(3)}` : title}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )}
+
+    {adding && (
+      <div className="wizard-section-card">
+        <form onSubmit={e => { e.preventDefault(); void run(async () => {
+          let zip: string | undefined
+          if (file) {
+            if (file.size > 64 * 1024 * 1024) throw new Error('请选择小于 64 MiB 的 ZIP 文件')
+            zip = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file) })
+          }
+          const parsedPort = containerPort.trim() ? Number(containerPort.trim()) : undefined
+          const created = JSON.parse(await api.appCreate(JSON.stringify({
+            name,
+            slug,
+            description: description.trim() || undefined,
+            container_port: parsedPort && Number.isInteger(parsedPort) ? parsedPort : undefined,
+            source,
+            zip,
+            upgrade: upgrading || undefined,
+          }), sessionId, contextId))
+          setSelected(created.id); setAdding(false); setUpgrading(false)
+        }) }}>
+          <h3 className="wizard-section-title">{upgrading ? `升级已有应用 (${slug})` : '第一步：选择要部署的应用'}</h3>
+          <label>应用名称<input required value={name} onChange={e => setName(e.target.value)} placeholder="例如：订单查询助手" /></label>
+          <label>英文标识<input required disabled={upgrading} pattern="[a-z][a-z0-9-]{2,39}" value={slug} onChange={e => setSlug(e.target.value)} placeholder="例如：order-helper" /></label>
+          <label>应用简介（可选）<input value={description} onChange={e => setDescription(e.target.value)} placeholder="简要说明应用业务用途" /></label>
+          <label>容器监听端口（可选，留空由 AI 自动识别）<input type="number" min={1} max={65535} value={containerPort} onChange={e => setContainerPort(e.target.value)} placeholder="例如：8080" /></label>
+          <label>源码 ZIP<input type="file" accept=".zip" onChange={e => setFile(e.target.files?.[0])}/></label>
+          <label>或本机源码文件夹<input disabled={!!file} value={source} onChange={e => setSource(e.target.value)} placeholder="/Users/你的名字/Projects/my-app" /></label>
+          <div className="notice" style={{ margin: '14px 0' }}>系统将在隔离副本中进行分析改造，原项目不受影响；本地扫描依赖本机 Python 3.9+ 环境。</div>
+          <div className="row" style={{ marginTop: 16 }}>
+            <button className="primary" disabled={busy || (!file && !source)}>导入源码并开始分析</button>
+            <button type="button" onClick={() => { setAdding(false); setUpgrading(false) }}>取消</button>
+          </div>
+        </form>
+      </div>
+    )}
+
     {!adding && !job && <>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '16px 0 10px' }}>
         <h3 style={{ fontSize: 14, fontWeight: 650, margin: 0, color: '#0f172a' }}>已发布应用</h3>
@@ -471,127 +537,373 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
         </div>
       )}
     </>}
+
     {!adding && job && <>
-      <button onClick={() => setSelected('')}>← 返回应用列表</button><h3 style={{ marginTop: 16 }}>{job.name} <span className="badge">{statusText[job.status]}</span></h3><p>{job.url}</p>
-      
       {job.error && <p className="error">{job.error}</p>}
-      {['draft', 'review', 'failed', 'ready'].includes(job.status) && <>
-        <h3>2. AI 分析与改造</h3>
-        {job.discoveryReport && <p><small>代码扫描：{job.discoveryReport.language || '未知语言'}{job.discoveryReport.framework ? ` / ${job.discoveryReport.framework}` : ''} · API {job.discoveryReport.api_count ?? 0} 个 · 页面 {job.discoveryReport.page_count ?? 0} 个 · 存储目录 {job.discoveryReport.storage_count ?? 0} 处</small></p>}
-        {job.proposal?.summary && <p style={{ whiteSpace: 'pre-wrap' }}>{job.proposal.summary}</p>}
-        {job.transformationReport?.highlights?.length ? <details><summary>改造与验证要点（{job.transformationReport.highlights.length}）</summary><ul>{job.transformationReport.highlights.map((h, i) => <li key={i}>{h}</li>)}</ul></details> : null}
-        {!!issues.length && <details><summary>发现的问题与处理（{issues.length}）</summary><ul>{issues.map((item, i) => <li key={i}><strong>[{item.severity}] {item.title}</strong>：{item.detail}{item.resolution ? `（处理：${item.resolution}）` : ''}</li>)}</ul></details>}
-        {!!decisions.length && <div className="notice">
-          <strong>请确认改造选项</strong>
-          {decisions.map(d => <div key={d.id} style={{ marginTop: 6 }}>
-            <p style={{ margin: '4px 0' }}>{d.question}</p>
-            <div className="row">
-              {d.options.map(opt => <button key={opt.id} type="button" onClick={() => {
-                const line = `关于「${d.question}」：选择「${opt.label}」`
-                setFeedback(prev => prev.trim() ? `${prev.trim()}\n${line}` : line)
-              }}>{opt.label}{opt.recommended ? '（推荐）' : ''}</button>)}
+
+      {/* AI Execution Step Timeline Card */}
+      {(job.events.length > 0 || active.has(job.status)) && (
+        <div className="ai-progress-card">
+          <div className="ai-progress-header">
+            <div className="ai-progress-title">
+              {active.has(job.status) ? (
+                <span className="pulse-indicator">
+                  <span className="pulse-dot-ping" />
+                  <span className="pulse-dot" />
+                </span>
+              ) : job.error ? (
+                <span className="status-dot dot-danger" />
+              ) : (
+                <span className="status-dot dot-ok" />
+              )}
+              <span>
+                {job.status === 'analyzing'
+                  ? 'AI 正在深入分析与改造应用…'
+                  : job.status === 'building'
+                  ? '容器正在构建与部署…'
+                  : job.status === 'verifying'
+                  ? '正在执行业务探针验证…'
+                  : job.error
+                  ? 'AI 改造处理过程中断'
+                  : 'AI 改造处理过程记录'}
+              </span>
             </div>
-          </div>)}
-        </div>}
-        {!!job.proposal?.unresolved?.length && <div className="notice"><strong>需要补充的信息</strong><ul>{job.proposal.unresolved.map((q, i) => <li key={i}>{typeof q === 'string' ? q : JSON.stringify(q)}</li>)}</ul></div>}
-        <textarea aria-label="补充改造要求" value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="可以告诉 AI 应用用途，或回答上面的待确认问题" />
-        <button disabled={disabled} onClick={() => void run(async () => { await api.appAnalyze(job.id, feedback, sessionId, contextId) })}>{job.proposal ? '补充说明并重新分析' : '开始 AI 分析'}</button>
-        {!!job.proposal?.changes?.length && <details><summary>查看拟修改的文件（{job.proposal.changes.length}）</summary>{job.proposal.changes.map(c => <div key={c.path}><p><strong>{c.path}</strong>：{c.reason}</p>{c.diff && <pre style={{ fontSize: 12, overflowX: 'auto' }}>{c.diff}</pre>}</div>)}</details>}
-        {job.status === 'review' && !job.proposal?.unresolved?.length && <button className="primary" disabled={disabled} onClick={() => void run(async () => { await api.appPrepare(job.id, job.proposalHash!, contextId) })}>确认改造方案，生成部署包</button>}
-      </>}
-      {job.status === 'ready' && <>
-        <h3>3. 核对部署内容</h3><p>服务器将构建并运行这个应用。下面的配置仅供应用运行，不会展示给模型。</p>
-        {(job.proposal?.contract.configs ?? []).map(c => {
-          const val = bindings[c.key] ? '' : configs[c.key] ?? ''
-          const loopback = !bindings[c.key] && isLoopbackConnection(c.key, val)
-          return <div key={c.key}>
-            <label>{c.description || c.key} {c.required ? (c.has_original_value ? '（必填 · 已从原项目提取默认值）' : '（必填）') : ''}
-              <input
-                type={c.secret ? 'password' : 'text'}
-                autoComplete="off"
-                disabled={!!bindings[c.key]}
-                placeholder={c.has_original_value ? '已保留原配置值（留空沿用原值）' : undefined}
-                value={val}
-                onChange={e => { setConfigs({ ...configs, [c.key]: e.target.value }); setConfirm(false) }}
-              />
-              {resources.some(r => r.env_keys.includes(c.key)) && <select aria-label={`${c.key} 的配置来源`} value={bindings[c.key] ?? ''} onChange={e => { setBindings({ ...bindings, [c.key]: e.target.value }); setConfirm(false) }}>
-                <option value="">手动填写</option>
-                {resources.filter(r => r.env_keys.includes(c.key)).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-              </select>}
+            <span className="ai-progress-counter">
+              {active.has(job.status)
+                ? `正在执行第 ${job.events.length || 1} 步`
+                : `共完成 ${job.events.length} 个步骤`}
+            </span>
+          </div>
+
+          <div className="events-timeline" ref={eventsScrollRef}>
+            {job.events.length === 0 && active.has(job.status) && (
+              <div className="event-item current">
+                <span className="event-step-badge">⏳</span>
+                <span className="event-text">正在启动 AI 改造引擎与代码扫描沙箱…</span>
+              </div>
+            )}
+            {job.events.map((ev, idx) => {
+              const isLatest = idx === job.events.length - 1
+              const isRunningStep = active.has(job.status) && isLatest
+              const isFailedStep = !active.has(job.status) && !!job.error && isLatest
+              return (
+                <div key={idx} className={`event-item ${isRunningStep ? 'current' : isFailedStep ? 'failed' : 'done'}`}>
+                  <span className="event-step-badge">{isRunningStep ? '▶' : isFailedStep ? '✕' : '✓'}</span>
+                  <span className="event-text">{cleanEventText(ev)}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* STEP 2: 与 AI 改造应用 */}
+      {currentStep === 2 && (
+        <div className="wizard-section-card">
+          <h3 className="wizard-section-title">第二步：AI 分析与改造方案</h3>
+          {job.status === 'analyzing' && (
+            <div className="notice" style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '10px 0' }}>
+              <span className="pulse-indicator"><span className="pulse-dot-ping"/><span className="pulse-dot"/></span>
+              <span>AI 正在深入扫描源码目录、识别业务 API 并规划改造方案。分析完全在独立隔离副本中执行，原项目保持只读不受影响。请稍候…</span>
+            </div>
+          )}
+
+          {job.discoveryReport && (
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px', margin: '10px 0' }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#334155', marginBottom: 4 }}>代码扫描结果</div>
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                语言架构：<strong>{job.discoveryReport.language || '未知语言'}</strong>{job.discoveryReport.framework ? ` / ${job.discoveryReport.framework}` : ''} · API 接口：<strong>{job.discoveryReport.api_count ?? 0}</strong> 个 · 前端页面：<strong>{job.discoveryReport.page_count ?? 0}</strong> 个 · 存储目录：<strong>{job.discoveryReport.storage_count ?? 0}</strong> 处
+              </div>
+            </div>
+          )}
+
+          {job.proposal?.summary && (
+            <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '12px 14px', margin: '12px 0', fontSize: 13, color: '#1e3a8a', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+              {job.proposal.summary}
+            </div>
+          )}
+
+          {job.transformationReport?.highlights?.length ? (
+            <details style={{ margin: '10px 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#334155' }}>
+                改造与验证要点（{job.transformationReport.highlights.length}）
+              </summary>
+              <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
+                {job.transformationReport.highlights.map((h, i) => <li key={i} style={{ margin: '4px 0', fontSize: 12, color: '#475569' }}>{h}</li>)}
+              </ul>
+            </details>
+          ) : null}
+
+          {!!issues.length && (
+            <details style={{ margin: '10px 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#b91c1c' }}>
+                发现的问题与处理（{issues.length}）
+              </summary>
+              <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
+                {issues.map((item, i) => (
+                  <li key={i} style={{ margin: '4px 0', fontSize: 12 }}>
+                    <strong>[{item.severity}] {item.title}</strong>：{item.detail}{item.resolution ? `（处理：${item.resolution}）` : ''}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {!!decisions.length && (
+            <div className="notice" style={{ margin: '12px 0' }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>请确认改造选项</div>
+              {decisions.map(d => (
+                <div key={d.id} style={{ marginTop: 8 }}>
+                  <p style={{ margin: '4px 0', fontWeight: 500 }}>{d.question}</p>
+                  <div className="row" style={{ marginTop: 4 }}>
+                    {d.options.map(opt => (
+                      <button key={opt.id} type="button" disabled={disabled} onClick={() => {
+                        const line = `关于「${d.question}」：选择「${opt.label}」`
+                        setFeedback(prev => prev.trim() ? `${prev.trim()}
+${line}` : line)
+                      }}>
+                        {opt.label}{opt.recommended ? '（推荐）' : ''}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!!job.proposal?.unresolved?.length && (
+            <div className="notice" style={{ background: '#fffbeb', borderColor: '#f59e0b', color: '#92400e', margin: '12px 0' }}>
+              <strong>需要补充的信息</strong>
+              <ul style={{ margin: '6px 0', paddingLeft: 20 }}>
+                {job.proposal.unresolved.map((q, i) => (
+                  <li key={i}>{typeof q === 'string' ? q : JSON.stringify(q)}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {!!job.proposal?.changes?.length && (
+            <details style={{ margin: '12px 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#334155' }}>
+                查看拟修改的文件（{job.proposal.changes.length}）
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                {job.proposal.changes.map(c => (
+                  <div key={c.path} style={{ marginBottom: 10, padding: 8, background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                    <p style={{ margin: '0 0 4px', fontSize: 12 }}><strong>{c.path}</strong>：{c.reason}</p>
+                    {c.diff && <pre style={{ fontSize: 11, maxHeight: 160, overflow: 'auto', background: '#0f172a', color: '#f8fafc', padding: 8, borderRadius: 4 }}>{c.diff}</pre>}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+
+          <div style={{ marginTop: 14 }}>
+            <label style={{ fontWeight: 600, fontSize: 13, color: '#334155', display: 'block', marginBottom: 6 }}>
+              补充改造要求或与 AI 对话
             </label>
-            {loopback && <label className="row" style={{ marginTop: 4 }}>
-              <input style={{ flex: 'none' }} type="checkbox" checked={!!localConfirmed[c.key]} onChange={e => { setLocalConfirmed({ ...localConfirmed, [c.key]: e.target.checked }); setConfirm(false) }} />
-              <small>检测到 {c.key} 指向本机地址（{val}）。只有该服务确实和应用放在同一个容器内时，才勾选保留此连接</small>
-            </label>}
+            <textarea
+              aria-label="补充改造要求"
+              value={feedback}
+              disabled={disabled}
+              onChange={e => setFeedback(e.target.value)}
+              placeholder="可以告诉 AI 应用用途，或回答上面的待确认问题..."
+              style={{ width: '100%', minHeight: 70 }}
+            />
+            <div className="row" style={{ marginTop: 8, justifyContent: 'space-between' }}>
+              <button disabled={disabled} onClick={() => void run(async () => { await api.appAnalyze(job.id, feedback, sessionId, contextId) })}>
+                {job.proposal ? '补充说明并重新分析' : '开始 AI 分析'}
+              </button>
+              {job.status === 'review' && !job.proposal?.unresolved?.length && (
+                <button className="primary" disabled={disabled} onClick={() => void run(async () => { await api.appPrepare(job.id, job.proposalHash!, contextId) })}>
+                  确认改造方案，生成部署包 →
+                </button>
+              )}
+            </div>
           </div>
-        })}
-        {storageMounts.length > 0 && <details open><summary>持久化存储卷挂载（{storageMounts.length}）</summary><ul>
-          {storageMounts.map((m, i) => <li key={i}><code>{m.source_rel}</code> → 容器 <code>{m.target}</code>{m.env_key ? `（环境变量 ${m.env_key}）` : ''}{m.seed !== false ? ' · 自动保留初始种子数据' : ''}</li>)}
-        </ul></details>}
-        <label>版本备注（可选）<input value={versionNote} onChange={e => setVersionNote(e.target.value)} placeholder="例如：修复订单查询接口并挂载 SQLite 数据卷" /></label>
-        <details><summary>部署后 AI 能做什么</summary>{job.proposal?.contract.apis?.map(a => <p key={a.id}>{a.purpose} · {a.method} {a.path}</p>)}{job.proposal?.contract.pages?.map(p => <p key={p.path}>页面：{p.purpose} · {p.path}</p>)}</details>
-        <label className="row"><input style={{ flex: 'none' }} type="checkbox" checked={confirm} onChange={e => setConfirm(e.target.checked)}/>我已核对上述应用、访问地址和配置，确认发布到 OPC</label>
-        <div className="row">
-          <button className="primary" disabled={disabled || !confirm} onClick={() => void run(async () => {
-            await api.appPublish(job.id, JSON.stringify({
-              artifactHash: job.artifactHash,
-              version_note: versionNote.trim() || undefined,
-              config: Object.entries(configs).map(([key, value]) => ({
-                key,
-                value: bindings[key] ? '' : value,
-                resource_id: bindings[key] || undefined,
-                local_connection_confirmed: localConfirmed[key] || undefined,
-              })),
-            }), contextId)
-            setConfigs({}); setConfirm(false); await loadCatalog()
-          })}>确认发布</button>
-          {api.appReopenReview && <button type="button" disabled={disabled} onClick={() => void run(async () => { await api.appReopenReview!(job.id, contextId) })}>返回调整方案</button>}
         </div>
-      </>}
-      {['building', 'unknown', 'awaiting_page_verification', 'failed', 'verified'].includes(job.status) && job.artifactHash && <>
-        <h3>4. 部署验证与使用</h3>
-        {deployment && <p role="status">服务器状态：{deployment.status === 'running' ? '已启动' : deployment.status === 'failed' ? '部署失败' : '正在构建'} · v{deployment.current_version}</p>}
-        {deployment?.error_message && <p className="error">{deployment.error_message}</p>}
-        {requiredAuthKeys.length > 0 && job.status !== 'verified' && <details open={job.status === 'failed'}>
-          <summary>验证凭据（可选，用于受保护接口探针或更新存储凭据）</summary>
-          {requiredAuthKeys.map(k => <label key={k}>{k}<input type="password" autoComplete="off" value={probeCredentials[k] ?? ''} onChange={e => setProbeCredentials({ ...probeCredentials, [k]: e.target.value })} placeholder="留空则使用部署时保存的凭据" /></label>)}
-        </details>}
-        <div className="row">
-          <button disabled={disabled} onClick={() => void run(async () => {
-            const nonEmptyCreds = Object.fromEntries(Object.entries(probeCredentials).filter(([, v]) => v.trim() !== ''))
-            if (Object.keys(nonEmptyCreds).length > 0 && api.appVerifyWithOptions) {
-              await api.appVerifyWithOptions(job.id, JSON.stringify({ credentials: nonEmptyCreds }), contextId)
-            } else {
-              await api.appVerify(job.id, contextId)
-            }
-          })}>检查部署并验证业务</button>
-          {api.appRecheck && <button disabled={busy} onClick={() => void run(async () => { await api.appRecheck!(job.slug, contextId) })}>健康重检</button>}
-          <button disabled={busy} onClick={() => void run(async () => { const remote = JSON.parse(await api.appDetails(job.slug, contextId)); setLogs(remote.build_log || remote.error_message || '暂无日志') })}>查看构建日志</button>
-          {api.appLogs && <button disabled={busy} onClick={() => void run(async () => { const remote = JSON.parse(await api.appLogs!(job.slug, contextId)); setLogs(remote.runtime_logs || '暂无运行日志') })}>查看运行日志</button>}
-          {(job.status === 'failed' || deployment?.status === 'failed') && <button className="primary" disabled={disabled} onClick={() => void run(async () => {
-            const diagParts = [
-              '部署或业务验证失败，请根据错误原因、构建日志和运行日志诊断问题并修复改造方案：',
-              job.error ? `错误摘要：${job.error}` : '',
-              deployment?.error_message ? `平台错误：${deployment.error_message}` : '',
-              feedback.trim() ? `补充说明：${feedback.trim()}` : '',
-            ].filter(Boolean)
-            await api.appAnalyze(job.id, diagParts.join('\n'), sessionId, contextId)
-          })}>AI 诊断并修复失败</button>}
+      )}
+
+      {/* STEP 3: 核对部署内容 */}
+      {currentStep === 3 && (
+        <div className="wizard-section-card">
+          <h3 className="wizard-section-title">第三步：核对部署配置与存储</h3>
+          <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 14px' }}>
+            服务器将构建并运行这个应用。下面的配置仅供应用运行，不会暴露给模型。
+          </p>
+
+          {(job.proposal?.contract.configs ?? []).map(c => {
+            const val = bindings[c.key] ? '' : configs[c.key] ?? ''
+            const loopback = !bindings[c.key] && isLoopbackConnection(c.key, val)
+            return (
+              <div key={c.key} style={{ marginBottom: 12, padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                <label style={{ margin: 0, fontWeight: 500 }}>
+                  {c.description || c.key} {c.required ? (c.has_original_value ? '（必填 · 已从原项目提取默认值）' : '（必填）') : ''}
+                  <input
+                    type={c.secret ? 'password' : 'text'}
+                    autoComplete="off"
+                    disabled={!!bindings[c.key]}
+                    placeholder={c.has_original_value ? '已保留原配置值（留空沿用原值）' : undefined}
+                    value={val}
+                    onChange={e => { setConfigs({ ...configs, [c.key]: e.target.value }); setConfirm(false) }}
+                    style={{ marginTop: 6 }}
+                  />
+                  {resources.some(r => r.env_keys.includes(c.key)) && (
+                    <select aria-label={`${c.key} 的配置来源`} value={bindings[c.key] ?? ''} onChange={e => { setBindings({ ...bindings, [c.key]: e.target.value }); setConfirm(false) }} style={{ marginTop: 6, width: '100%' }}>
+                      <option value="">手动填写</option>
+                      {resources.filter(r => r.env_keys.includes(c.key)).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  )}
+                </label>
+                {loopback && (
+                  <label className="row" style={{ marginTop: 6, fontSize: 12, color: '#d97706' }}>
+                    <input style={{ flex: 'none' }} type="checkbox" checked={!!localConfirmed[c.key]} onChange={e => { setLocalConfirmed({ ...localConfirmed, [c.key]: e.target.checked }); setConfirm(false) }} />
+                    <span>检测到 {c.key} 指向本机地址（{val}）。只有该服务确实和应用部署在同一容器网络内时才勾选。</span>
+                  </label>
+                )}
+              </div>
+            )
+          })}
+
+          {storageMounts.length > 0 && (
+            <div style={{ margin: '14px 0', padding: 12, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#334155', marginBottom: 6 }}>持久化存储卷挂载（{storageMounts.length}）</div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                {storageMounts.map((m, i) => (
+                  <li key={i} style={{ margin: '4px 0' }}>
+                    <code>{m.source_rel}</code> → 容器 <code>{m.target}</code>{m.env_key ? `（环境变量 ${m.env_key}）` : ''}{m.seed !== false ? ' · 自动保留初始种子数据' : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div style={{ marginTop: 12 }}>
+            <label style={{ fontWeight: 500, fontSize: 13, display: 'block', marginBottom: 4 }}>
+              版本备注（可选）
+            </label>
+            <input
+              value={versionNote}
+              onChange={e => setVersionNote(e.target.value)}
+              placeholder="例如：新增订单导出接口并挂载数据卷"
+            />
+          </div>
+
+          <details style={{ margin: '12px 0' }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12, color: '#245c9f' }}>
+              查看部署后 AI 可使用的业务技能接口（{((job.proposal?.contract.apis?.length ?? 0) + (job.proposal?.contract.pages?.length ?? 0))}）
+            </summary>
+            <div style={{ marginTop: 6, fontSize: 12, color: '#64748b' }}>
+              {job.proposal?.contract.apis?.map(a => <p key={a.id} style={{ margin: '3px 0' }}>• 接口：{a.purpose} · <code>{a.method} {a.path}</code></p>)}
+              {job.proposal?.contract.pages?.map(p => <p key={p.path} style={{ margin: '3px 0' }}>• 页面：{p.purpose} · <code>{p.path}</code></p>)}
+            </div>
+          </details>
+
+          <label className="row" style={{ marginTop: 14, fontSize: 12 }}>
+            <input style={{ flex: 'none' }} type="checkbox" checked={confirm} onChange={e => setConfirm(e.target.checked)}/>
+            <span>我已核对上述应用配置与存储卷挂载，确认发布到 OPC</span>
+          </label>
+
+          <div className="row" style={{ marginTop: 14 }}>
+            <button className="primary" disabled={disabled || !confirm} onClick={() => void run(async () => {
+              await api.appPublish(job.id, JSON.stringify({
+                artifactHash: job.artifactHash,
+                version_note: versionNote.trim() || undefined,
+                config: Object.entries(configs).map(([key, value]) => ({
+                  key,
+                  value: bindings[key] ? '' : value,
+                  resource_id: bindings[key] || undefined,
+                  local_connection_confirmed: localConfirmed[key] || undefined,
+                })),
+              }), contextId)
+              setConfigs({}); setConfirm(false); await loadCatalog()
+            })}>确认发布到 OPC</button>
+            {api.appReopenReview && (
+              <button type="button" disabled={disabled} onClick={() => void run(async () => { await api.appReopenReview!(job.id, contextId) })}>
+                返回调整方案
+              </button>
+            )}
+          </div>
         </div>
-        {job.status === 'awaiting_page_verification' && <div className="notice">
-          <p>容器已启动并通过健康身份校验。纯页面应用请先打开页面完成人工验收，确认正常渲染后启用技能：</p>
-          <div className="row">
-            <a href={job.url} target="_blank" rel="noreferrer">打开应用页面</a>
+      )}
+
+      {/* STEP 4: 部署验证与使用 */}
+      {currentStep === 4 && (
+        <div className="wizard-section-card">
+          <h3 className="wizard-section-title">第四步：部署验证与使用</h3>
+          {deployment && (
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px', margin: '10px 0', fontSize: 12 }}>
+              服务器状态：<strong>{deployment.status === 'running' ? '● 已启动并运行' : deployment.status === 'failed' ? '● 部署失败' : '● 正在构建中'}</strong> · 版本：<strong>v{deployment.current_version}</strong>
+            </div>
+          )}
+          {deployment?.error_message && <p className="error">{deployment.error_message}</p>}
+
+          {requiredAuthKeys.length > 0 && job.status !== 'verified' && (
+            <details open={job.status === 'failed'} style={{ margin: '10px 0' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 12 }}>验证凭据（可选，用于受保护接口探针或更新存储凭据）</summary>
+              <div style={{ marginTop: 6 }}>
+                {requiredAuthKeys.map(k => (
+                  <label key={k} style={{ fontSize: 12, display: 'block', margin: '6px 0' }}>
+                    {k}
+                    <input type="password" autoComplete="off" value={probeCredentials[k] ?? ''} onChange={e => setProbeCredentials({ ...probeCredentials, [k]: e.target.value })} placeholder="留空则使用部署时保存的凭据" style={{ marginTop: 4 }} />
+                  </label>
+                ))}
+              </div>
+            </details>
+          )}
+
+          <div className="row" style={{ marginTop: 12 }}>
             <button className="primary" disabled={disabled} onClick={() => void run(async () => {
-              if (api.appVerifyWithOptions) await api.appVerifyWithOptions(job.id, JSON.stringify({ confirmPageVerification: true }), contextId)
-              else await api.appVerify(job.id, contextId)
-            })}>已完成页面验收，启用技能</button>
+              const nonEmptyCreds = Object.fromEntries(Object.entries(probeCredentials).filter(([, v]) => v.trim() !== ''))
+              if (Object.keys(nonEmptyCreds).length > 0 && api.appVerifyWithOptions) {
+                await api.appVerifyWithOptions(job.id, JSON.stringify({ credentials: nonEmptyCreds }), contextId)
+              } else {
+                await api.appVerify(job.id, contextId)
+              }
+            })}>检查部署并验证业务</button>
+            {api.appRecheck && <button disabled={busy} onClick={() => void run(async () => { await api.appRecheck!(job.slug, contextId) })}>健康重检</button>}
+            <button disabled={busy} onClick={() => void run(async () => { const remote = JSON.parse(await api.appDetails(job.slug, contextId)); setLogs(remote.build_log || remote.error_message || '暂无日志') })}>查看构建日志</button>
+            {api.appLogs && <button disabled={busy} onClick={() => void run(async () => { const remote = JSON.parse(await api.appLogs!(job.slug, contextId)); setLogs(remote.runtime_logs || '暂无运行日志') })}>查看运行日志</button>}
+            {(job.status === 'failed' || deployment?.status === 'failed') && (
+              <button style={{ color: '#dc2626', borderColor: '#fca5a5' }} disabled={disabled} onClick={() => void run(async () => {
+                const diagParts = [
+                  '部署或业务验证失败，请根据错误原因、构建日志和运行日志诊断问题并修复改造方案：',
+                  job.error ? `错误摘要：${job.error}` : '',
+                  deployment?.error_message ? `平台错误：${deployment.error_message}` : '',
+                  feedback.trim() ? `补充说明：${feedback.trim()}` : '',
+                ].filter(Boolean)
+                await api.appAnalyze(job.id, diagParts.join('\n'), sessionId, contextId)
+              })}>AI 诊断并修复失败</button>
+            )}
           </div>
-        </div>}
-        {job.status === 'verified' && (!deployment || (deployment.status === 'running' && deployment.current_version === job.version)) && <div className="notice">应用只读业务验证已通过。回到对话框输入 <strong>/app-{job.slug}</strong> 选择技能，然后描述要查询的内容。写入操作仍需确认。<p>页面操作尚未验证。<a href={job.url} target="_blank" rel="noreferrer">打开应用页面</a></p></div>}
-        {logs && <pre>{logs}</pre>}
-      </>}
-      <details open={active.has(job.status)}><summary>任务进度</summary><ol>{job.events.map((event, i) => <li key={i}>{event}</li>)}</ol></details>
+
+          {job.status === 'awaiting_page_verification' && (
+            <div className="notice" style={{ marginTop: 14 }}>
+              <p style={{ margin: '0 0 8px' }}>容器已启动并通过健康身份校验。纯页面应用请先打开页面完成人工验收，确认正常渲染后启用技能：</p>
+              <div className="row">
+                <a href={job.url} target="_blank" rel="noreferrer" className="btn-link">打开应用页面</a>
+                <button className="primary" disabled={disabled} onClick={() => void run(async () => {
+                  if (api.appVerifyWithOptions) await api.appVerifyWithOptions(job.id, JSON.stringify({ confirmPageVerification: true }), contextId)
+                  else await api.appVerify(job.id, contextId)
+                })}>已完成页面验收，启用技能</button>
+              </div>
+            </div>
+          )}
+
+          {job.status === 'verified' && (!deployment || (deployment.status === 'running' && deployment.current_version === job.version)) && (
+            <div className="notice" style={{ background: '#ecfdf5', borderColor: '#10b981', color: '#065f46', marginTop: 14 }}>
+              <strong>✓ 应用只读业务验证已通过，技能已成功就绪！</strong>
+              <p style={{ margin: '6px 0 0' }}>回到对话框输入 <strong>/app-{job.slug}</strong> 即可唤起专属应用技能，让 AI 调用业务接口。页面操作尚未验证。<a href={job.url} target="_blank" rel="noreferrer" style={{ marginLeft: 8, color: '#047857', fontWeight: 600 }}>打开应用页面 →</a></p>
+            </div>
+          )}
+
+          {logs && (
+            <pre style={{ marginTop: 14, maxHeight: 220, overflow: 'auto', background: '#0f172a', color: '#f8fafc', padding: 10, borderRadius: 6, fontSize: 11 }}>
+              {logs}
+            </pre>
+          )}
+        </div>
+      )}
     </>}
     <style>{`.opc-apps label{display:block;margin:12px 0}.opc-apps label input:not([type=checkbox]){box-sizing:border-box;display:block;width:100%;margin:5px 0}.opc-apps textarea{box-sizing:border-box;width:100%;min-height:90px;margin:10px 0}.opc-apps button{margin:4px 0}.opc-apps a{color:#245c9f}`}</style>
   </div>

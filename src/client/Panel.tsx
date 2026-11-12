@@ -325,6 +325,182 @@ const css = `
   border-radius: 8px;
   font-size: 12px;
 }
+
+/* Stepper & Wizard UI */
+.wizard-header {
+  margin-bottom: 16px;
+}
+.btn-back {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+.btn-back:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.stepper-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+.stepper-step {
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  text-align: center;
+  font-weight: 500;
+  border: 1px solid #e2e8f0;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stepper-step.active {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(37,99,235,0.08);
+}
+.stepper-step.completed {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+.stepper-step.pending {
+  background: #f8fafc;
+  color: #94a3b8;
+  border-color: #e2e8f0;
+}
+
+/* AI Execution Progress Card (matching work-opc) */
+.ai-progress-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px;
+  margin: 14px 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+}
+.ai-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+.ai-progress-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+}
+.ai-progress-counter {
+  font-size: 11px;
+  color: #64748b;
+  font-family: monospace;
+}
+.pulse-indicator {
+  position: relative;
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+}
+.pulse-dot-ping {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: #2563eb;
+  opacity: 0.75;
+  animation: opc-ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.pulse-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2563eb;
+}
+@keyframes opc-ping {
+  0% { transform: scale(1); opacity: 0.8; }
+  75%, 100% { transform: scale(2.2); opacity: 0; }
+}
+.events-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scroll-behavior: smooth;
+}
+.event-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  transition: all 0.15s ease;
+}
+.event-item.done {
+  background: #f8fafc;
+  color: #475569;
+  border: 1px solid #f1f5f9;
+}
+.event-item.current {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(37,99,235,0.06);
+}
+.event-item.failed {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  font-weight: 500;
+}
+.event-step-badge {
+  font-size: 11px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+.event-text {
+  flex: 1;
+  word-break: break-all;
+}
+
+/* Card-style Sections inside Wizard */
+.wizard-section-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 16px;
+  margin: 14px 0;
+}
+.wizard-section-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: #0f172a;
+  margin: 0 0 10px;
+}
 `
 
 export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string; kind: PanelKind }) {
