@@ -13,6 +13,9 @@ import { OpcCore } from './host/core.ts'
 import { EnterpriseSkillProvider } from './host/skill-provider.ts'
 import { OpcRemoteService } from './host/remote-service.ts'
 import { registerTools } from './host/tools.ts'
+import { AppDelivery } from './host/app-delivery.ts'
+import { attachAppAgent } from './host/app-agent.ts'
+import { AppSkillProvider, registerAppTools } from './host/app-skills.ts'
 
 export const name = 'dsh-plugin-opc'
 export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert']
@@ -32,7 +35,19 @@ export function apply(ctx: Context, config: Config): void {
     async delete() { await ctx.credentials.deleteRecord(key) },
   }, async url => { await open(url) }, config.clientId)
   const core = new OpcCore(auth, config.dataHome || resolveDshHome())
-  ctx.plugin(OpcRemoteService, core)
+  const delivery = new AppDelivery(core, config.dataHome || resolveDshHome(), {
+    async read(id) {
+      const record = await ctx.credentials.readRecord(credentialKey(name, `app-${id}`))
+      return record?.kind === 'grant' ? record.payload as Record<string, string> : {}
+    },
+    async write(id, payload) {
+      await ctx.credentials.modifyRecord(credentialKey(name, `app-${id}`), async () => ({ kind: 'grant', payload }))
+    },
+  })
+  ctx.plugin(OpcRemoteService, { core, delivery })
+  ctx.inject(['systemPrompt'], child => attachAppAgent(child, delivery))
+  ctx.effect(() => ctx.skills.registerProvider(control => new AppSkillProvider(delivery, control)))
+  registerAppTools(ctx, delivery)
   // Native slash UI caches catalogs and observes the public composition event,
   // not the Host-only skills/change event. Bridge this plugin's inventory changes
   // through that public notification; do not patch native caches or UI sources.

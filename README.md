@@ -215,6 +215,14 @@ MCP 是公司开放给 AI 的业务工具入口，例如查商品价格。下面
 | AI 一直问 service_id | 请公司管理员提供准确服务 ID。当前聊天工具需要这个字段。 |
 | MCP 返回 INTEGRATION_ARGS_KEY_REQUIRED | 把错误截图发给平台管理员处理；稍后再试，避免反复提交同一次操作。 |
 
+## OPC 应用部署
+
+从已打开的 DSH 对话进入右侧的 **OPC 应用**，选择 **部署新应用**，导入源码 ZIP 或填写本机源码目录。AI 在独立副本上分析和提出容器改造。核对文件改动后生成部署包，再填写运行配置、按字段选择 Platform 开放的资源，并确认发布。
+
+服务器启动后，点击 **检查部署并验证业务**。应用版本、制品摘要、健康身份和只读业务验证都通过后，在对话框输入 `/app-<应用标识>` 选择技能。应用页面可独立打开核验。普通 HTTP/JSON 接口可作为技能调用，写操作会触发 DSH 审批。
+
+需要支持 `/integration/v1/apps` 的 Platform。企微登录后即可部署，所有登录用户共享应用列表。部署资源由 Platform 的 `app_deploy.enterprise_deploy_resources` 配置提供。建议先在测试空间用专用资源验证。DSH Desktop 使用自带 Python，独立 Web 运行需在 PATH 提供 Python 3.9 或更新版本。
+
 ## 给管理员和开发者
 
 插件通过公开接口接入 DSH。企业认证使用独立凭据命名空间，OPC 服务地址由 `platformBaseUrl` 配置。默认域名是 `https://shtokendance.benlai.com`。参见[配置示例](config/overlay.example.yml)、[一期验收记录](docs/acceptance-matrix.md)。

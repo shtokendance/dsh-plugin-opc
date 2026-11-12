@@ -25,6 +25,15 @@ function registerPanels(ctx: Context): void {
     return value.value
   }
   const api: OpcApi = {
+    appCatalog: (...args) => unwrap(wire.appCatalog(...args)),
+    appList: (...args) => unwrap(wire.appList(...args)),
+    appCreate: (...args) => unwrap(wire.appCreate(...args)),
+    appAnalyze: (...args) => unwrap(wire.appAnalyze(...args)),
+    appPrepare: (...args) => unwrap(wire.appPrepare(...args)),
+    appPublish: (...args) => unwrap(wire.appPublish(...args)),
+    appVerify: (...args) => unwrap(wire.appVerify(...args)),
+    appResources: (...args) => unwrap(wire.appResources(...args)),
+    appDetails: (...args) => unwrap(wire.appDetails(...args)),
     state: () => unwrap(wire.state()),
     watchState: signal => wire.watchState(signal),
     startLogin: () => unwrap(wire.startLogin()),
@@ -46,7 +55,7 @@ function registerPanels(ctx: Context): void {
     decideDebugInvocation: (...args) => unwrap(wire.decideDebugInvocation(...args)),
   }
   ctx.inject(['inputTriggers'], child => registerMentions(child, api))
-  for (const [index, kind] of (['knowledge', 'skills', 'mcp'] as const).entries()) {
+  for (const [index, kind] of (['knowledge', 'skills', 'mcp', 'apps'] as const).entries()) {
     const id = `@opc/dsh-plugin-opc/${kind}`
     ctx.effect(() => ctx.sidebarRightTabs.register({ id, kind: `opc-${kind}`, priority: 'extension', title: () => labels[kind], guide: [{ id: `opc-${kind}`, order: 10 + index, icon: OpcIcon, title: () => labels[kind], description: () => 'OPC 工作空间' }] }))
     ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {labels[kind]}</>)))
