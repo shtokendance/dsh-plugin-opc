@@ -221,3 +221,118 @@ test('idempotent publish reconciliation, pure-page verification, reopenReview, u
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('propose_file staging, route/storage/credential inspection, and rollback historical skill.zip sync', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-app-align-'))
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify(req.url === '/healthz' ? { service: 'align-app' } : { ok: true, items: ['a'] }))
+  })
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const address = server.address() as { port: number }, url = `http://127.0.0.1:${address.port}`
+  try {
+    const source = join(home, 'source')
+    await mkdir(source)
+    await writeFile(join(source, 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n@app.get("/items")\ndef list_items():\n    return {"ok": True}\n')
+    const contexts = new ContextStore(), context = { issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 }
+    contexts.replace(context)
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, join(home, 'data'), { async read() { return {} }, async write() {} })
+    const expected = contexts.applicationContextId!
+
+    let v1SkillZipBytes: Buffer | undefined
+    let v1Hashes: Record<string, string> = {}
+    let deployed: Record<string, any> = {}
+
+    delivery.platform = async (path, _expected, options) => {
+      contexts.captureApplication(_expected)
+      if (path === '/check-slug') return { available: true, app_url: url }
+      if (path === '/publish') return { app_url: url, version: 1, status: 'building' }
+      if (path === '/align-app/rollback' && options?.method === 'POST') {
+        deployed.current_version = 1
+        deployed.config_fingerprint = 'fp-v1'
+        deployed.build_log = ['app.tar', 'skill.zip'].map(name => `[Artifact] ${name}:${v1Hashes[name]}\n`).join('')
+        return {
+          slug: 'align-app',
+          previous_version: 2,
+          current_version: 1,
+          config_fingerprint: 'fp-v1',
+          skill_zip_sha256: v1Hashes['skill.zip'],
+          version: {
+            version: 1,
+            app_tar_sha256: v1Hashes['app.tar'],
+            skill_zip_sha256: v1Hashes['skill.zip'],
+          },
+        }
+      }
+      if (path === '/align-app/versions/1/artifacts/skill.zip') {
+        return { bytes: v1SkillZipBytes, sha256: v1Hashes['skill.zip'] }
+      }
+      return deployed
+    }
+
+    const created = await delivery.create({ name: '对齐应用', slug: 'align-app', source }, 'session', expected)
+    let jobDir = ''
+    delivery.analyze = async (job, directory, _feedback, signal) => {
+      jobDir = directory
+      const scanned = await worker({ root: directory, action: 'scan_routes_and_pages' })
+      assert.ok(Array.isArray(scanned.apis))
+      const storageInfo = await worker({ root: directory, action: 'inspect_local_storage' })
+      assert.ok(storageInfo)
+      const credInfo = await worker({ root: directory, action: 'inspect_credentials' })
+      assert.ok(credInfo)
+
+      const staged = await worker({
+        root: directory,
+        action: 'propose_file',
+        id: 'df-1',
+        path: 'Dockerfile',
+        reason: '容器化启动',
+        content: 'FROM python:3.11-alpine\nCOPY main.py /app.py\nCMD ["python", "/app.py"]\n',
+      })
+      assert.equal(staged.staged, 'df-1')
+
+      const p = proposal(url)
+      p.contract.slug = 'align-app'
+      p.contract.health.json_contains = { service: 'align-app' }
+      p.contract.apis = [{ id: 'items', method: 'GET', path: '/items', purpose: '列表', evidence: ['main.py:3'], parameters: [], request_body: null, responses: { '200': { description: 'ok' } }, auth: { type: 'none' }, effect: 'read', confirmation_required: false }]
+      p.contract.verification = { cases: [{ operation: 'items', json_contains: { ok: true } }] }
+      // Reference staged file by id without repeating content!
+      p.changes = [{ id: 'df-1', path: 'Dockerfile', reason: '容器化启动' } as any]
+      await delivery.submit(job, directory, p, signal)
+    }
+
+    await delivery.startAnalysis(created.id, '', expected)
+    for (let i = 0; i < 100; i++) {
+      const state = (await delivery.list(expected))[0]
+      if (state.status !== 'analyzing') break
+      await new Promise(r => setTimeout(r, 20))
+    }
+    const reviewed = (await delivery.list(expected))[0]
+    assert.equal(reviewed.status, 'review', reviewed.error)
+    const ready = await delivery.prepare(created.id, reviewed.proposalHash, expected)
+    assert.equal(ready.status, 'ready', ready.error)
+    v1Hashes = ready.hashes
+    v1SkillZipBytes = await readFile(join(jobDir, ready.revision, 'bundle/skill.zip'))
+
+    await delivery.publish(created.id, { artifactHash: ready.artifactHash, config: [] }, expected)
+    deployed = {
+      status: 'running',
+      app_url: url,
+      current_version: 2,
+      config_fingerprint: 'fp-v2',
+      build_log: '[Artifact] app.tar:other\n[Artifact] skill.zip:other\n',
+    }
+    // Simulate local job had different hashes before rollback to v1
+    const rb = await delivery.rollback('align-app', 1, '恢复 v1', expected)
+    assert.equal(rb.local_skill_synced, true)
+    assert.equal(rb.local_skill_verified, true)
+    const afterRb = (await delivery.list(expected))[0]
+    assert.equal(afterRb.status, 'verified')
+    assert.equal(afterRb.version, 1)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>(r => server.close(() => r()))
+    await rm(home, { recursive: true, force: true })
+  }
+})

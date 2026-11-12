@@ -175,7 +175,7 @@ export class AppDelivery {
     }
   }
   async platform(path: string, expected: string, options: { method?: string; body?: unknown; form?: FormData; query?: Record<string, string> } = {}): Promise<any> {
-    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|[a-z][a-z0-9-]*(?:\/(?:logs|versions|storage(?:\/backup)?|recheck|rollback|config|requests\/[A-Za-z0-9_-]+))?)?$/.test(path)) throw new Error('不支持的应用操作')
+    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/*[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json))?|storage(?:\/backup)?|recheck|verify|rollback|migrate-data|config|requests\/[A-Za-z0-9_-]+))?)?$/.test(path)) throw new Error('不支持的应用操作')
     const scope = this.scope(expected)
     const token = await this.core.auth.token(); scope.assertCurrent()
     const url = new URL('/integration/v1/apps' + (path === '/' ? '' : path), this.core.auth.http.base)
@@ -186,6 +186,11 @@ export class AppDelivery {
       signal: AbortSignal.any([scope.signal, AbortSignal.timeout(options.form ? 180_000 : 30_000)]) })
     scope.assertCurrent()
     if (response.status === 404 && ['/', '/check-slug', '/resources'].includes(path)) throw new AppRequestError(404, '测试服尚未启用企业应用部署接口，需要发布配套 Platform 版本')
+    const contentType = response.headers.get('content-type') ?? ''
+    if (response.ok && (path.endsWith('/skill.zip') || path.endsWith('/app.tar') || contentType.includes('application/zip') || contentType.includes('application/octet-stream'))) {
+      const ab = await response.arrayBuffer()
+      return { bytes: Buffer.from(ab), sha256: response.headers.get('x-artifact-sha256') ?? undefined }
+    }
     const result = await response.json().catch(() => { throw new AppRequestError(response.status, `应用接口 HTTP ${response.status}`) })
     if (!response.ok) throw new AppRequestError(response.status, result.error?.message ?? result.error ?? `应用接口 HTTP ${response.status}`)
     return result
@@ -288,11 +293,19 @@ export class AppDelivery {
     if (proposal.contract?.slug !== job.slug || proposal.contract?.base_url !== job.url) throw new Error('应用标识或地址与导入时不一致')
     if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
     if (!Array.isArray(proposal.unresolved)) throw new Error('unresolved 必须为数组')
-    if (!proposal.unresolved.length) await worker({ action: 'validate', root, proposal }, signal)
+    const validated = await worker({
+      action: 'validate',
+      root,
+      proposal,
+      allow_unresolved: Boolean(proposal.unresolved.length),
+      repair: Boolean(job.failedRevision),
+      failed_revision: job.failedRevision ?? '',
+      failure_feedback: job.failureContext ?? '',
+    }, signal)
     signal.throwIfAborted(); if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-    job.proposal = proposal
+    job.proposal = validated?.proposal ?? proposal
     job.status = 'review'
-    job.events.push(proposal.unresolved.length ? 'AI 分析完成，请回答待确认事项' : '方案校验通过，请核对改造内容并生成部署包')
+    job.events.push(job.proposal!.unresolved.length ? 'AI 分析完成，请回答待确认事项' : '方案校验通过，请核对改造内容并生成部署包')
   }
   async prepare(id: string, proposalHash: string, expected: string) {
     const scope = this.scope(expected)
@@ -302,7 +315,15 @@ export class AppDelivery {
       job.status = 'preparing'; job.error = undefined; await this.save(root, job)
       try {
         const revision = randomUUID().replaceAll('-', '')
-        const result = await worker({ action: 'bundle', root, revision, proposal: job.proposal }, scope.signal)
+        const result = await worker({
+          action: 'bundle',
+          root,
+          revision,
+          proposal: job.proposal,
+          repair: Boolean(job.failedRevision),
+          failed_revision: job.failedRevision ?? '',
+          failure_feedback: job.failureContext ?? '',
+        }, scope.signal)
         scope.assertCurrent(); job.revision = revision; job.hashes = result.summary.files; job.status = 'ready'; job.version = undefined; job.published = undefined; job.requestId = randomUUID().replaceAll('-', '')
         job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
       } catch (error) { job.status = 'failed'; job.error = String(error) }
@@ -349,7 +370,7 @@ export class AppDelivery {
         if (hash(bytes) !== job.hashes?.[name]) throw new Error('制品摘要不一致，拒绝发布')
         form.append(name === 'app.tar' ? 'app_tar' : 'skill_zip', new Blob([new Uint8Array(bytes)]), name)
       }
-      for (const [key, value] of Object.entries({ slug: job.slug, name: job.name, description: contract.description, container_port: String(contract.runtime.port), language: contract.runtime.language, runtime_version: contract.runtime.version, request_id: requestId, version_note: String(input.versionNote ?? ''), app_config: JSON.stringify(bindings), resource_ids: JSON.stringify(ids), storage_mounts: JSON.stringify(contract.storage_mounts ?? []) })) form.append(key, String(value))
+      for (const [key, value] of Object.entries({ slug: job.slug, name: job.name, description: contract.description, container_port: String(contract.runtime.port), language: contract.runtime.language, runtime_version: contract.runtime.version, request_id: requestId, skill_zip_sha256: job.hashes?.['skill.zip'] ?? '', version_note: String(input.versionNote ?? ''), app_config: JSON.stringify(bindings), resource_ids: JSON.stringify(ids), storage_mounts: JSON.stringify(contract.storage_mounts ?? []) })) form.append(key, String(value))
       scope.assertCurrent()
       const authKeys = new Set<string>(contract.apis.flatMap((api: AppDocument) => api.auth?.env ? [api.auth.env] : []))
       for (const profile of [contract.auth_profile ?? {}, ...Object.values(contract.auth_profiles ?? {})] as AppDocument[]) {
@@ -569,6 +590,29 @@ export class AppDelivery {
     if (rbResult.config_fingerprint && current.config_fingerprint && rbResult.config_fingerprint !== current.config_fingerprint) {
       throw new Error('回滚后运行配置指纹不一致')
     }
+    const verInfo = rbResult.version ?? {}
+    const expectedSkillSha = String(rbResult.skill_zip_sha256 || verInfo.skill_zip_sha256 || '').trim()
+    const expectedAppTarSha = String(verInfo.app_tar_sha256 || '').trim()
+
+    let skillZipBytes: Buffer | undefined
+    try {
+      const dl = await this.platform(`/${slug}/versions/${targetVersion}/artifacts/skill.zip`, expected)
+      if (dl?.bytes && Buffer.isBuffer(dl.bytes) && dl.bytes.length > 0) {
+        skillZipBytes = dl.bytes
+      } else if (typeof dl?.skill_zip_b64 === 'string' && dl.skill_zip_b64.length > 0) {
+        skillZipBytes = Buffer.from(dl.skill_zip_b64, 'base64')
+      }
+    } catch {
+      /* Artifact download optional when not provided by mock/server */
+    }
+    if (skillZipBytes) {
+      if (!expectedSkillSha || hash(skillZipBytes) !== expectedSkillSha) {
+        throw new Error('回滚技能包摘要不一致，拒绝启用')
+      }
+    }
+
+    let localSkillSynced = false
+    let localSkillVerified = false
     for (const parent of await this.directories(scope.directory)) {
       const entries = await readdir(parent).catch(() => [] as string[])
       for (const id of entries.filter(e => /^[a-f0-9-]{36}$/.test(e))) {
@@ -576,7 +620,69 @@ export class AppDelivery {
         if (opened && opened.job.slug === slug) {
           opened.job.version = targetVersion
           opened.job.configFingerprint = current.config_fingerprint ?? rbResult.config_fingerprint
-          if (opened.job.status === 'verified') {
+          if (expectedAppTarSha && expectedSkillSha) {
+            opened.job.hashes = {
+              ...(opened.job.hashes ?? {}),
+              'app.tar': expectedAppTarSha,
+              'skill.zip': expectedSkillSha,
+            }
+          }
+          if (skillZipBytes && opened.job.proposal) {
+            const extracted = await worker({
+              action: 'extract_skill_contract',
+              root: opened.root,
+              skill_zip_b64: skillZipBytes.toString('base64'),
+              expected_sha256: expectedSkillSha,
+            }, scope.signal)
+            opened.job.proposal.contract = {
+              ...opened.job.proposal.contract,
+              ...extracted.contract,
+            }
+            opened.job.hashes = {
+              ...(opened.job.hashes ?? {}),
+              'app.tar': expectedAppTarSha || opened.job.hashes?.['app.tar'] || '',
+              'skill.zip': extracted.sha256,
+            }
+            localSkillSynced = true
+          }
+
+          if (localSkillSynced && opened.job.proposal?.contract && matchesReceipt(current.build_log, opened.job.hashes)) {
+            try {
+              const contract = opened.job.proposal.contract
+              const credentials = await this.credentials.read(opened.job.id)
+              const health = { base_url: opened.job.url, apis: [{ id: 'health', path: contract.health?.path ?? '/healthz', method: 'GET', effect: 'read', parameters: [], auth: { type: 'none' } }] }
+              const probe = await worker({ action: 'probe', root: opened.root, contract: health, operation: 'health' }, scope.signal)
+              if (probe.status !== (contract.health?.status ?? 200) || !probe.content_type.includes('application/json') || !contains(JSON.parse(probe.content), contract.health?.json_contains ?? { service: slug })) {
+                throw new Error('回滚后健康身份验证失败')
+              }
+              const checks: AppDocument[] = []
+              for (const test of contract.verification?.cases ?? []) {
+                const api = (contract.apis ?? []).find((a: AppDocument) => a.id === test.operation)
+                if (!api || api.path === '/healthz') continue
+                if (api.effect !== 'read') throw new Error('业务验证只能使用只读接口')
+                const res = await worker({ action: 'probe', root: opened.root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials }, scope.signal)
+                if (res.status !== (test.status ?? 200) || !res.content_type.includes('application/json') || !contains(JSON.parse(res.content), test.json_contains)) {
+                  throw new Error(`回滚后业务验证失败：${test.operation}`)
+                }
+                checks.push({ operation: test.operation, status: res.status })
+              }
+              if (checks.length > 0) {
+                opened.job.checks = checks
+                opened.job.status = 'verified'
+                opened.job.events.push(`已回退至 v${targetVersion}，历史技能与业务探针验证通过`)
+                localSkillVerified = true
+              } else if (Array.isArray(contract.pages) && contract.pages.length > 0 && !(contract.apis ?? []).some((a: AppDocument) => a.path !== '/healthz')) {
+                opened.job.status = 'awaiting_page_verification'
+                opened.job.events.push(`已回退至 v${targetVersion}，请打开页面完成人工验收后启用技能`)
+              } else {
+                opened.job.status = 'building'
+                opened.job.events.push(`已回退至 v${targetVersion}，请重新验证业务后启用技能`)
+              }
+            } catch {
+              opened.job.status = 'building'
+              opened.job.events.push(`已回退至 v${targetVersion}，请重新验证业务后启用技能`)
+            }
+          } else if (opened.job.status === 'verified') {
             opened.job.status = 'building'
             opened.job.events.push(`已回退至 v${targetVersion}，请重新验证业务后启用技能`)
           }
@@ -585,7 +691,12 @@ export class AppDelivery {
       }
     }
     this.core.emit('skills-changed')
-    return { ...rbResult, rollback_notice: ROLLBACK_NOTICE }
+    return {
+      ...rbResult,
+      local_skill_synced: localSkillSynced,
+      local_skill_verified: localSkillVerified,
+      rollback_notice: ROLLBACK_NOTICE,
+    }
   }
   async verifiedJob(id: string, expected: string) {
     const scope = this.scope(expected)
