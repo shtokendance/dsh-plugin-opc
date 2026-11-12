@@ -1049,7 +1049,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
       {/* MCP Services View */}
       {kind === 'mcp' && <>
         <p className="notice">
-          AI 可按权限调用以下企业服务。需要审批的高危操作会请求确认；{state.mountAvailable ? '挂载服务的审批会直接显示在 OPC 面板。' : '当前客户端可在下方在线调试工具。'}
+          AI 可按权限调用以下企业服务（已为您自动挂载并保持连接）。需要审批的高危操作会请求确认；{state.mountAvailable ? '挂载服务的审批会直接显示在 OPC 面板。' : '当前客户端可在下方在线调试工具。'}
         </p>
         <div className="cards-grid">
           {services.map(service => <div key={String(service.service_id)} className="resource-card">

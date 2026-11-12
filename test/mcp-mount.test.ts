@@ -45,3 +45,43 @@ test('mounted transport gates callers, forwards through policy, and disappears o
     await assert.rejects(fetch(registration.url))
   } finally { mounts.dispose(); await auth.dispose(); await rm(home, { recursive: true, force: true }) }
 })
+
+test('autoMount automatically connects tenant MCP services and honors user unmount', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-auto-mount-'))
+  const grant: StoredGrant = { refreshToken: 'refresh', platformBaseUrl: 'https://platform.example/', lastContext: { issuer: 'https://platform.example', subject: 'a', tenant: 'a', spaces: ['a', 'b'], generation: 1 } }
+  const auth = new AuthManager(new PlatformHttp('https://platform.example', 1000, async url => {
+    const path = new URL(String(url)).pathname
+    if (path.endsWith('/refresh')) return Response.json({ access_token: 'enterprise-secret', refresh_token: 'new', expires_in: 900, subject: 'a', spaces: ['a', 'b'], tenant: 'a' })
+    if (path.endsWith('/services')) return Response.json({ data: { services: [{ service_id: 'auto-svc-1', tools: [{ name: 'tool1', input_schema: { type: 'object' } }] }] } })
+    return Response.json({ data: {} })
+  }), { read: async () => grant, write: async () => {}, delete: async () => {} }, async () => {})
+  await auth.restore()
+  let registered = 0
+  const mounts = new ManagedMcpMounts(
+    new OpcCore(auth, home),
+    () => { registered++; return () => { registered-- } },
+    async () => 'allowed-once',
+    { autoMount: true },
+  )
+  try {
+    await new Promise(r => setTimeout(r, 100))
+    assert.deepEqual(mounts.list(), ['auto-svc-1'])
+    assert.equal(registered, 1)
+
+    mounts.unmountByUser('auto-svc-1')
+    assert.deepEqual(mounts.list(), [])
+    assert.equal(registered, 0)
+
+    await mounts.autoMount()
+    assert.deepEqual(mounts.list(), [])
+
+    const ctx = contextId(auth.contexts.capture().context)
+    await mounts.mount('auto-svc-1', ctx)
+    assert.deepEqual(mounts.list(), ['auto-svc-1'])
+    assert.equal(registered, 1)
+  } finally {
+    mounts.dispose()
+    await auth.dispose()
+    await rm(home, { recursive: true, force: true })
+  }
+})
