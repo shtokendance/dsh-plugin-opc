@@ -39,6 +39,7 @@
   },
   "files": [
     "lib",
+    "runtime",
     "README.md",
     "config/overlay.example.yml",
     "docs"

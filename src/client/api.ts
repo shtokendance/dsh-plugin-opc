@@ -1,5 +1,23 @@
 /** JSON business payloads use the same public methods as the Host Remote service. */
 export interface OpcApi {
+  appCatalog(context: string): Promise<string>
+  appList(context: string): Promise<string>
+  appCreate(input: string, session: string, context: string): Promise<string>
+  appAnalyze(id: string, feedback: string, session: string, context: string): Promise<string>
+  appPrepare(id: string, hash: string, context: string): Promise<string>
+  appReopenReview?(id: string, context: string): Promise<string>
+  appPublish(id: string, confirmation: string, context: string): Promise<string>
+  appVerify(id: string, context: string): Promise<string>
+  appVerifyWithOptions?(id: string, optionsJson: string, context: string): Promise<string>
+  appResources(context: string): Promise<string>
+  appDetails(slug: string, context: string): Promise<string>
+  appVersions?(slug: string, context: string): Promise<string>
+  appLogs?(slug: string, context: string): Promise<string>
+  appStorage?(slug: string, context: string): Promise<string>
+  appRecheck?(slug: string, context: string): Promise<string>
+  appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>
+  appDelete?(slug: string, purgeVolumes: boolean, context: string): Promise<string>
+  appRollback?(slug: string, payloadJson: string, context: string): Promise<string>
   state(): Promise<string>
   watchState(signal: AbortSignal): AsyncIterable<string>
   startLogin(): Promise<string>
@@ -28,6 +46,6 @@ export interface AuthState {
   mountedServices?: string[]
   approvals?: { id: string; contextId: string; serviceId: string; toolName: string; arguments: Record<string, unknown> }[]
   signedIn: boolean; loginInProgress: boolean; loginAuthorizeUrl?: string; loginError?: { code: string; message: string }
-  context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
+  context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; applicationContextId?: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
 }
 export interface Resource { name: string; description?: string; tenant_id: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }

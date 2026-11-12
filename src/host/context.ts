@@ -32,9 +32,27 @@ export class ContextStore {
   #context: EnterpriseContext | null = null
   #epoch = 0
   #controller = new AbortController()
+  #identityEpoch = 0
+  #identityController = new AbortController()
+  get applicationContextId(): string | null {
+    return this.#context && `${identityHash(this.#context)}:${this.#identityEpoch}`
+  }
+  captureApplication(expected?: string) {
+    const context = this.current
+    if (!context) throw new OpcError('ENTERPRISE_NOT_AUTHENTICATED')
+    const id = this.applicationContextId
+    if (expected && id !== expected) throw new OpcError('CONTEXT_CHANGED')
+    const signal = this.#identityController.signal
+    return { context, signal, assertCurrent: () => signal.throwIfAborted() }
+  }
   get current(): EnterpriseContext | null { return this.#context && structuredClone(this.#context) }
   get epoch(): number { return this.#epoch }
   replace(context: EnterpriseContext | null): void {
+    if (this.#context?.issuer !== context?.issuer || this.#context?.subject !== context?.subject) {
+      this.#identityController.abort(new OpcError('CONTEXT_CHANGED'))
+      this.#identityController = new AbortController()
+      this.#identityEpoch++
+    }
     this.#controller.abort(new OpcError('CONTEXT_CHANGED'))
     this.#controller = new AbortController()
     this.#context = context && structuredClone(context)
