@@ -261,6 +261,124 @@ const css = `
 }
 .doc-box img { max-width: 100%; }
 
+/* Knowledge Base Top Search Section */
+.kb-top-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+}
+.kb-search-tabs {
+  display: flex;
+  background: #f1f5f9;
+  padding: 3px;
+  border-radius: 8px;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.kb-tab-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+.kb-tab-btn:hover:not(.active) {
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.5);
+}
+.kb-tab-btn.active {
+  background: #ffffff;
+  color: #0f172a;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.kb-search-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0;
+}
+.kb-scope-select {
+  flex: 0 0 auto;
+  max-width: 180px;
+  min-width: 135px;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  cursor: pointer;
+}
+.kb-search-input {
+  flex: 1 1 160px;
+  min-width: 140px;
+  font-size: 12px;
+}
+.kb-results-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0 14px;
+}
+.kb-results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.kb-results-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kb-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 14px 0 6px;
+  padding-bottom: 4px;
+}
+.kb-section-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-sm {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-sm:hover:not(:disabled) {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
 /* Apps Panel Styles aligned with work-opc */
 .opc-apps .apps-intro {
   color: #64748b;
@@ -510,6 +628,11 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
   const [kb, setKb] = useState(''), [doc, setDoc] = useState(''), [filter, setFilter] = useState('all')
   const [services, setServices] = useState<Record<string, unknown>[]>([])
   const [appsRefreshTrigger, setAppsRefreshTrigger] = useState(0)
+  const [kbSearchMode, setKbSearchMode] = useState<'doc' | 'kb'>('doc')
+  const [docQuery, setDocQuery] = useState('')
+  const [hasSearchedDoc, setHasSearchedDoc] = useState(false)
+  const docInputRef = useRef<HTMLInputElement>(null)
+  const topSearchCardRef = useRef<HTMLDivElement>(null)
   const pin = state.pinnedScopes?.[sessionId] ?? ''
   const epoch = useRef(0)
 
@@ -545,7 +668,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
   }, [api, kind, q])
 
   useEffect(() => {
-    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setBusy(false); setError('')
+    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setBusy(false); setError('')
     if (state.signedIn) void run(load)
   }, [state.context?.contextId, sessionId, kind])
 
@@ -628,93 +751,218 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
 
       {/* Knowledge Base View */}
       {kind === 'knowledge' && <>
-        <form className="row" onSubmit={e => { e.preventDefault(); void run(load) }}>
-          <input
-            aria-label="搜索知识库"
-            placeholder="搜索知识库名称或描述..."
-            value={q}
-            onChange={e => setQ(e.target.value)}
-          />
-          <button className="primary" disabled={busy}>搜索</button>
-          {q && <button type="button" onClick={() => { setQ(''); void run(load) }}>清除</button>}
-        </form>
+        {/* Top Search Card: Integrated Document Search & Knowledge Base Filter */}
+        <div className="kb-top-card" ref={topSearchCardRef}>
+          <div className="kb-search-tabs">
+            <button
+              type="button"
+              className={`kb-tab-btn ${kbSearchMode === 'doc' ? 'active' : ''}`}
+              onClick={() => {
+                setKbSearchMode('doc')
+                setTimeout(() => docInputRef.current?.focus(), 50)
+              }}
+            >
+              <span>📄</span>
+              <span>文档全文检索</span>
+              {hits.length > 0 && <span className="badge badge-ok" style={{ fontSize: 10, padding: '1px 5px' }}>{hits.length}</span>}
+            </button>
+            <button
+              type="button"
+              className={`kb-tab-btn ${kbSearchMode === 'kb' ? 'active' : ''}`}
+              onClick={() => setKbSearchMode('kb')}
+            >
+              <span>📚</span>
+              <span>知识库目录筛选</span>
+              {q && <span className="badge badge-warn" style={{ fontSize: 10, padding: '1px 5px' }}>已筛选</span>}
+            </button>
+          </div>
 
-        {pin && <div className="notice">
-          <strong>当前对话问答已限定范围：</strong>{items.find(item => item.knowledge_base_id === pin)?.name ?? pin}
-          <button style={{ marginLeft: 8 }} onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, null, context.contextId) })}>取消限定</button>
-        </div>}
-
-        <div className="cards-grid">
-          {items.map(item => <div key={item.knowledge_base_id} className="resource-card">
-            <div>
-              <div className="card-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                  <div className="card-icon">📖</div>
-                  <h3 className="card-title">{item.name}</h3>
-                </div>
-                <span className={`badge ${item.availability === 'available' ? 'badge-ok' : ''}`}>
-                  {item.availability === 'available' ? '已就绪' : '未就绪'}
-                </span>
+          {kbSearchMode === 'doc' ? (
+            <form onSubmit={e => {
+              e.preventDefault()
+              if (!docQuery.trim()) return
+              const version = epoch.current
+              void run(async () => {
+                const result = JSON.parse(await api.searchKnowledge(sessionId, docQuery.trim(), kb, context.contextId))
+                if (version === epoch.current) {
+                  setHits(result.results ?? [])
+                  setHasSearchedDoc(true)
+                }
+              })
+            }}>
+              <div className="kb-search-row">
+                <select
+                  aria-label="检索知识库范围"
+                  className="kb-scope-select"
+                  value={kb}
+                  onChange={e => setKb(e.target.value)}
+                >
+                  <option value="">当前空间全部知识库</option>
+                  {items.map(item => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}
+                </select>
+                <input
+                  ref={docInputRef}
+                  required
+                  className="kb-search-input"
+                  aria-label="文档检索词"
+                  placeholder="输入要查找的文档关键词或片段..."
+                  value={docQuery}
+                  onChange={e => setDocQuery(e.target.value)}
+                />
+                <button className="primary" disabled={busy}>检索</button>
+                {(docQuery || hits.length > 0 || hasSearchedDoc) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDocQuery('')
+                      setHits([])
+                      setDoc('')
+                      setHasSearchedDoc(false)
+                    }}
+                  >
+                    清空
+                  </button>
+                )}
               </div>
-              <p className="card-desc">{item.description || '暂无知识库描述'}</p>
-            </div>
-            <div className="card-actions">
-              <button
-                className="primary"
-                disabled={busy || item.availability !== 'available'}
-                onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId) })}
-              >
-                限定问答范围
-              </button>
-              <button onClick={() => setKb(item.knowledge_base_id!)}>
-                检索此库
-              </button>
-            </div>
-          </div>)}
+            </form>
+          ) : (
+            <form onSubmit={e => { e.preventDefault(); void run(load) }}>
+              <div className="kb-search-row">
+                <input
+                  aria-label="搜索知识库"
+                  className="kb-search-input"
+                  placeholder="搜索知识库名称或描述..."
+                  value={q}
+                  onChange={e => setQ(e.target.value)}
+                />
+                <button className="primary" disabled={busy}>搜索</button>
+                {q && <button type="button" onClick={() => { setQ(''); void run(load) }}>清除</button>}
+              </div>
+            </form>
+          )}
         </div>
 
-        <KnowledgeSearch
-          key={context.contextId + sessionId}
-          api={api}
-          sessionId={sessionId}
-          contextId={context.contextId}
-          kb={kb}
-          items={items}
-          setKb={setKb}
-          busy={busy}
-          run={run}
-          setHits={setHits}
-        />
-
-        {hits.length > 0 && <div style={{ marginTop: 16 }}>
-          <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#475569' }}>检索结果 ({hits.length})</h4>
-          {hits.map((hit, i) => <div key={String(hit.knowledge_id) + i} className="resource-card" style={{ marginBottom: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <button
-                style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', fontWeight: 600, color: '#245c9f' }}
-                onClick={action(async () => {
-                  const version = epoch.current
-                  const result = JSON.parse(await api.readKnowledgeDocument(sessionId, String(hit.knowledge_id), context.contextId))
-                  if (version === epoch.current) setDoc(result.data?.content ?? '')
-                })}
-              >
-                {String(hit.title ?? hit.knowledge_id)}
-              </button>
-              {typeof hit.score === 'number' && <span className="badge">相关度: {hit.score.toFixed(2)}</span>}
-            </div>
-            <p style={{ margin: '6px 0 0', fontSize: 12, color: '#64748b', lineHeight: 1.4 }}>
-              {String(hit.snippet ?? hit.content ?? '')}
-            </p>
-          </div>)}
-        </div>}
-
-        {doc && <div className="doc-box">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <strong>文档详情</strong>
-            <button onClick={() => setDoc('')}>关闭正文</button>
+        {/* Empty Doc Search Feedback */}
+        {hasSearchedDoc && hits.length === 0 && !busy && (
+          <div className="notice" style={{ background: '#f8fafc', borderColor: '#94a3b8', color: '#64748b', fontSize: 12, margin: '8px 0' }}>
+            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或将检索范围调整为「当前空间全部知识库」。
           </div>
-          <Markdown>{doc}</Markdown>
-        </div>}
+        )}
+
+        {/* Document Search Hits */}
+        {hits.length > 0 && (
+          <div className="kb-results-card">
+            <div className="kb-results-header">
+              <div className="kb-results-title">
+                <span>📄 文档检索结果</span>
+                <span className="badge badge-ok">{hits.length} 条相关片段</span>
+              </div>
+              <button
+                type="button"
+                className="btn-sm"
+                onClick={() => { setHits([]); setDoc(''); setHasSearchedDoc(false) }}
+              >
+                收起结果
+              </button>
+            </div>
+            {hits.map((hit, i) => (
+              <div key={String(hit.knowledge_id) + i} className="resource-card" style={{ marginBottom: 8, padding: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <button
+                    style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', fontWeight: 600, color: '#245c9f', cursor: 'pointer' }}
+                    onClick={action(async () => {
+                      const version = epoch.current
+                      const result = JSON.parse(await api.readKnowledgeDocument(sessionId, String(hit.knowledge_id), context.contextId))
+                      if (version === epoch.current) setDoc(result.data?.content ?? '')
+                    })}
+                  >
+                    📖 {String(hit.title ?? hit.knowledge_id)}
+                  </button>
+                  {typeof hit.score === 'number' && <span className="badge">相关度: {hit.score.toFixed(2)}</span>}
+                </div>
+                <p style={{ margin: '6px 0 0', fontSize: 12, color: '#64748b', lineHeight: 1.5 }}>
+                  {String(hit.snippet ?? hit.content ?? '')}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Document Full-text Reader */}
+        {doc && (
+          <div className="doc-box" style={{ marginTop: 0, marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <strong>📄 文档详情正文</strong>
+              <button onClick={() => setDoc('')}>关闭正文</button>
+            </div>
+            <Markdown>{doc}</Markdown>
+          </div>
+        )}
+
+        {/* Pinned Knowledge Scope Banner */}
+        {pin && (
+          <div className="notice">
+            <strong>当前对话问答已限定范围：</strong>{items.find(item => item.knowledge_base_id === pin)?.name ?? pin}
+            <button style={{ marginLeft: 8 }} onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, null, context.contextId) })}>取消限定</button>
+          </div>
+        )}
+
+        {/* Knowledge Base Catalog Section Header */}
+        <div className="kb-section-header">
+          <div className="kb-section-title">
+            <span>📚 知识库列表</span>
+            <span className="badge">{items.length}</span>
+          </div>
+          {q ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span className="badge badge-warn">已按“{q}”过滤</span>
+              <button className="btn-sm" onClick={() => { setQ(''); void run(load) }}>清除过滤</button>
+            </div>
+          ) : (
+            <span style={{ fontSize: 11, color: '#94a3b8' }}>点击卡片「检索此库」可直接定位搜索</span>
+          )}
+        </div>
+
+        {/* Knowledge Base Cards Grid */}
+        <div className="cards-grid">
+          {items.map(item => (
+            <div key={item.knowledge_base_id} className="resource-card">
+              <div>
+                <div className="card-header">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                    <div className="card-icon">📖</div>
+                    <h3 className="card-title">{item.name}</h3>
+                  </div>
+                  <span className={`badge ${item.availability === 'available' ? 'badge-ok' : ''}`}>
+                    {item.availability === 'available' ? '已就绪' : '未就绪'}
+                  </span>
+                </div>
+                <p className="card-desc">{item.description || '暂无知识库描述'}</p>
+              </div>
+              <div className="card-actions">
+                <button
+                  className="primary"
+                  disabled={busy || item.availability !== 'available'}
+                  onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId) })}
+                >
+                  限定问答范围
+                </button>
+                <button
+                  onClick={() => {
+                    setKb(item.knowledge_base_id!)
+                    setKbSearchMode('doc')
+                    setTimeout(() => {
+                      docInputRef.current?.focus()
+                      docInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                    }, 50)
+                  }}
+                >
+                  检索此库
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       </>}
 
       {/* Skills View */}
@@ -862,23 +1110,6 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
     {busy && <div style={{ padding: '6px 16px', background: '#eff6ff', fontSize: 12, color: '#1d4ed8', borderTop: '1px solid #dbeafe' }}>正在同步最新状态…</div>}
     {error && <div role="alert" className="error" style={{ margin: 0, borderRadius: 0 }}>{error}</div>}
   </section>
-}
-
-function KnowledgeSearch({ api, sessionId, contextId, kb, items, setKb, busy, run, setHits }: { api: OpcApi; sessionId: string; contextId: string; kb: string; items: Resource[]; setKb: (s: string) => void; busy: boolean; run: (a: () => Promise<void>) => Promise<void>; setHits: (h: Record<string, unknown>[]) => void }) {
-  const [query, setQuery] = useState('')
-  const live = useRef(true)
-  useEffect(() => { live.current = true; return () => { live.current = false } }, [])
-  return <form style={{ marginTop: 20, padding: '12px 14px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }} onSubmit={e => { e.preventDefault(); void run(async () => { const result = JSON.parse(await api.searchKnowledge(sessionId, query, kb, contextId)); if (live.current) setHits(result.results) }) }}>
-    <h4 style={{ margin: '0 0 8px', fontSize: 13, color: '#334155' }}>文档在线检索</h4>
-    <select aria-label="检索知识库" style={{ width: '100%', marginBottom: 8 }} value={kb} onChange={e => setKb(e.target.value)}>
-      <option value="">当前空间全部知识库</option>
-      {items.map(item => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}
-    </select>
-    <div className="row" style={{ margin: 0 }}>
-      <input required aria-label="文档检索词" placeholder="输入要查找的关键词..." value={query} onChange={e => setQuery(e.target.value)}/>
-      <button className="primary" disabled={busy}>检索</button>
-    </div>
-  </form>
 }
 
 function McpDebug({ api, serviceId, toolName, contextId }: { api: OpcApi; serviceId: string; toolName: string; contextId: string }) {
