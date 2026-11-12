@@ -23,7 +23,7 @@ export class OpcRemoteService extends TypertRemoteService {
     this.delivery = delivery
     ctx.inject(['mcpManager'], child => {
       const manager = child.mcpManager
-      const mounts = new ManagedMcpMounts(core, (name, entry) => manager.register(name, entry), this.requestApproval)
+      const mounts = new ManagedMcpMounts(core, (name, entry) => manager.register(name, entry), this.requestApproval, { autoMount: true })
       this.manager = manager
       this.mounts = mounts
       core.emit('change')
@@ -180,7 +180,7 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async mountMcpService(serviceId: string, expectedContextId: string): Promise<void> { if (!this.mounts) throw new OpcError('MCP_MOUNT_UNAVAILABLE'); await this.mounts.mount(serviceId, expectedContextId) }
   @Remote
-  async unmountMcpService(serviceId: string, expectedContextId: string): Promise<void> { this.core.auth.contexts.capture(expectedContextId); this.mounts?.unmount(serviceId) }
+  async unmountMcpService(serviceId: string, expectedContextId: string): Promise<void> { this.core.auth.contexts.capture(expectedContextId); this.mounts?.unmountByUser(serviceId) }
   @Remote
   async decideDebugInvocation(id: string, allowed: boolean, expectedContextId: string): Promise<void> {
     this.core.auth.contexts.capture(expectedContextId)

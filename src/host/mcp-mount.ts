@@ -1,29 +1,72 @@
 import { createServer, type Server } from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { OpcCore } from './core.ts'
-import { OpcError } from './context.ts'
+import { contextId, ContextStore, OpcError } from './context.ts'
 import type { RequestApproval } from './mcp.ts'
 
 export function mcpMountName(id: string): string { return `opc-${createHash('sha256').update(id).digest('hex').slice(0, 16)}` }
 interface Registration { toolCallTimeoutMs: number; transport: 'streamable-http'; url: string; headers: Record<string, string> }
 interface Mounted { epoch: number; server: Server; dispose: () => void }
+
+export interface McpMountOptions {
+  autoMount?: boolean
+}
+
 /** Local MCP transport forwards every tool through platform policy, never leaking enterprise tokens. */
 export class ManagedMcpMounts {
   #mounts = new Map<string, Mounted>()
-  constructor(private readonly core: OpcCore, private readonly register: (name: string, entry: Registration) => () => void, private readonly approve: RequestApproval) {
+  #unmountedByUser = new Set<string>()
+  #lastEpoch: number
+  private readonly autoMountEnabled: boolean
+
+  constructor(
+    private readonly core: OpcCore,
+    private readonly register: (name: string, entry: Registration) => () => void,
+    private readonly approve: RequestApproval,
+    options: McpMountOptions = {},
+  ) {
+    this.autoMountEnabled = options.autoMount ?? false
+    this.#lastEpoch = core.auth.contexts.epoch
     core.auth.on('change', this.changed)
+    if (this.autoMountEnabled && core.auth.contexts.current) {
+      void this.autoMount()
+    }
   }
+
   private changed = () => {
-    for (const [id, mount] of this.#mounts) if (mount.epoch !== this.core.auth.contexts.epoch) this.unmount(id)
+    const currentEpoch = this.core.auth.contexts.epoch
+    for (const [id, mount] of this.#mounts) {
+      if (mount.epoch !== currentEpoch) this.unmount(id)
+    }
+    if (this.#lastEpoch !== currentEpoch) {
+      this.#lastEpoch = currentEpoch
+      this.#unmountedByUser.clear()
+      if (this.autoMountEnabled && this.core.auth.contexts.current) {
+        void this.autoMount()
+      }
+    }
   }
+
   list(): string[] { return [...this.#mounts.keys()] }
+
   unmount(id: string): void {
     const mount = this.#mounts.get(id)
     if (!mount) return
     this.#mounts.delete(id); mount.dispose(); mount.server.closeAllConnections(); mount.server.close()
     this.core.emit('change')
   }
+
+  unmountByUser(id: string): void {
+    this.#unmountedByUser.add(id)
+    this.unmount(id)
+  }
+
+  clearUnmountedByUser(id: string): void {
+    this.#unmountedByUser.delete(id)
+  }
+
   async mount(serviceId: string, expectedContextId: string): Promise<void> {
+    this.#unmountedByUser.delete(serviceId)
     const captured = this.core.auth.contexts.capture(expectedContextId)
     if (this.#mounts.has(serviceId)) return
     const body = await this.core.request(`/integration/v1/mcp/services?include_schema=true&tenant=${encodeURIComponent(captured.context.tenant)}`)
@@ -31,7 +74,13 @@ export class ManagedMcpMounts {
     const data = body.data as { services?: Record<string, unknown>[] } | undefined
     const service = data?.services?.find(item => item.service_id === serviceId)
     if (!service || !Array.isArray(service.tools)) throw new OpcError('RESOURCE_NOT_ACCESSIBLE')
-    const tools = service.tools.map((item: unknown) => {
+    await this.mountSingleService(service, captured)
+  }
+
+  private async mountSingleService(service: Record<string, unknown>, captured: ReturnType<ContextStore['capture']>): Promise<void> {
+    const serviceId = String(service.service_id)
+    if (this.#mounts.has(serviceId)) return
+    const tools = (service.tools as unknown[]).map((item: unknown) => {
       if (typeof item === 'string') return { name: item, inputSchema: { type: 'object', additionalProperties: true } }
       if (!item || typeof item !== 'object' || !('name' in item) || typeof item.name !== 'string') throw new OpcError('INVALID_TOOL_CATALOG')
       const tool = item as Record<string, unknown>
@@ -39,6 +88,7 @@ export class ManagedMcpMounts {
     })
     const secret = randomBytes(32).toString('hex')
     const expected = Buffer.from(`Bearer ${secret}`)
+    const expectedContextId = contextId(captured.context)
     const server = createServer((request, response) => {
       const auth = Buffer.from(request.headers.authorization ?? '')
       if (request.headers.origin || auth.length !== expected.length || !timingSafeEqual(auth, expected)) { response.writeHead(401).end(); return }
@@ -87,5 +137,27 @@ export class ManagedMcpMounts {
       this.#mounts.set(serviceId, { server, dispose, epoch: captured.epoch }); this.core.emit('change')
     } catch (error) { server.close(); throw error }
   }
+
+  async autoMount(): Promise<void> {
+    try {
+      if (!this.core.auth.contexts.current) return
+      const captured = this.core.auth.contexts.capture()
+      const body = await this.core.request(`/integration/v1/mcp/services?include_schema=true&tenant=${encodeURIComponent(captured.context.tenant)}`)
+      captured.assertCurrent()
+      const data = body.data as { services?: Record<string, unknown>[] } | undefined
+      if (!Array.isArray(data?.services)) return
+      for (const service of data.services) {
+        if (!service || typeof service !== 'object' || !service.service_id) continue
+        const serviceId = String(service.service_id)
+        if (this.#unmountedByUser.has(serviceId) || this.#mounts.has(serviceId)) continue
+        if (Array.isArray(service.tools) && service.tools.length > 0) {
+          await this.mountSingleService(service, captured).catch(() => {})
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
   dispose(): void { this.core.auth.off('change', this.changed); for (const id of this.list()) this.unmount(id) }
 }
