@@ -12,3 +12,6 @@ tsconfig.client.json
 .runtime/
 
 config/web.overlay.yml
+
+__pycache__/
+*.py[cod]
