@@ -63,6 +63,7 @@ interface CatalogApp {
   status: string
   current_version?: number
   can_manage: boolean
+  skill_name?: string
 }
 interface StorageVolumeInfo {
   name?: string
@@ -84,7 +85,7 @@ function isLoopbackConnection(key: string, value: string): boolean {
   return /(^|\/\/|@)(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/i.test(value.trim())
 }
 
-export function AppsPanel({ api, sessionId, contextId }: { api: OpcApi; sessionId: string; contextId: string }) {
+export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: OpcApi; sessionId: string; contextId: string; refreshSignal?: number }) {
   const [catalog, setCatalog] = useState<CatalogApp[]>([])
   const [catalogError, setCatalogError] = useState('')
   const [jobs, setJobs] = useState<Job[]>([]), [selected, setSelected] = useState(''), [adding, setAdding] = useState(false), [upgrading, setUpgrading] = useState(false)
@@ -124,6 +125,12 @@ export function AppsPanel({ api, sessionId, contextId }: { api: OpcApi; sessionI
     const catalogTimer = setInterval(() => void loadCatalog(), 15_000)
     return () => { live.current = false; clearInterval(timer); clearInterval(catalogTimer) }
   }, [contextId])
+  useEffect(() => {
+    if (refreshSignal) {
+      void load().catch(e => setError(String(e)))
+      void loadCatalog()
+    }
+  }, [refreshSignal])
   useEffect(() => {
     let current = true
     if (job?.status === 'ready') void api.appResources(contextId).then(value => {
@@ -175,8 +182,11 @@ export function AppsPanel({ api, sessionId, contextId }: { api: OpcApi; sessionI
   ].filter((k): k is string => !!k)))
 
   return <div className="opc-apps">
-    <p>把已有应用部署到 OPC，并让 AI 通过应用技能使用真实业务接口。</p>
-    <div className="row"><button className="primary" onClick={() => { setAdding(true); setUpgrading(false); setName(''); setSlug(''); setDescription(''); setContainerPort(''); setSelected('') }}>部署新应用</button><button onClick={() => void run(loadCatalog)}>刷新应用</button></div>
+    <p className="apps-intro">把已有应用部署到 OPC，并让 AI 通过应用技能使用真实业务接口。</p>
+    <div className="row" style={{ marginBottom: 16 }}>
+      <button className="primary" onClick={() => { setAdding(true); setUpgrading(false); setName(''); setSlug(''); setDescription(''); setContainerPort(''); setSelected('') }}>部署新应用</button>
+      <button onClick={() => void run(loadCatalog)}>刷新应用</button>
+    </div>
     {error && <p role="alert" className="error">{error}</p>}
     {notice && <p role="status" className="notice">{notice}</p>}
     {adding && <form onSubmit={e => { e.preventDefault(); void run(async () => {
@@ -197,105 +207,269 @@ export function AppsPanel({ api, sessionId, contextId }: { api: OpcApi; sessionI
       }), sessionId, contextId))
       setSelected(created.id); setAdding(false); setUpgrading(false)
     }) }}>
-      <h3>{upgrading ? `1. 升级已有应用 (${slug})` : '1. 选择要部署的应用'}</h3>
+      <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 650 }}>{upgrading ? `1. 升级已有应用 (${slug})` : '1. 选择要部署的应用'}</h3>
       <label>应用名称<input required value={name} onChange={e => setName(e.target.value)} placeholder="例如：订单查询助手" /></label>
       <label>英文标识<input required disabled={upgrading} pattern="[a-z][a-z0-9-]{2,39}" value={slug} onChange={e => setSlug(e.target.value)} placeholder="例如：order-helper" /></label>
       <label>应用简介（可选）<input value={description} onChange={e => setDescription(e.target.value)} placeholder="简要说明应用业务用途" /></label>
       <label>容器监听端口（可选，留空由 AI 自动识别）<input type="number" min={1} max={65535} value={containerPort} onChange={e => setContainerPort(e.target.value)} placeholder="例如：8080" /></label>
       <label>源码 ZIP<input type="file" accept=".zip" onChange={e => setFile(e.target.files?.[0])}/></label>
       <label>或本机源码文件夹<input disabled={!!file} value={source} onChange={e => setSource(e.target.value)} placeholder="/Users/你的名字/Projects/my-app" /></label>
-      <p>仅处理独立副本。会保留原项目。独立 Web 安装需本机提供 Python 3.9 或更新版本。</p>
+      <div className="notice" style={{ margin: '12px 0' }}>系统将在隔离副本中进行分析改造，原项目不受影响；本地扫描依赖本机 Python 3.9+ 环境。</div>
       <div className="row"><button className="primary" disabled={busy || (!file && !source)}>导入源码</button><button type="button" onClick={() => { setAdding(false); setUpgrading(false) }}>取消</button></div>
     </form>}
     {!adding && !job && <>
-      <h3>全部应用</h3>
-      {catalogError ? <p role="alert" className="error">{catalogError}</p> : catalog.length === 0 && <p>暂无已发布应用。</p>}
-      {catalog.map(app => <article key={app.slug}>
-        <h4>{app.name} <span className="badge">{deploymentStatus[app.status] ?? app.status}</span></h4>
-        {app.description && <p>{app.description}</p>}
-        <p>{app.slug}{app.current_version ? ` · v${app.current_version}` : ''}</p>
-        <div className="row">
-          {/^https?:\/\//i.test(app.app_url) && <a href={app.app_url} target="_blank" rel="noreferrer">打开应用</a>}
-          {app.can_manage && api.appVersions && <>
-            <button disabled={busy} onClick={() => {
-              setName(app.name)
-              setSlug(app.slug)
-              setDescription(app.description ?? '')
-              setContainerPort(app.container_port ? String(app.container_port) : '')
-              setUpgrading(true)
-              setAdding(true)
-            }}>升级应用</button>
-            <button disabled={busy} onClick={() => void run(async () => {
-              if (managingSlug === app.slug) { setManagingSlug(''); setStorageVolumes(null); setEditingConfigSlug(''); return }
-              const res = JSON.parse(await api.appVersions!(app.slug, contextId))
-              setVersionList(res.versions ?? []); setManagingSlug(app.slug); setStorageVolumes(null); setPurgeVolumes(false)
-            })}>{managingSlug === app.slug ? '收起管理' : '管理与回退'}</button>
-          </>}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '16px 0 10px' }}>
+        <h3 style={{ fontSize: 14, fontWeight: 650, margin: 0, color: '#0f172a' }}>已发布应用</h3>
+        <span style={{ fontSize: 12, color: '#64748b' }}>共 {catalog.length} 个应用</span>
+      </div>
+      {catalogError ? <p role="alert" className="error">{catalogError}</p> : catalog.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94a3b8' }}>
+          <p style={{ fontSize: 14, margin: '0 0 6px' }}>暂无已发布应用</p>
+          <p style={{ fontSize: 12 }}>点击上方「部署新应用」导入单应用源码并由 AI 进行分析改造</p>
         </div>
-        {app.can_manage && managingSlug === app.slug && <div className="notice" style={{ marginTop: 8 }}>
-          <div className="row">
-            {api.appRecheck && <button disabled={busy} onClick={() => void run(async () => { await api.appRecheck!(app.slug, contextId); await loadCatalog() })}>健康重检</button>}
-            {api.appLogs && <button disabled={busy} onClick={() => void run(async () => { const res = JSON.parse(await api.appLogs!(app.slug, contextId)); setLogs(res.runtime_logs || '暂无运行日志') })}>运行日志</button>}
-            {api.appStorage && <button disabled={busy} onClick={() => void run(async () => {
-              const res = JSON.parse(await api.appStorage!(app.slug, contextId))
-              setStorageVolumes(res.volumes ?? res.storage_mounts ?? [])
-            })}>持久化存储卷</button>}
-            {api.appUpdateConfig && <button disabled={busy} onClick={() => {
-              if (editingConfigSlug === app.slug) { setEditingConfigSlug(''); return }
-              setEditingConfigSlug(app.slug)
-              setConfigDraftRows([{ key: '', value: '' }])
-            }}>{editingConfigSlug === app.slug ? '取消配置更新' : '更新运行配置'}</button>}
-          </div>
-          {editingConfigSlug === app.slug && api.appUpdateConfig && <div style={{ marginTop: 8 }}>
-            <strong>在线更新运行配置（更新后自动重启容器，需重新验证业务）</strong>
-            {configDraftRows.map((row, idx) => <div key={idx} className="row">
-              <input placeholder="环境变量名（如 API_KEY）" value={row.key} onChange={e => {
-                const next = [...configDraftRows]; next[idx] = { ...row, key: e.target.value }; setConfigDraftRows(next)
-              }} />
-              <input placeholder="配置值" value={row.value} onChange={e => {
-                const next = [...configDraftRows]; next[idx] = { ...row, value: e.target.value }; setConfigDraftRows(next)
-              }} />
-            </div>)}
-            <div className="row">
-              <button type="button" onClick={() => setConfigDraftRows([...configDraftRows, { key: '', value: '' }])}>+ 添加配置项</button>
-              <button className="primary" disabled={busy} onClick={() => void run(async () => {
-                const app_config = configDraftRows.filter(r => r.key.trim()).map(r => ({ key: r.key.trim(), value: r.value }))
-                await api.appUpdateConfig!(app.slug, JSON.stringify({ app_config, resource_ids: [] }), contextId)
-                setEditingConfigSlug('')
-                setNotice('运行配置已更新，请重新执行业务验证以启用技能。')
-                await loadCatalog()
-              })}>保存并重启应用</button>
+      )}
+      <div className="cards-grid">
+        {catalog.map(app => {
+          const isRunning = app.status === 'running'
+          const isFailed = app.status === 'failed'
+          return (
+            <div key={app.slug} className="resource-card">
+              <div>
+                <div className="card-header">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    <div className="card-icon" style={{ fontSize: 16 }}>🚀</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <h4 className="card-title" style={{ margin: 0 }}>{app.name}</h4>
+                        <span className="badge" style={{ fontSize: 10, padding: '1px 5px' }}>v{app.current_version || 1}</span>
+                      </div>
+                      <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>{app.slug}</span>
+                    </div>
+                  </div>
+                  <div>
+                    {isRunning ? (
+                      <span className="badge badge-ok">
+                        <span className="status-dot dot-ok" /> 运行中
+                      </span>
+                    ) : isFailed ? (
+                      <span className="badge badge-danger">
+                        <span className="status-dot dot-danger" /> 部署失败
+                      </span>
+                    ) : (
+                      <span className="badge badge-warn">
+                        <span className="status-dot dot-warn" /> {deploymentStatus[app.status] ?? app.status}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <p className="card-desc">{app.description || '暂无应用业务描述'}</p>
+
+                <div className="app-meta-box">
+                  <div className="app-meta-row">
+                    <span style={{ color: '#64748b', display: 'flex', alignItems: 'center', gap: 4 }}>🌐 内网地址</span>
+                    {app.app_url ? (
+                      <a href={app.app_url} target="_blank" rel="noreferrer" style={{ color: '#245c9f', textDecoration: 'none', fontFamily: 'monospace', fontSize: 11, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={app.app_url}>
+                        {app.app_url}
+                      </a>
+                    ) : (
+                      <span style={{ color: '#94a3b8' }}>-</span>
+                    )}
+                  </div>
+                  {app.can_manage !== false && (
+                    <div className="app-meta-row">
+                      <span style={{ color: '#64748b', display: 'flex', alignItems: 'center', gap: 4 }}>⚡ 本地技能</span>
+                      <span style={{ fontFamily: 'monospace', fontSize: 11, background: '#f1f5f9', padding: '1px 5px', borderRadius: 4, color: '#334155' }}>
+                        {app.skill_name || `app-${app.slug}`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div className="card-actions" style={{ justifyContent: 'space-between' }}>
+                  {isFailed ? (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {api.appLogs && (
+                        <button disabled={busy} onClick={() => void run(async () => {
+                          const res = JSON.parse(await api.appLogs!(app.slug, contextId))
+                          setLogs(res.runtime_logs || '暂无运行日志')
+                          setManagingSlug(app.slug)
+                        })}>失败日志</button>
+                      )}
+                      {api.appRecheck && (
+                        <button className="primary" disabled={busy} onClick={() => void run(async () => {
+                          await api.appRecheck!(app.slug, contextId)
+                          await loadCatalog()
+                        })}>重新检查</button>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {/^https?:\/\//i.test(app.app_url) && (
+                        <a href={app.app_url} target="_blank" rel="noreferrer" className="btn-link">打开应用</a>
+                      )}
+                      {app.can_manage && api.appVersions && (
+                        <button disabled={busy} onClick={() => {
+                          setName(app.name)
+                          setSlug(app.slug)
+                          setDescription(app.description ?? '')
+                          setContainerPort(app.container_port ? String(app.container_port) : '')
+                          setUpgrading(true)
+                          setAdding(true)
+                        }}>升级应用</button>
+                      )}
+                    </div>
+                  )}
+
+                  {app.can_manage && api.appVersions && (
+                    <button disabled={busy} onClick={() => void run(async () => {
+                      if (managingSlug === app.slug) {
+                        setManagingSlug('')
+                        setStorageVolumes(null)
+                        setEditingConfigSlug('')
+                        return
+                      }
+                      const res = JSON.parse(await api.appVersions!(app.slug, contextId))
+                      setVersionList(res.versions ?? [])
+                      setManagingSlug(app.slug)
+                      setStorageVolumes(null)
+                      setPurgeVolumes(false)
+                    })}>{managingSlug === app.slug ? '收起管理' : '管理与回退'}</button>
+                  )}
+                </div>
+
+                {app.can_manage && managingSlug === app.slug && (
+                  <div className="app-drawer">
+                    <div className="row" style={{ marginTop: 0 }}>
+                      {api.appRecheck && (
+                        <button disabled={busy} onClick={() => void run(async () => {
+                          await api.appRecheck!(app.slug, contextId)
+                          await loadCatalog()
+                        })}>健康重检</button>
+                      )}
+                      {api.appLogs && (
+                        <button disabled={busy} onClick={() => void run(async () => {
+                          const res = JSON.parse(await api.appLogs!(app.slug, contextId))
+                          setLogs(res.runtime_logs || '暂无运行日志')
+                        })}>运行日志</button>
+                      )}
+                      {api.appStorage && (
+                        <button disabled={busy} onClick={() => void run(async () => {
+                          const res = JSON.parse(await api.appStorage!(app.slug, contextId))
+                          setStorageVolumes(res.volumes ?? res.storage_mounts ?? [])
+                        })}>持久化存储卷</button>
+                      )}
+                      {api.appUpdateConfig && (
+                        <button disabled={busy} onClick={() => {
+                          if (editingConfigSlug === app.slug) { setEditingConfigSlug(''); return }
+                          setEditingConfigSlug(app.slug)
+                          setConfigDraftRows([{ key: '', value: '' }])
+                        }}>{editingConfigSlug === app.slug ? '取消配置更新' : '更新运行配置'}</button>
+                      )}
+                    </div>
+
+                    {editingConfigSlug === app.slug && api.appUpdateConfig && (
+                      <div style={{ marginTop: 10, padding: 10, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 6 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 8, color: '#334155' }}>在线更新运行配置（更新后自动重启容器，需重新验证业务）</div>
+                        {configDraftRows.map((row, idx) => (
+                          <div key={idx} className="row">
+                            <input placeholder="环境变量名（如 API_KEY）" value={row.key} onChange={e => {
+                              const next = [...configDraftRows]; next[idx] = { ...row, key: e.target.value }; setConfigDraftRows(next)
+                            }} />
+                            <input placeholder="配置值" value={row.value} onChange={e => {
+                              const next = [...configDraftRows]; next[idx] = { ...row, value: e.target.value }; setConfigDraftRows(next)
+                            }} />
+                          </div>
+                        ))}
+                        <div className="row">
+                          <button type="button" onClick={() => setConfigDraftRows([...configDraftRows, { key: '', value: '' }])}>+ 添加配置项</button>
+                          <button className="primary" disabled={busy} onClick={() => void run(async () => {
+                            const app_config = configDraftRows.filter(r => r.key.trim()).map(r => ({ key: r.key.trim(), value: r.value }))
+                            await api.appUpdateConfig!(app.slug, JSON.stringify({ app_config, resource_ids: [] }), contextId)
+                            setEditingConfigSlug('')
+                            setNotice('运行配置已更新，请重新执行业务验证以启用技能。')
+                            await loadCatalog()
+                          })}>保存并重启应用</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {storageVolumes && (
+                      <div style={{ marginTop: 10, padding: 10, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 6 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 6, color: '#334155' }}>挂载卷状态</div>
+                        {storageVolumes.length === 0 ? <p style={{ margin: 0, color: '#64748b' }}><small>未配置持久化挂载卷。</small></p> : (
+                          <ul style={{ margin: 0, paddingLeft: 18 }}>
+                            {storageVolumes.map((vol, i) => (
+                              <li key={i}>
+                                <code>{vol.target}</code>{vol.source_rel ? ` ← ${vol.source_rel}` : ''}{typeof vol.file_count === 'number' ? ` · ${vol.file_count} 个文件` : ''}{typeof vol.size_bytes === 'number' ? ` (${vol.size_bytes} B)` : ''}{vol.seed ? ' · 含初始种子数据保护' : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{ marginTop: 10 }}>
+                      <p style={{ margin: '4px 0 8px', color: '#64748b', fontSize: 11 }}>{ROLLBACK_NOTICE}</p>
+                      {versionList.map(v => (
+                        <div key={v.version} className="row" style={{ justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px dashed #e2e8f0' }}>
+                          <span><strong>v{v.version}</strong> ({v.status}){v.version_note ? ` · ${v.version_note}` : ''}</span>
+                          {api.appRollback && v.version !== app.current_version && (
+                            v.status === 'running' ? (
+                              <button disabled={busy} onClick={() => void run(async () => {
+                                const rb = JSON.parse(await api.appRollback!(app.slug, JSON.stringify({ targetVersion: v.version, reason: `回退至 v${v.version}` }), contextId))
+                                setNotice(`${rb.message || `已回退至 v${v.version}`}（${rb.rollback_notice || ROLLBACK_NOTICE}）`)
+                                await loadCatalog()
+                              })}>回退到此版本</button>
+                            ) : <small style={{ color: '#94a3b8' }}>部署未成功 · 不可回退</small>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {api.appDelete && (
+                      <div className="row" style={{ marginTop: 12, justifyContent: 'space-between', borderTop: '1px solid #e2e8f0', paddingTop: 8 }}>
+                        <label className="row" style={{ margin: 0, fontSize: 12 }}>
+                          <input style={{ flex: 'none' }} type="checkbox" checked={purgeVolumes} onChange={e => setPurgeVolumes(e.target.checked)} />
+                          同时清理持久化数据卷
+                        </label>
+                        <button style={{ color: '#dc2626', borderColor: '#fca5a5' }} disabled={busy} onClick={() => void run(async () => {
+                          await api.appDelete!(app.slug, purgeVolumes, contextId)
+                          setManagingSlug('')
+                          await loadCatalog()
+                        })}>删除应用</button>
+                      </div>
+                    )}
+
+                    {logs && <pre style={{ marginTop: 8, maxHeight: 200, overflow: 'auto', background: '#0f172a', color: '#f8fafc', padding: 8, borderRadius: 6, fontSize: 11 }}>{logs}</pre>}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>}
-          {storageVolumes && <div style={{ marginTop: 8 }}>
-            <strong>挂载卷状态</strong>
-            {storageVolumes.length === 0 ? <p><small>未配置持久化挂载卷。</small></p> : <ul>
-              {storageVolumes.map((vol, i) => <li key={i}>
-                <code>{vol.target}</code>{vol.source_rel ? ` ← ${vol.source_rel}` : ''}{typeof vol.file_count === 'number' ? ` · ${vol.file_count} 个文件` : ''}{typeof vol.size_bytes === 'number' ? ` (${vol.size_bytes} B)` : ''}{vol.seed ? ' · 含初始种子数据保护' : ''}
-              </li>)}
-            </ul>}
-          </div>}
-          <p><small>{ROLLBACK_NOTICE}</small></p>
-          {versionList.map(v => <div key={v.version} className="row">
-            <span>v{v.version} ({v.status}){v.version_note ? ` · ${v.version_note}` : ''}</span>
-            {api.appRollback && v.version !== app.current_version && (
-              v.status === 'running' ? <button disabled={busy} onClick={() => void run(async () => {
-                const rb = JSON.parse(await api.appRollback!(app.slug, JSON.stringify({ targetVersion: v.version, reason: `回退至 v${v.version}` }), contextId))
-                setNotice(`${rb.message || `已回退至 v${v.version}`}（${rb.rollback_notice || ROLLBACK_NOTICE}）`)
-                await loadCatalog()
-              })}>回退到此版本</button> : <small>部署未成功 · 不可回退</small>
-            )}
-          </div>)}
-          {api.appDelete && <div className="row" style={{ marginTop: 8 }}>
-            <label className="row" style={{ margin: 0 }}><input style={{ flex: 'none' }} type="checkbox" checked={purgeVolumes} onChange={e => setPurgeVolumes(e.target.checked)} />同时清理持久化数据卷</label>
-            <button disabled={busy} onClick={() => void run(async () => { await api.appDelete!(app.slug, purgeVolumes, contextId); setManagingSlug(''); await loadCatalog() })}>删除应用</button>
-          </div>}
-          {logs && <pre>{logs}</pre>}
-        </div>}
-      </article>)}
-      {jobs.length > 0 && <><h3>本机部署任务</h3>{jobs.map(item => <article key={item.id}>
-        <button onClick={() => setSelected(item.id)}>{item.name}</button> <span className="badge">{statusText[item.status] ?? item.status}</span>
-      </article>)}</>}
+          )
+        })}
+      </div>
+
+      {jobs.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <h3 style={{ fontSize: 14, fontWeight: 650, margin: '0 0 10px', color: '#0f172a' }}>本机部署任务</h3>
+          <div className="cards-grid">
+            {jobs.map(item => (
+              <div key={item.id} className="resource-card" style={{ cursor: 'pointer' }} onClick={() => setSelected(item.id)}>
+                <div className="card-header">
+                  <h4 className="card-title" style={{ margin: 0 }}>{item.name}</h4>
+                  <span className="badge">{statusText[item.status] ?? item.status}</span>
+                </div>
+                <div className="card-actions" style={{ marginTop: 8 }}>
+                  <button className="primary" style={{ fontSize: 12 }} onClick={() => setSelected(item.id)}>继续任务向导 →</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </>}
     {!adding && job && <>
       <button onClick={() => setSelected('')}>← 返回应用列表</button><h3 style={{ marginTop: 16 }}>{job.name} <span className="badge">{statusText[job.status]}</span></h3><p>{job.url}</p>
