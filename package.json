@@ -1,8 +1,15 @@
 {
-  "name": "@opc/dsh-plugin-opc",
-  "version": "0.1.5",
-  "private": true,
+  "name": "dsh-plugin-opc",
+  "version": "0.1.6",
+  "description": "OPC Enterprise Plugin for DeepSeek Harness (DSH)",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shtokendance/dsh-plugin-opc.git"
+  },
   "engines": {
     "node": ">=24.9",
     "dsh": ">=0.2.2-alpha.3 <0.3.0"
@@ -11,6 +18,7 @@
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.dsh.json",
     "build": "node scripts/generate-remote.mjs && node scripts/build.mjs",
+    "prepublishOnly": "npm run test && npm run build",
     "configure:dsh": "node scripts/configure-dsh.mjs"
   },
   "devDependencies": {
