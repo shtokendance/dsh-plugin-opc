@@ -19,8 +19,8 @@ import { AppSkillProvider, registerAppTools } from './host/app-skills.ts'
 
 export const name = 'dsh-plugin-opc'
 export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert', 'llm']
-export interface Config { platformBaseUrl: string; clientId: string; dataHome: string }
-export const Config = z.object({ platformBaseUrl: z.string().default('https://shtokendance.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default('') })
+export interface Config { platformBaseUrl: string; clientId: string; dataHome: string; appDomainRoot?: string; appDefaultPort?: number }
+export const Config = z.object({ platformBaseUrl: z.string().default('https://shtokendance.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default(''), appDomainRoot: z.string().default(''), appDefaultPort: z.number().default(8080) })
 export function apply(ctx: Context, config: Config): void {
   const key = credentialKey(name, 'enterprise')
   const auth = new AuthManager(new PlatformHttp(config.platformBaseUrl), {
@@ -43,7 +43,7 @@ export function apply(ctx: Context, config: Config): void {
     async write(id, payload) {
       await ctx.credentials.modifyRecord(credentialKey(name, `app-${id}`), async () => ({ kind: 'grant', payload }))
     },
-  })
+  }, { appDomainRoot: config.appDomainRoot, appDefaultPort: config.appDefaultPort })
   ctx.plugin(OpcRemoteService, { core, delivery })
   ctx.inject(['systemPrompt'], child => attachAppAgent(child, delivery))
   ctx.effect(() => ctx.skills.registerProvider(control => new AppSkillProvider(delivery, control)))

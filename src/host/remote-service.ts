@@ -1,11 +1,15 @@
 import type { RequestApproval } from './mcp.ts'
 import { ManagedMcpMounts, mcpMountName } from './mcp-mount.ts'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { OpcCore } from './core.ts'
 import { contextId, OpcError } from './context.ts'
 import { AppDelivery } from './app-delivery.ts'
+
+const execFileAsync = promisify(execFile)
 
 declare module '@deepseek-ai/cordis' { interface Context { opc: OpcRemoteService } }
 
@@ -41,6 +45,24 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appList(expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.list(expectedContextId)) }
   @Remote
+  async appJob(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.getJob(id, expectedContextId)) }
+  @Remote
+  async appCheckSlug(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.checkSlug(slug, expectedContextId)) }
+  @Remote
+  async appOpcConfig(expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.opcConfig(expectedContextId)) }
+  @Remote
+  async appPickSourceFolder(expectedContextId: string): Promise<string> {
+    this.core.auth.contexts.captureApplication(expectedContextId)
+    if (process.platform !== 'darwin') return JSON.stringify({ cancelled: true, unsupported: true })
+    try {
+      const { stdout } = await execFileAsync('osascript', ['-e', 'POSIX path of (choose folder with prompt "选择应用源码目录")'], { timeout: 120_000 })
+      const path = stdout.trim().replace(/\/+$/, '') || '/'
+      return JSON.stringify({ path })
+    } catch {
+      return JSON.stringify({ cancelled: true })
+    }
+  }
+  @Remote
   async appModels(expectedContextId: string): Promise<string> {
     const scope = this.core.auth.contexts.captureApplication(expectedContextId)
     const groups = await Promise.all(this.host.llm.listProviders().map(async provider => {
@@ -61,6 +83,11 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appAnalyze(id: string, feedback: string, sessionId: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.startAnalysis(id, feedback, expectedContextId, sessionId)) }
   @Remote
+  async appAnalyzeWithMode(id: string, feedback: string, sessionId: string, mode: string, expectedContextId: string): Promise<string> {
+    const parsedMode = mode === 'resume' ? 'resume' : mode === 'repair' ? 'repair' : 'analysis'
+    return JSON.stringify(await this.delivery.startAnalysis(id, feedback, expectedContextId, sessionId, { mode: parsedMode }))
+  }
+  @Remote
   async appPrepare(id: string, proposalHash: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.prepare(id, proposalHash, expectedContextId)) }
   @Remote
   async appReopenReview(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.reopenReview(id, expectedContextId)) }
@@ -74,6 +101,8 @@ export class OpcRemoteService extends TypertRemoteService {
   async appSaveConfigDraft(id: string, body: string, expectedContextId: string): Promise<void> { await this.delivery.saveConfigDraft(id, JSON.parse(body), expectedContextId) }
   @Remote
   async appLocalArtifact(id: string, filename: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.localArtifact(id, filename, expectedContextId)) }
+  @Remote
+  async appSaveLocalArtifact(id: string, filename: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.saveLocalArtifact(id, filename, expectedContextId)) }
   @Remote
   async appHandoff(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.handoff(id, expectedContextId)) }
   @Remote
@@ -93,8 +122,33 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appDetails(slug: string, expectedContextId: string): Promise<string> {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new OpcError('INVALID_APP_SLUG')
-    const { status, current_version, build_log, error_message, can_manage, app_config, resource_ids, storage_mounts, config_fingerprint } = await this.delivery.platform('/' + slug, expectedContextId)
-    return JSON.stringify({ status, current_version, build_log, error_message, can_manage, app_config, resource_ids, storage_mounts, config_fingerprint })
+    const detail = await this.delivery.platform('/' + slug, expectedContextId)
+    return JSON.stringify({
+      id: detail.id,
+      name: detail.name,
+      slug: detail.slug ?? slug,
+      description: detail.description ?? '',
+      language: detail.language,
+      runtime_version: detail.runtime_version,
+      dockerfile_content: detail.dockerfile_content,
+      app_url: detail.app_url,
+      container_port: detail.container_port,
+      status: detail.status,
+      current_version: detail.current_version,
+      app_config: detail.app_config ?? [],
+      resource_ids: detail.resource_ids ?? [],
+      storage_mounts: detail.storage_mounts ?? [],
+      config_fingerprint: detail.config_fingerprint,
+      skill_name: detail.skill_name,
+      catalog_skill_id: detail.catalog_skill_id,
+      skill_synced: detail.skill_synced,
+      build_log: detail.build_log,
+      error_message: detail.error_message,
+      created_by: detail.created_by,
+      created_at: detail.created_at,
+      updated_at: detail.updated_at,
+      can_manage: detail.can_manage,
+    })
   }
   @Remote
   async appVersions(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.versions(slug, expectedContextId)) }

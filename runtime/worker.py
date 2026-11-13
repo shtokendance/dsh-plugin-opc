@@ -324,19 +324,30 @@ def main(body):
         return {"files": [{"path": f["path"], "bytes": f["bytes"]} for f in files[start:start+500]], "total": len(files)}
     if action == "read":
         source_dir = root / "review/source"
-        p = d.relative(source_dir, body["path"])
-        content = d.text_of(p)
+        path = body["path"]
+        proposed = bool(body.get("proposed"))
+        if proposed:
+            drafts = load_json_if_exists(root / "draft_files.json", {})
+            change = next((c for c in reversed(list(drafts.values())) if isinstance(c, dict) and c.get("path") == path), None)
+            if change is None or not isinstance(change.get("content"), str):
+                raise ValueError("该文件尚无暂存修改，请读取原始源码")
+            content = change["content"]
+        else:
+            p = d.relative(source_dir, path)
+            content = d.text_of(p)
         if content is None:
             return {"text": "Binary file"}
         start = max(0, int(body.get("start", 1)) - 1)
-        lines = redact(content, body["path"]).splitlines()
+        lines = redact(content, path).splitlines()
         excerpt = "\n".join(f"{i + start + 1}: {s[:400]}" for i, s in enumerate(lines[start:start+200]))
         returned = len(lines[start:start+200])
         range_info = f"返回第 {start + 1}–{start + returned} 行" if returned else "所请求范围无内容"
-        excerpt = f"{body['path']} 共 {len(lines)} 行，{range_info}。\n{excerpt}"
-        fields = original_fields(source_dir, body["path"])
-        if fields:
-            excerpt += "\nOriginal configuration references (metadata only; values stay local):\n" + json.dumps(fields, ensure_ascii=False)
+        location = "拟交付文件" if proposed else "原始源码"
+        excerpt = f"{location} {path} 共 {len(lines)} 行，{range_info}。\n{excerpt}"
+        if not proposed:
+            fields = original_fields(source_dir, path)
+            if fields:
+                excerpt += "\nOriginal configuration references (metadata only; values stay local):\n" + json.dumps(fields, ensure_ascii=False)
         return {"text": excerpt, "total_lines": len(lines)}
     if action == "read_failed":
         revision = body.get("revision", "")

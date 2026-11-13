@@ -18,6 +18,7 @@ export interface DeliveryJob {
   status: 'importing' | 'draft' | 'analyzing' | 'review' | 'preparing' | 'ready' | 'publishing' | 'building' | 'verifying' | 'awaiting_page_verification' | 'verified' | 'failed' | 'unknown' | 'cancelled'
   events: string[]; error?: string; proposal?: AppDocument; revision?: string; failedRevision?: string
   revisionCount?: number; feedbackHistory?: string; analysisMode?: 'analysis' | 'repair'
+  analysisFailure?: string
   conversation?: { role: 'user' | 'assistant'; text: string; revision?: number }[]
   discoveryReport?: AppDocument; transformationReport?: AppDocument; preparationChecks?: AppDocument[]
   diffs?: Record<string, string>; hasOriginalKeys?: string[]; skillMarkdown?: string; dockerfileContent?: string
@@ -113,11 +114,16 @@ export class AppRequestError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 
+export interface AppDeliveryOptions {
+  appDomainRoot?: string
+  appDefaultPort?: number
+}
+
 export class AppDelivery {
   private busy = new Set<string>()
   private analyses = new Map<string, AbortController>()
   analyze?: (job: DeliveryJob, root: string, feedback: string, signal: AbortSignal) => Promise<void>
-  constructor(readonly core: OpcCore, readonly home: string, private readonly credentials: CredentialStore) {}
+  constructor(readonly core: OpcCore, readonly home: string, private readonly credentials: CredentialStore, private readonly options: AppDeliveryOptions = {}) {}
   private scope(expected?: string) {
     const captured = this.core.auth.contexts.captureApplication(expected)
     const directory = join(this.home, 'opc', 'apps', identityHash(captured.context))
@@ -280,19 +286,112 @@ export class AppDelivery {
           } catch { /* An inconclusive response leaves the current task available for status checks. */ }
         }
       }
-      const view = this.public(job)
+      const view = this.public(job, root)
       if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
       return view
     }))
     scope.assertCurrent(); return jobs.filter((job): job is AppDocument => job !== undefined).reverse()
   }
-  public(job: DeliveryJob): AppDocument {
+  async getJob(id: string, expected: string) {
+    const scope = this.scope(expected)
+    let { root, job } = await this.open(scope.directory, id)
+    if (!this.busy.has(id) && ['importing', 'analyzing', 'preparing', 'verifying', 'publishing'].includes(job.status)) {
+      await this.exclusive(id, async () => {
+        job = (await this.open(scope.directory, id)).job
+        if (['importing', 'analyzing', 'preparing', 'verifying'].includes(job.status)) {
+          job.status = 'failed'
+          job.error = '上次任务中断，可重新分析或验证'
+          await this.save(root, job)
+        } else if (job.status === 'publishing') {
+          job.status = 'unknown'
+          job.error = '发布结果未知，请查询状态，不要重复发布'
+          await this.save(root, job)
+        }
+      })
+    }
+    scope.assertCurrent()
+    const view = this.public(job, root)
+    if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
+    return view
+  }
+  async checkSlug(slug: string, expected: string) {
+    const trimmed = slug.trim()
+    if (!/^[a-z][a-z0-9-]{2,39}$/.test(trimmed)) throw new Error('应用唯一标识需为 3–40 位小写字母、数字或连字符，且以字母开头')
+    const res = await this.platform('/check-slug', expected, { body: { slug: trimmed } })
+    const configuredRoot = (this.options.appDomainRoot ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+    if (configuredRoot && res?.slug) {
+      res.app_url = `http://${res.slug}.${configuredRoot}`
+    }
+    return res
+  }
+  async opcConfig(expected: string) {
+    this.scope(expected)
+    const configuredRoot = (this.options.appDomainRoot ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+    let appDomainRoot = configuredRoot
+    if (!appDomainRoot) {
+      try {
+        const probe = await this.platform('/check-slug', expected, { body: { slug: 'app-domain-probe' } })
+        if (typeof probe?.app_url === 'string' && probe.app_url.startsWith('http')) {
+          const parsed = new URL(probe.app_url)
+          if (parsed.host.startsWith('app-domain-probe.')) {
+            appDomainRoot = parsed.host.slice('app-domain-probe.'.length)
+          }
+        }
+      } catch {
+        /* ignore fallback */
+      }
+    }
+    const defaultPort = Number.isInteger(this.options.appDefaultPort) && this.options.appDefaultPort! >= 1 && this.options.appDefaultPort! <= 65535
+      ? this.options.appDefaultPort!
+      : 8080
+    return {
+      appDomainRoot: appDomainRoot || '10.101.102.116.nip.io:8080',
+      defaultPort,
+      platformBaseUrl: this.core.auth?.http?.base?.toString()?.replace(/\/+$/, '') ?? '',
+    }
+  }
+  public(job: DeliveryJob, root?: string): AppDocument {
     const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft: _draft, confirmationToken: _token, ...rest } = job
     const hasOrigSet = new Set(job.hasOriginalKeys ?? [])
+    const runtimeConfigs = (proposal?.contract?.configs ?? []).map((c: AppDocument) => {
+      const hasOrig = hasOrigSet.has(c.key) || Boolean(c.has_original_value)
+      return {
+        key: c.key,
+        value: c.secret ? '' : (c.default ?? ''),
+        description: c.description ?? '',
+        required: Boolean(c.required),
+        secret: Boolean(c.secret),
+        has_value: hasOrig || Boolean(c.default),
+        value_source: hasOrig ? 'original' : 'manual',
+        source_label: c.source?.path ? `来自原项目 ${c.source.path}` : undefined,
+      }
+    })
+    const artifactFiles = job.hashes && job.revision && /^[a-z0-9]+$/i.test(job.revision)
+      ? Object.fromEntries(['app.tar', 'skill.zip', 'app-manifest.json', 'summary.json']
+        .filter(name => name in job.hashes! || name === 'summary.json')
+        .map(name => [name, root ? join(root, job.revision!, 'bundle', name) : join(job.revision!, 'bundle', name)]))
+      : undefined
     return {
       ...rest,
+      model: job.modelSelection?.model ?? '',
+      reasoning_effort: job.modelSelection?.reasoningEffort ?? '',
+      revision_count: job.revisionCount,
+      analysis_mode: job.analysisMode,
+      analysis_failure: job.analysisFailure,
+      pages_verified: job.pagesVerified,
       artifactHash: job.hashes ? fingerprint(job.hashes) : undefined,
       proposalHash: proposal ? fingerprint(proposal) : undefined,
+      artifacts: artifactFiles,
+      runtime_configs: runtimeConfigs,
+      verification: {
+        status: job.status === 'verified'
+          ? (job.pagesVerified ? 'verified-deployed-page' : 'verified-deployed-api')
+          : job.status === 'awaiting_page_verification'
+          ? 'awaiting_page_verification'
+          : job.status === 'failed' ? 'failed' : '',
+        checks: (job.checks ?? []).map((c: AppDocument) => ({ operation: c.operation, status: c.status, passed: true })),
+        pages_verified: Boolean(job.pagesVerified),
+      },
       proposal: proposal && {
         summary: proposal.summary,
         issues: proposal.issues ?? [],
@@ -366,7 +465,10 @@ export class AppDelivery {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(input.slug) || typeof input.name !== 'string' || !input.name.trim()) throw new Error('请填写应用名称和 3–40 位英文标识')
     let targetUrl: string
     let targetName = input.name.trim()
-    let targetPort = input.container_port === undefined ? 8080 : input.container_port
+    const defaultPort = Number.isInteger(this.options.appDefaultPort) && this.options.appDefaultPort! >= 1 && this.options.appDefaultPort! <= 65535
+      ? this.options.appDefaultPort!
+      : 8080
+    let targetPort = input.container_port === undefined ? defaultPort : input.container_port
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error('容器端口必须为 1 至 65535 的整数')
     let targetDesc = typeof input.description === 'string' ? input.description.trim() : ''
     let defaultVersionNote = ''
@@ -385,7 +487,7 @@ export class AppDelivery {
       }
       defaultVersionNote = `升级到 v${(existing.current_version || 1) + 1}`
     } else {
-      const reserved = await this.platform('/check-slug', expected, { body: { slug: input.slug } })
+      const reserved = await this.checkSlug(input.slug, expected)
       if (!reserved.available) throw new Error('应用标识已被使用，请换一个标识；若需升级已有应用请选择升级')
       targetUrl = reserved.app_url
     }
@@ -433,20 +535,21 @@ export class AppDelivery {
       } catch (error) { job.status = 'failed'; job.error = String(error) }
       await this.save(root, job)
     })
-    return this.public(job)
+    return this.public(job, root)
   }
   async reopenReview(id: string, expected: string) {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
     return this.exclusive(id, async () => {
       if (!['ready', 'awaiting_page_verification', 'failed'].includes(job.status) || !job.proposal) throw new Error('当前状态无法返回改造方案核对')
+      job.analysisFailure = undefined
       job.status = 'review'
       job.confirmationToken = undefined
       job.error = undefined
       job.events.push('已返回改造方案核对阶段，可补充说明重新分析或重新打包')
       await this.save(root, job)
       this.core.emit('skills-changed')
-      return this.public(job)
+      return this.public(job, root)
     })
   }
   async reopenDeployment(id: string, expected: string) {
@@ -475,7 +578,7 @@ export class AppDelivery {
       job.published = undefined
       job.events.push('已恢复失败版本的交付包和运行配置，请核对后重新部署')
       await this.save(root, job)
-      return this.public(job)
+      return this.public(job, root)
     })
   }
   private async exclusive<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -483,11 +586,13 @@ export class AppDelivery {
     this.busy.add(id)
     try { return await fn() } finally { this.busy.delete(id) }
   }
-  async startAnalysis(id: string, feedback: string, expected: string, session?: string) {
+  async startAnalysis(id: string, feedback: string, expected: string, session?: string, options?: { mode?: 'analysis' | 'repair' | 'resume' }) {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
     if (!this.analyze) throw new Error('此 DSH 版本未提供应用分析所需的 Agent 扩展')
     if (this.busy.has(id) || ['building', 'publishing', 'unknown'].includes(job.status)) throw new Error('请先完成当前部署状态核对')
+    const resume = options?.mode === 'resume'
+    if (resume && (job.status !== 'failed' || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
     this.busy.add(id)
     job.session = session || job.session
     let trimmedFeedback: string
@@ -500,9 +605,15 @@ export class AppDelivery {
     const controller = new AbortController()
     const analysisSignal = AbortSignal.any([scope.signal, controller.signal])
     this.analyses.set(id, controller)
-    if (job.revision && (job.published || job.status === 'failed')) {
+    if (!resume) {
+      job.analysisFailure = undefined
+      if (!job.proposal) {
+        await rm(join(root, 'draft_files.json'), { force: true }).catch(() => {})
+      }
+    }
+    if (!resume && (options?.mode === 'repair' || (job.revision && (job.published || job.status === 'failed')))) {
       job.analysisMode = 'repair'
-      job.failedRevision = job.revision
+      job.failedRevision = job.revision || job.failedRevision
       const prevFailure = job.failureContext || job.error || ''
       job.failureContext = (prevFailure && trimmedFeedback ? `${prevFailure}\n${trimmedFeedback}` : (trimmedFeedback || prevFailure)).slice(-24_000)
       job.failedSnapshot = {
@@ -513,22 +624,30 @@ export class AppDelivery {
         storageMounts: job.proposal?.contract?.storage_mounts ?? [],
         verificationError: job.error || job.failureContext,
       }
-    } else {
+    } else if (!resume) {
       job.analysisMode = job.analysisMode || 'analysis'
       job.failureContext = job.error || job.failureContext
     }
     job.confirmationToken = undefined
-    job.revisionCount = (job.revisionCount ?? 0) + 1
-    if (trimmedFeedback.trim()) {
-      job.conversation = [...(job.conversation ?? []), { role: 'user', text: trimmedFeedback.trim(), revision: job.revisionCount }]
-      job.feedbackHistory = job.feedbackHistory
-        ? `${job.feedbackHistory}\n\n本次补充（有冲突时以本次为准）：\n${trimmedFeedback.trim()}`
-        : trimmedFeedback.trim()
+    if (!resume) {
+      job.revisionCount = (job.revisionCount ?? 0) + 1
+      if (trimmedFeedback.trim()) {
+        job.conversation = [...(job.conversation ?? []), { role: 'user', text: trimmedFeedback.trim(), revision: job.revisionCount }]
+        job.feedbackHistory = job.feedbackHistory
+          ? `${job.feedbackHistory}\n\n本次补充（有冲突时以本次为准）：\n${trimmedFeedback.trim()}`
+          : trimmedFeedback.trim()
+      }
     }
     job.status = 'analyzing'
     job.error = undefined
     job.checks = undefined
-    job.events.push(job.analysisMode === 'repair' ? '🔧 AI 正在读取失败制品与日志进行专项修复分析' : '🚀 AI 正在分析源码；尚未执行发布')
+    job.events.push(
+      resume
+        ? '🔄 正在继续准备应用'
+        : job.analysisMode === 'repair'
+          ? '🔧 AI 正在读取失败制品与日志进行专项修复分析'
+          : '🚀 AI 正在分析源码；尚未执行发布',
+    )
     try { await this.save(root, job) } catch (error) {
       this.analyses.delete(id)
       this.busy.delete(id)
@@ -542,8 +661,12 @@ export class AppDelivery {
         scope.assertCurrent()
         if (!job.proposal || job.status === 'analyzing') throw new Error('AI 未提交有效改造方案，请补充说明后重试')
       } catch (error) {
+        const msg = controller.signal.aborted
+          ? '用户取消分析'
+          : error instanceof Error ? error.message : String(error)
         job.status = controller.signal.aborted ? 'cancelled' : 'failed'
-        job.error = controller.signal.aborted ? '用户取消分析' : String(error)
+        job.error = msg
+        if (!controller.signal.aborted && !job.analysisFailure) job.analysisFailure = msg
       }
       try { await this.save(root, job) } finally {
         this.analyses.delete(id)
@@ -551,7 +674,7 @@ export class AppDelivery {
         this.core.emit('change')
       }
     })().catch(() => {})
-    return this.public(job)
+    return this.public(job, root)
   }
   async cancelAnalysis(id: string, expected: string) {
     const scope = this.scope(expected)
@@ -595,7 +718,8 @@ export class AppDelivery {
   async localArtifact(id: string, filename: string, expected: string) {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
-    if (job.status !== 'ready' || !job.revision || !/^[a-z0-9]+$/i.test(job.revision) ||
+    if (!['ready', 'building', 'verifying', 'awaiting_page_verification', 'verified', 'failed'].includes(job.status) ||
+        !job.revision || !/^[a-z0-9]+$/i.test(job.revision) ||
         !['app.tar', 'skill.zip', 'app-manifest.json', 'summary.json'].includes(filename)) throw new Error('当前交付文件不可用')
     const path = join(root, job.revision, 'bundle', filename)
     const size = (await stat(path)).size
@@ -603,18 +727,47 @@ export class AppDelivery {
     const bytes = await readFile(path)
     scope.assertCurrent()
     if (filename !== 'summary.json' && hash(bytes) !== job.hashes?.[filename]) throw new Error('交付文件已发生变化')
-    return { filename, base64: bytes.toString('base64') }
+    return { filename: `${job.slug}-${filename}`, base64: bytes.toString('base64') }
+  }
+
+  async saveLocalArtifact(id: string, filename: string, expected: string, downloads = join(homedir(), 'Downloads')) {
+    const scope = this.scope(expected)
+    const { root, job } = await this.open(scope.directory, id)
+    if (!['ready', 'building', 'verifying', 'awaiting_page_verification', 'verified', 'failed'].includes(job.status) ||
+        !job.revision || !/^[a-z0-9]+$/i.test(job.revision) ||
+        !['app.tar', 'skill.zip', 'app-manifest.json', 'summary.json'].includes(filename)) throw new Error('当前交付文件不可用')
+    const src = join(root, job.revision, 'bundle', filename)
+    const bytes = await readFile(src)
+    scope.assertCurrent()
+    if (filename !== 'summary.json' && hash(bytes) !== job.hashes?.[filename]) throw new Error('交付文件已发生变化')
+    await mkdir(downloads, { recursive: true, mode: 0o700 })
+    const outName = `${job.slug}-${filename}`
+    const temp = join(downloads, `.opc-${randomUUID()}.artifact`)
+    await writeFile(temp, bytes, { mode: 0o600 })
+    try {
+      const preferred = join(downloads, outName)
+      let dest = preferred
+      try { await link(temp, dest) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        dest = join(downloads, `${randomUUID().slice(0, 8)}-${outName}`)
+        await link(temp, dest)
+      }
+      return { filename: outName, path: dest }
+    } finally {
+      await rm(temp, { force: true }).catch(() => {})
+    }
   }
 
   async skillPreview(id: string, expected: string) {
-    const { root, job } = await this.open(this.scope(expected).directory, id)
-    if (job.status !== 'ready' || !job.skillMarkdown || !job.hashes?.['skill.zip']) throw new Error('技能尚未生成')
-    const bundle = await this.localArtifact(id, 'skill.zip', expected)
     const scope = this.scope(expected)
-    const result = await worker({ action: 'extract_skill_contract', root, skill_zip_b64: bundle.base64,
+    const { root, job } = await this.open(scope.directory, id)
+    if (job.status !== 'ready' || !job.skillMarkdown || !job.hashes?.['skill.zip'] || !job.revision) throw new Error('技能尚未生成')
+    const bytes = await readFile(join(root, job.revision, 'bundle', 'skill.zip'))
+    scope.assertCurrent()
+    const result = await worker({ action: 'extract_skill_contract', root, skill_zip_b64: bytes.toString('base64'),
       expected_sha256: job.hashes['skill.zip'], slug: job.slug, app_url: job.url }, scope.signal)
     scope.assertCurrent()
-    return { markdown: result.skill_markdown }
+    return { markdown: result.skill_markdown, contract: result.contract, sha256: result.sha256 }
   }
 
   async handoff(id: string, expected: string) {
@@ -698,7 +851,7 @@ export class AppDelivery {
         job.confirmationToken = undefined
         job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
       } catch (error) { job.status = 'failed'; job.error = String(error) }
-      await this.save(root, job); return this.public(job)
+      await this.save(root, job); return this.public(job, root)
     })
   }
   private async deploymentConfiguration(job: DeliveryJob, input: AppDocument, expected: string) {
@@ -840,7 +993,7 @@ export class AppDelivery {
           }
         }
       }
-      await this.save(root, job); return this.public(job)
+      await this.save(root, job); return this.public(job, root)
     })
   }
   async verify(id: string, expected: string, options?: AppDocument) {
@@ -857,7 +1010,7 @@ export class AppDelivery {
           job.published = true
           this.recordFailureState(job, receipt.error_message || '部署失败', receipt.build_log?.slice(-8000), job.version)
           await this.save(root, job)
-          return this.public(job)
+          return this.public(job, root)
         }
         if (!['accepted', 'building', 'running'].includes(receipt.status)) throw new Error('平台尚未确认上次发布，请稍后再查询')
         job.published = true
@@ -893,7 +1046,7 @@ export class AppDelivery {
           this.recordFailureState(job, attempted.error_message || '本次发布失败，旧版本仍在运行', remote.build_log?.slice(-8000), job.version)
           await this.save(root, job)
           this.core.emit('skills-changed')
-          return this.public(job)
+          return this.public(job, root)
         }
       }
       if (remote.status !== 'running') {
@@ -905,7 +1058,7 @@ export class AppDelivery {
         }
         await this.save(root, job)
         this.core.emit('skills-changed')
-        return this.public(job)
+        return this.public(job, root)
       }
       if (remote.app_url !== job.url || (job.version && remote.current_version !== job.version)) throw new Error('线上版本或地址不一致，拒绝启用技能')
       if (!matchesReceipt(remote.build_log, job.hashes)) throw new Error('服务器制品回执不一致')
@@ -971,7 +1124,10 @@ export class AppDelivery {
       } catch (error) {
         this.recordFailureState(job, String(error), remote.build_log?.slice(-8000), remote.current_version ?? job.version)
       }
-      await this.save(root, job); this.core.emit('skills-changed'); return this.public(job)
+      await this.save(root, job); this.core.emit('skills-changed')
+      const view = this.public(job, root)
+      if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
+      return view
     })
   }
   async versions(slug: string, expected: string) {

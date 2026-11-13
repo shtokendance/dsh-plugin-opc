@@ -660,3 +660,156 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha256, proposed read, resume mode, and saveLocalArtifact', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-app-parity-new-'))
+  try {
+    const source = join(home, 'source')
+    const downloads = join(home, 'downloads')
+    await mkdir(source, { recursive: true })
+    await mkdir(downloads, { recursive: true })
+    await writeFile(join(source, 'main.py'), 'print("hello")\n')
+
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), {
+      auth: { contexts, http: { base: new URL('https://platform.test') } },
+      llm: {},
+      emit() { return true },
+    }) as unknown as OpcCore
+
+    const calls: string[] = []
+    let draftCountInAnalyze = -1
+    const delivery = new AppDelivery(
+      core,
+      join(home, 'delivery'),
+      { async read() { return {} }, async write() {} },
+      { appDomainRoot: 'apps.corp.internal', appDefaultPort: 9090 },
+    )
+    delivery.platform = async (path, _ctx, opts) => {
+      calls.push(path)
+      if (path === '/check-slug') {
+        const slug = String((opts?.body as Record<string, unknown> | undefined)?.slug || '')
+        return { available: slug !== 'taken-app', slug, app_url: `http://${slug}.apps.corp.internal` }
+      }
+      if (path === '/resources') return { resources: [] }
+      if (path.startsWith('/taken-app')) return { slug: 'taken-app' }
+      return {}
+    }
+
+    const cfg = await delivery.opcConfig(expected)
+    assert.deepEqual(cfg, { appDomainRoot: 'apps.corp.internal', defaultPort: 9090, platformBaseUrl: 'https://platform.test' })
+
+    const avail = await delivery.checkSlug('fresh-app', expected)
+    assert.equal(avail.available, true)
+    assert.equal(avail.app_url, 'http://fresh-app.apps.corp.internal')
+    const taken = await delivery.checkSlug('taken-app', expected)
+    assert.equal(taken.available, false)
+
+    // Create without explicit container_port -> defaults to appDefaultPort (9090)
+    const created = await delivery.create(
+      {
+        name: '新功能测试',
+        slug: 'fresh-app',
+        source,
+        modelSelection: { provider: 'openai', model: 'gpt-5', reasoningEffort: 'high' },
+      },
+      'sess-1',
+      expected,
+    )
+    assert.equal(created.port, 9090)
+    assert.equal(created.url, 'http://fresh-app.apps.corp.internal')
+    assert.equal(created.model, 'gpt-5')
+    assert.equal(created.reasoning_effort, 'high')
+
+    const fetched = await delivery.getJob(created.id, expected)
+    assert.equal(fetched.id, created.id)
+    assert.equal(fetched.port, 9090)
+
+    const spaceDirs = await readdir(join(home, 'delivery', 'opc', 'apps'))
+    const jobRoot = join(home, 'delivery', 'opc', 'apps', spaceDirs[0], created.id)
+    await worker(
+      {
+        action: 'propose_file',
+        root: jobRoot,
+        id: 'staged-1',
+        path: 'staged.txt',
+        reason: '测试暂存修改',
+        content: 'draft-content-from-previous-turn',
+      },
+      new AbortController().signal,
+    )
+
+    // Worker read with proposed=true returns staged draft content
+    const proposedRead = await worker(
+      { action: 'read', root: jobRoot, path: 'staged.txt', proposed: true },
+      new AbortController().signal,
+    )
+    assert.match(String(proposedRead.text), /拟交付文件 staged\.txt/)
+    assert.match(String(proposedRead.text), /draft-content-from-previous-turn/)
+
+    // Simulate an interrupted analysis run -> status=failed -> resume mode preserves draft_files.json
+    delivery.analyze = async () => {
+      throw new Error('模拟分析超时')
+    }
+    await delivery.startAnalysis(created.id, '', expected, 'sess-1')
+    for (let i = 0; i < 100; i++) {
+      const state = await delivery.getJob(created.id, expected)
+      if (state.status !== 'analyzing') break
+      await new Promise(r => setTimeout(r, 20))
+    }
+    const paused = await delivery.getJob(created.id, expected)
+    assert.equal(paused.status, 'failed')
+    assert.match(String(paused.analysis_failure), /模拟分析超时/)
+
+    await worker(
+      {
+        action: 'propose_file',
+        root: jobRoot,
+        id: 'staged-2',
+        path: 'staged-resume.txt',
+        reason: '断点恢复暂存',
+        content: 'resumed-draft-content',
+      },
+      new AbortController().signal,
+    )
+
+    delivery.analyze = async (job, directory, _feedback, signal) => {
+      const preserved = await readFile(join(directory, 'draft_files.json'), 'utf8')
+      draftCountInAnalyze = Object.keys(JSON.parse(preserved)).length
+      const p = proposal('http://fresh-app.apps.corp.internal')
+      p.contract.slug = 'fresh-app'
+      p.contract.runtime.port = 9090
+      p.contract.health.json_contains = { service: 'fresh-app' }
+      await delivery.submit(job, directory, p, signal)
+    }
+
+    await delivery.startAnalysis(created.id, '', expected, 'sess-1', { mode: 'resume' })
+    for (let i = 0; i < 100; i++) {
+      const state = await delivery.getJob(created.id, expected)
+      if (state.status !== 'analyzing') break
+      await new Promise(r => setTimeout(r, 20))
+    }
+    assert.equal(draftCountInAnalyze, 1, 'resume mode should preserve existing draft_files.json')
+
+    const reviewed = await delivery.getJob(created.id, expected)
+    assert.equal(reviewed.status, 'review', reviewed.error)
+
+    const ready = await delivery.prepare(created.id, reviewed.proposalHash, expected)
+    assert.equal(ready.status, 'ready')
+    assert.ok(ready.artifacts && ready.artifacts['app-manifest.json'])
+
+    const preview = await delivery.skillPreview(created.id, expected)
+    assert.ok(preview.markdown.includes('fresh-app'))
+    assert.equal(preview.contract.slug, 'fresh-app')
+    assert.match(preview.sha256, /^[a-f0-9]{64}$/)
+
+    const saved = await delivery.saveLocalArtifact(created.id, 'app-manifest.json', expected, downloads)
+    assert.ok(saved.path.startsWith(downloads))
+    const savedContent = JSON.parse(await readFile(saved.path, 'utf8'))
+    assert.equal(savedContent.slug, 'fresh-app')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
