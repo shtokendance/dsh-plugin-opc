@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-opc",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "OPC Enterprise Plugin for DeepSeek Harness (DSH)",
   "type": "module",
   "publishConfig": {
@@ -50,8 +50,7 @@
     "lib",
     "runtime",
     "README.md",
-    "config/overlay.example.yml",
-    "docs"
+    "config/overlay.example.yml"
   ],
   "dsh": {
     "client": {
