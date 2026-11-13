@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { OpcApi } from './api.ts'
+import ReactMarkdown from 'react-markdown'
+import type { AppModelGroup, OpcApi } from './api.ts'
 
 interface JobConfig {
   key: string
@@ -12,8 +13,10 @@ interface JobConfig {
 }
 interface StorageMount {
   name?: string
-  source_rel: string
-  target: string
+  source_rel?: string
+  target?: string
+  relative_path?: string
+  container_path?: string
   kind?: string
   env_key?: string
   reason?: string
@@ -22,21 +25,31 @@ interface StorageMount {
 interface DecisionItem {
   id: string
   question: string
-  options: { id: string; label: string; description?: string; recommended?: boolean }[]
+  options: (string | { id: string; label: string; recommended?: boolean })[]
   default?: string
 }
 interface IssueItem {
-  severity: string
-  title: string
-  detail: string
-  file?: string
+  id?: string
+  impact?: string
+  recommendation?: string
+  severity?: string
+  title?: string
+  detail?: string
   resolution?: string
 }
 interface Job {
   id: string; name: string; slug: string; description?: string; containerPort?: number; url: string; status: string; events: string[]; error?: string
-  artifactHash?: string; proposalHash?: string; version?: number; published?: boolean
-  discoveryReport?: { framework?: string; language?: string; api_count?: number; page_count?: number; storage_count?: number }
-  transformationReport?: { headline?: string; highlights?: string[]; verification_plan?: string[]; risk_notes?: string[] }
+  upgrade?: boolean; versionNote?: string; port?: number; artifactHash?: string; proposalHash?: string; version?: number; published?: boolean
+  discoveryReport?: {
+    tech_stack?: { language?: string; runtime_version?: string; frameworks?: string[] }
+    apis_overview?: { total?: number }
+    pages_overview?: { total?: number }
+    auth_and_credentials?: { page_auth?: string; api_auth?: string }
+  }
+  transformationReport?: { headline?: string; dockerfile_summary?: string; storage_summary?: string; health_check?: string }
+  preparationChecks?: { label: string; status: string; detail?: string }[]
+  pagesVerified?: boolean
+  userDisabled?: boolean
   decisions?: DecisionItem[]
   issues?: IssueItem[]
   proposal?: {
@@ -48,7 +61,7 @@ interface Job {
     contract: {
       configs?: JobConfig[]
       storage_mounts?: StorageMount[]
-      auth_profile?: { username_env?: string; password_env?: string }
+      verification_credential_fields?: { key: string; kind: 'username' | 'password' | 'session' }[]
       apis?: { id: string; purpose: string; method: string; path: string; auth?: { type?: string; env?: string } }[]
       pages?: { path: string; purpose: string }[]
     }
@@ -64,18 +77,37 @@ interface CatalogApp {
   current_version?: number
   can_manage: boolean
   skill_name?: string
+  app_config?: RuntimeConfig[]
+  resource_ids?: string[]
+  storage_mounts?: StorageMount[]
 }
-interface StorageVolumeInfo {
-  name?: string
-  target: string
-  source_rel?: string
+interface RuntimeConfig {
+  key: string
+  value: string
+  resource_id?: string
+  source_label?: string
+  value_source?: string
+}
+interface StorageVolumeInfo extends StorageMount {
   size_bytes?: number
   file_count?: number
-  seed?: boolean
+  size_human?: string
+  seed_protected?: boolean
+  status?: string
 }
 const deploymentStatus: Record<string, string> = { building: '构建中', running: '运行中', failed: '部署失败' }
 
-const statusText: Record<string, string> = { importing: '导入中', draft: '等待分析', analyzing: 'AI 分析中', review: '等待核对方案', preparing: '正在打包', ready: '等待确认部署', publishing: '正在上传', building: '等待构建与验证', verifying: '正在验证业务', awaiting_page_verification: '待页面验收', verified: '技能可用', failed: '需要处理', unknown: '发布结果待核对' }
+function saveDownload(result: { filename: string; base64: string }) {
+  const bytes = Uint8Array.from(atob(result.base64), char => char.charCodeAt(0))
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = result.filename
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+const statusText: Record<string, string> = { importing: '导入中', draft: '等待分析', analyzing: 'AI 分析中', review: '等待核对方案', preparing: '正在打包', ready: '等待确认部署', publishing: '正在上传', building: '等待构建与验证', verifying: '正在验证业务', awaiting_page_verification: '待页面验收', verified: '技能可用', failed: '需要处理', cancelled: '已取消分析', unknown: '发布结果待核对' }
 const active = new Set(['importing', 'analyzing', 'preparing', 'publishing', 'verifying'])
 const ROLLBACK_NOTICE = '回滚恢复代码与运行配置，不自动回退数据库/卷中的业务数据；旧代码和新数据兼容性仍需验证。'
 
@@ -98,28 +130,46 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
   const [catalogError, setCatalogError] = useState('')
   const [jobs, setJobs] = useState<Job[]>([]), [selected, setSelected] = useState(''), [adding, setAdding] = useState(false), [upgrading, setUpgrading] = useState(false)
   const [name, setName] = useState(''), [slug, setSlug] = useState(''), [description, setDescription] = useState(''), [containerPort, setContainerPort] = useState(''), [source, setSource] = useState(''), [file, setFile] = useState<File>()
+  const [reimportJobId, setReimportJobId] = useState('')
   const [feedback, setFeedback] = useState(''), [configs, setConfigs] = useState<Record<string, string>>({})
   const [localConfirmed, setLocalConfirmed] = useState<Record<string, boolean>>({})
   const [versionNote, setVersionNote] = useState('')
   const [probeCredentials, setProbeCredentials] = useState<Record<string, string>>({})
+  const [rememberCredentials, setRememberCredentials] = useState(false)
+  const [modelGroups, setModelGroups] = useState<readonly AppModelGroup[]>([])
+  const [modelChoice, setModelChoice] = useState(''), [reasoningEffort, setReasoningEffort] = useState('')
+  const [skillPreview, setSkillPreview] = useState('')
+  const [draftLoaded, setDraftLoaded] = useState('')
+  const draftSaveQueue = useRef<Promise<void>>(Promise.resolve())
+  const lastDraftPayload = useRef('')
+  const autoVerification = useRef(new Set<string>())
   const [resources, setResources] = useState<{ id: string; name: string; env_keys: string[] }[]>([])
   const [bindings, setBindings] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [logs, setLogs] = useState(''), [confirm, setConfirm] = useState(false)
   const [managingSlug, setManagingSlug] = useState(''), [versionList, setVersionList] = useState<{ version: number; status: string; version_note?: string }[]>([])
   const [storageVolumes, setStorageVolumes] = useState<StorageVolumeInfo[] | null>(null)
   const [purgeVolumes, setPurgeVolumes] = useState(false)
-  const [editingConfigSlug, setEditingConfigSlug] = useState(''), [configDraftRows, setConfigDraftRows] = useState<{ key: string; value: string }[]>([])
+  const [editingConfigSlug, setEditingConfigSlug] = useState(''), [configDraftRows, setConfigDraftRows] = useState<RuntimeConfig[]>([])
+  const [configResourceIds, setConfigResourceIds] = useState<string[]>([])
   const [notice, setNotice] = useState('')
   const live = useRef(true)
-  const [deployment, setDeployment] = useState<{ status: string; current_version: number; build_log?: string; error_message?: string }>()
+  const [deployment, setDeployment] = useState<{ jobId: string; status: string; current_version: number; config_fingerprint?: string; build_log?: string; error_message?: string }>()
   const job = jobs.find(j => j.id === selected)
+  const selectedModel = modelGroups.flatMap(group => group.models.map(model => ({ ...model, provider: group.id })))
+    .find(model => JSON.stringify([model.provider, model.id]) === modelChoice)
+  useEffect(() => {
+    if (!adding) return
+    let current = true
+    void api.appModels(contextId).then(groups => { if (current) setModelGroups(JSON.parse(groups)) }, () => {})
+    return () => { current = false }
+  }, [adding, api, contextId])
   const eventsScrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (eventsScrollRef.current) {
       eventsScrollRef.current.scrollTop = eventsScrollRef.current.scrollHeight
     }
   }, [job?.events?.length, job?.status])
-  const currentStep = adding ? 1 : !job ? 0 : ['draft', 'analyzing', 'review'].includes(job.status) ? 2 : job.status === 'ready' ? 3 : 4
+  const currentStep = adding ? 1 : !job ? 0 : (['draft', 'analyzing', 'review', 'cancelled'].includes(job.status) || (job.status === 'failed' && !job.artifactHash)) ? 2 : job.status === 'ready' ? 3 : 4
 
   async function load() {
     const value = JSON.parse(await api.appList(contextId))
@@ -158,11 +208,15 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
     setBindings({})
     setConfigs(Object.fromEntries((job?.proposal?.contract?.configs ?? []).map(c => [c.key, c.secret ? '' : c.default ?? ''])))
     setLocalConfirmed({})
-    setVersionNote('')
+    setVersionNote(job?.versionNote ?? '')
     setProbeCredentials({})
+    setRememberCredentials(false)
     setConfirm(false)
     setLogs('')
     setFeedback('')
+    setSkillPreview('')
+    setDraftLoaded('')
+    lastDraftPayload.current = ''
   }, [selected, job?.artifactHash])
   useEffect(() => {
     setDeployment(undefined)
@@ -174,7 +228,7 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
       pending = true
       try {
         const result = JSON.parse(await api.appDetails(job.slug, contextId))
-        if (current) setDeployment(result)
+        if (current) setDeployment({ ...result, jobId: job.id })
       } catch { /* Manual verification shows the actionable server error. */ }
       finally { pending = false }
     }
@@ -182,6 +236,48 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
     const timer = setInterval(() => void fetchStatus(), 3000)
     return () => { current = false; clearInterval(timer) }
   }, [job?.id, job?.status, job?.published, contextId, api])
+  useEffect(() => {
+    if (!job || job.status !== 'building' || !job.published || deployment?.jobId !== job.id || busy) return
+    if (deployment.status !== 'running' && deployment.status !== 'failed') return
+    const key = `${job.id}:${job.artifactHash}:${job.version}:${deployment.config_fingerprint ?? ''}`
+    if (autoVerification.current.has(key)) return
+    autoVerification.current.add(key)
+    void run(async () => { await api.appVerify(job.id, contextId) })
+  }, [job?.id, job?.status, job?.artifactHash, job?.published, job?.version, deployment?.jobId, deployment?.status, deployment?.current_version, deployment?.config_fingerprint, busy, api, contextId])
+  useEffect(() => {
+    if (job?.status !== 'ready' || !api.appConfigDraft) return
+    let live = true
+    void api.appConfigDraft(job.id, contextId).then(raw => {
+      const draft = JSON.parse(raw)
+      if (!live) return
+      if (draft && draft.artifactHash === job.artifactHash) {
+        const rows: { key: string; value: string; resource_id?: string; local_connection_confirmed?: boolean }[] = draft.rows
+        setConfigs(Object.fromEntries(rows.map(row => [row.key, row.value])))
+        setBindings(Object.fromEntries(rows.map(row => [row.key, row.resource_id ?? ''])))
+        setLocalConfirmed(Object.fromEntries(rows.map(row => [row.key, !!row.local_connection_confirmed])))
+        setVersionNote(draft.versionNote)
+      }
+      setDraftLoaded(`${job.id}:${job.artifactHash}`)
+    }, error => { if (live) setError(String(error)) })
+    return () => { live = false }
+  }, [job?.id, job?.status, job?.artifactHash, contextId, api])
+
+  function deploymentRows() {
+    return Object.entries(configs).map(([key, value]) => ({
+      key, value: bindings[key] ? '' : value, resource_id: bindings[key] || undefined,
+      local_connection_confirmed: localConfirmed[key] || undefined,
+    }))
+  }
+  useEffect(() => {
+    if (!job || job.status !== 'ready' || !api.appSaveConfigDraft || draftLoaded !== `${job.id}:${job.artifactHash}`) return
+    const payload = JSON.stringify({ artifactHash: job.artifactHash, rows: deploymentRows(), versionNote })
+    const saveKey = `${job.id}:${payload}`
+    if (lastDraftPayload.current === saveKey) return
+    lastDraftPayload.current = saveKey
+    draftSaveQueue.current = draftSaveQueue.current.catch(() => {}).then(() => api.appSaveConfigDraft!(job.id, payload, contextId))
+    void draftSaveQueue.current.catch(error => { if (live.current) setError(`配置草稿保存失败：${String(error)}`) })
+  }, [job?.id, job?.status, job?.artifactHash, draftLoaded, configs, bindings, localConfirmed, versionNote, contextId, api])
+
   const run = async (fn: () => Promise<void>) => {
     setBusy(true); setError('')
     try { await fn(); await load() } catch (e) { if (live.current) setError(e instanceof Error ? e.message : String(e)) }
@@ -191,16 +287,36 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
   const decisions = job?.decisions ?? job?.proposal?.decisions ?? []
   const issues = job?.issues ?? job?.proposal?.issues ?? []
   const storageMounts = job?.proposal?.contract?.storage_mounts ?? []
-  const requiredAuthKeys = Array.from(new Set([
-    ...(job?.proposal?.contract?.apis ?? []).map(a => a.auth?.env).filter((k): k is string => !!k),
-    job?.proposal?.contract?.auth_profile?.username_env,
-    job?.proposal?.contract?.auth_profile?.password_env,
-  ].filter((k): k is string => !!k)))
+  const credentialFields = job?.proposal?.contract?.verification_credential_fields ?? []
+  const declaredConfigs = job?.proposal?.contract.configs ?? []
+  const extraConfigs = Object.keys(configs).filter(key => !declaredConfigs.some(config => config.key === key))
+  function openUpgrade(app: CatalogApp) {
+    setName(app.name)
+    setSlug(app.slug)
+    setDescription(app.description ?? '')
+    setContainerPort(app.container_port ? String(app.container_port) : '')
+    setSource('')
+    setFile(undefined)
+    setUpgrading(true)
+    setReimportJobId('')
+    setAdding(true)
+    setSelected('')
+  }
+  function reopenFailedApp(app: CatalogApp) {
+    const tasks = jobs.filter(item => item.slug === app.slug && item.published && item.status === 'failed')
+    const candidate = tasks.sort((a, b) => (b.version ?? 0) - (a.version ?? 0))[0]
+    if (candidate) void run(async () => { await api.appReopenDeployment(candidate.id, contextId); setSelected(candidate.id) })
+    else openUpgrade(app)
+  }
+  async function downloadFromPlatform(slug: string, selection: { version?: number; artifact?: string; storage?: boolean; mount?: string }) {
+    const result = JSON.parse(await api.appSaveDownload(slug, JSON.stringify(selection), contextId))
+    setNotice(`已下载到运行 DSH 的电脑：${result.path}`)
+  }
 
   return <div className="opc-apps">
     <p className="apps-intro">把已有应用部署到 OPC，并让 AI 通过应用技能使用真实业务接口。</p>
     <div className="row" style={{ marginBottom: 16 }}>
-      <button className="primary" onClick={() => { setAdding(true); setUpgrading(false); setName(''); setSlug(''); setDescription(''); setContainerPort(''); setSelected('') }}>部署新应用</button>
+      <button className="primary" onClick={() => { setAdding(true); setUpgrading(false); setReimportJobId(''); setFile(undefined); setSource(''); setName(''); setSlug(''); setDescription(''); setContainerPort(''); setSelected('') }}>部署新应用</button>
       <button onClick={() => void run(loadCatalog)}>刷新应用</button>
     </div>
     {error && <p role="alert" className="error">{error}</p>}
@@ -264,14 +380,27 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
             source,
             zip,
             upgrade: upgrading || undefined,
+            previousJobId: reimportJobId || undefined,
+            modelSelection: selectedModel ? { provider: selectedModel.provider, model: selectedModel.id, reasoningEffort: reasoningEffort || undefined } : undefined,
           }), sessionId, contextId))
           setSelected(created.id); setAdding(false); setUpgrading(false)
+          if (created.status === 'draft') await api.appAnalyze(created.id, '', sessionId, contextId)
         }) }}>
           <h3 className="wizard-section-title">{upgrading ? `升级已有应用 (${slug})` : '第一步：选择要部署的应用'}</h3>
           <label>应用名称<input required value={name} onChange={e => setName(e.target.value)} placeholder="例如：订单查询助手" /></label>
-          <label>英文标识<input required disabled={upgrading} pattern="[a-z][a-z0-9-]{2,39}" value={slug} onChange={e => setSlug(e.target.value)} placeholder="例如：order-helper" /></label>
+          <label>英文标识<input required disabled={upgrading || !!reimportJobId} pattern="[a-z][a-z0-9-]{2,39}" value={slug} onChange={e => setSlug(e.target.value)} placeholder="例如：order-helper" /></label>
           <label>应用简介（可选）<input value={description} onChange={e => setDescription(e.target.value)} placeholder="简要说明应用业务用途" /></label>
-          <label>容器监听端口（可选，留空由 AI 自动识别）<input type="number" min={1} max={65535} value={containerPort} onChange={e => setContainerPort(e.target.value)} placeholder="例如：8080" /></label>
+          <label>容器监听端口（默认 8080）<input type="number" min={1} max={65535} value={containerPort} onChange={e => setContainerPort(e.target.value)} placeholder="8080" /></label>
+          <label>AI 改造模型<select aria-label="AI 改造模型" value={modelChoice} onChange={e => { setModelChoice(e.target.value); setReasoningEffort('') }}>
+            <option value="">沿用当前对话模型</option>
+            {modelGroups.map(group => <optgroup key={group.id} label={group.name}>
+              {group.models.map(model => <option key={model.id} value={JSON.stringify([group.id, model.id])}>{model.name}</option>)}
+            </optgroup>)}
+          </select></label>
+          {!!selectedModel?.reasoning?.efforts.length && <label>推理强度<select aria-label="推理强度" value={reasoningEffort} onChange={e => setReasoningEffort(e.target.value)}>
+            <option value="">模型默认</option>
+            {selectedModel.reasoning.efforts.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
+          </select></label>}
           <label>源码 ZIP<input type="file" accept=".zip" onChange={e => setFile(e.target.files?.[0])}/></label>
           <label>或本机源码文件夹<input disabled={!!file} value={source} onChange={e => setSource(e.target.value)} placeholder="/Users/你的名字/Projects/my-app" /></label>
           <div className="notice" style={{ margin: '14px 0' }}>系统将在隔离副本中进行分析改造，原项目不受影响；本地扫描依赖本机 Python 3.9+ 环境。</div>
@@ -298,6 +427,7 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
         {catalog.map(app => {
           const isRunning = app.status === 'running'
           const isFailed = app.status === 'failed'
+          const verifiedJob = isRunning ? jobs.find(item => item.slug === app.slug && item.version === app.current_version && item.status === 'verified') : undefined
           return (
             <div key={app.slug} className="resource-card">
               <div>
@@ -350,13 +480,19 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                       </span>
                     </div>
                   )}
+                  {verifiedJob && api.appSetSkillEnabled && (
+                    <button disabled={busy} onClick={() => void run(async () => {
+                      await api.appSetSkillEnabled!(verifiedJob.id, verifiedJob.userDisabled === true, contextId)
+                    })}>{verifiedJob.userDisabled ? '启用应用技能' : '停用应用技能'}</button>
+                  )}
                 </div>
               </div>
 
               <div>
                 <div className="card-actions" style={{ justifyContent: 'space-between' }}>
-                  {isFailed ? (
+                  {isFailed && app.can_manage ? (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      <button className="primary" disabled={busy} onClick={() => reopenFailedApp(app)}>重新部署</button>
                       {api.appLogs && (
                         <button disabled={busy} onClick={() => void run(async () => {
                           const res = JSON.parse(await api.appLogs!(app.slug, contextId))
@@ -376,19 +512,15 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                       {/^https?:\/\//i.test(app.app_url) && (
                         <a href={app.app_url} target="_blank" rel="noreferrer" className="btn-link">打开应用</a>
                       )}
-                      {app.can_manage && api.appVersions && (
-                        <button disabled={busy} onClick={() => {
-                          setName(app.name)
-                          setSlug(app.slug)
-                          setDescription(app.description ?? '')
-                          setContainerPort(app.container_port ? String(app.container_port) : '')
-                          setUpgrading(true)
-                          setAdding(true)
-                        }}>升级应用</button>
+                      {app.can_manage && (
+                        <button disabled={busy} onClick={() => openUpgrade(app)}>升级应用</button>
                       )}
                     </div>
                   )}
 
+                  {!app.can_manage && <button onClick={() => setManagingSlug(managingSlug === app.slug ? '' : app.slug)}>
+                    {managingSlug === app.slug ? '收起详情' : '查看详情'}
+                  </button>}
                   {app.can_manage && api.appVersions && (
                     <button disabled={busy} onClick={() => void run(async () => {
                       if (managingSlug === app.slug) {
@@ -406,6 +538,13 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                   )}
                 </div>
 
+                {!app.can_manage && managingSlug === app.slug && (
+                  <div className="app-drawer">
+                    <p className="badge">共享 · 只读</p>
+                    <p>{app.description || '暂无应用简介'}</p>
+                    <p>当前版本 v{app.current_version || 1} · {deploymentStatus[app.status] ?? app.status}</p>
+                  </div>
+                )}
                 {app.can_manage && managingSlug === app.slug && (
                   <div className="app-drawer">
                     <div className="row" style={{ marginTop: 0 }}>
@@ -424,15 +563,20 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                       {api.appStorage && (
                         <button disabled={busy} onClick={() => void run(async () => {
                           const res = JSON.parse(await api.appStorage!(app.slug, contextId))
-                          setStorageVolumes(res.volumes ?? res.storage_mounts ?? [])
+                          if (!Array.isArray(res.mounts)) throw new Error('平台未返回有效存储详情')
+                          setStorageVolumes(res.mounts)
                         })}>持久化存储卷</button>
                       )}
                       {api.appUpdateConfig && (
-                        <button disabled={busy} onClick={() => {
+                        <button disabled={busy} onClick={() => void run(async () => {
                           if (editingConfigSlug === app.slug) { setEditingConfigSlug(''); return }
+                          const detail = JSON.parse(await api.appDetails(app.slug, contextId))
+                          setConfigDraftRows(detail.app_config ?? [])
+                          setConfigResourceIds(detail.resource_ids ?? [])
+                          const available = JSON.parse(await api.appResources(contextId))
+                          setResources(available.resources ?? [])
                           setEditingConfigSlug(app.slug)
-                          setConfigDraftRows([{ key: '', value: '' }])
-                        }}>{editingConfigSlug === app.slug ? '取消配置更新' : '更新运行配置'}</button>
+                        })}>{editingConfigSlug === app.slug ? '取消配置更新' : '更新运行配置'}</button>
                       )}
                     </div>
 
@@ -444,16 +588,30 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                             <input placeholder="环境变量名（如 API_KEY）" value={row.key} onChange={e => {
                               const next = [...configDraftRows]; next[idx] = { ...row, key: e.target.value }; setConfigDraftRows(next)
                             }} />
-                            <input placeholder="配置值" value={row.value} onChange={e => {
-                              const next = [...configDraftRows]; next[idx] = { ...row, value: e.target.value }; setConfigDraftRows(next)
+                            <input type="password" autoComplete="off" placeholder="配置值" disabled={!!row.resource_id} value={row.value} onChange={e => {
+                              const next = [...configDraftRows]; next[idx] = { ...row, value: e.target.value, value_source: 'manual' }; setConfigDraftRows(next)
                             }} />
+                            {(row.resource_id || resources.some(r => r.env_keys.includes(row.key))) && (
+                              <select aria-label={`${row.key} 的配置来源`} value={row.resource_id ?? ''} onChange={e => {
+                                const next = [...configDraftRows]
+                                next[idx] = { ...row, value: '', resource_id: e.target.value || undefined, value_source: e.target.value ? 'resource' : 'manual' }
+                                setConfigDraftRows(next)
+                              }}>
+                                <option value="">手动配置</option>
+                                {row.resource_id && !resources.some(r => r.id === row.resource_id) && <option value={row.resource_id}>{row.source_label || row.resource_id}</option>}
+                                {resources.filter(r => r.env_keys.includes(row.key)).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                              </select>
+                            )}
                           </div>
                         ))}
                         <div className="row">
                           <button type="button" onClick={() => setConfigDraftRows([...configDraftRows, { key: '', value: '' }])}>+ 添加配置项</button>
                           <button className="primary" disabled={busy} onClick={() => void run(async () => {
-                            const app_config = configDraftRows.filter(r => r.key.trim()).map(r => ({ key: r.key.trim(), value: r.value }))
-                            await api.appUpdateConfig!(app.slug, JSON.stringify({ app_config, resource_ids: [] }), contextId)
+                            const app_config = configDraftRows.filter(r => r.key.trim()).map(r => ({
+                              ...r, key: r.key.trim(), value: r.resource_id ? '' : r.value,
+                            }))
+                            const resource_ids = [...new Set([...configResourceIds, ...app_config.flatMap(row => row.resource_id ? [row.resource_id] : [])])]
+                            await api.appUpdateConfig!(app.slug, JSON.stringify({ app_config, resource_ids }), contextId)
                             setEditingConfigSlug('')
                             setNotice('运行配置已更新，请重新执行业务验证以启用技能。')
                             await loadCatalog()
@@ -465,11 +623,17 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                     {storageVolumes && (
                       <div style={{ marginTop: 10, padding: 10, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 6 }}>
                         <div style={{ fontWeight: 600, marginBottom: 6, color: '#334155' }}>挂载卷状态</div>
+                        {storageVolumes.length > 0 && <button disabled={busy} onClick={() => void run(async () => {
+                          await downloadFromPlatform(app.slug, { storage: true })
+                        })}>下载应用全部卷</button>}
                         {storageVolumes.length === 0 ? <p style={{ margin: 0, color: '#64748b' }}><small>未配置持久化挂载卷。</small></p> : (
                           <ul style={{ margin: 0, paddingLeft: 18 }}>
                             {storageVolumes.map((vol, i) => (
                               <li key={i}>
-                                <code>{vol.target}</code>{vol.source_rel ? ` ← ${vol.source_rel}` : ''}{typeof vol.file_count === 'number' ? ` · ${vol.file_count} 个文件` : ''}{typeof vol.size_bytes === 'number' ? ` (${vol.size_bytes} B)` : ''}{vol.seed ? ' · 含初始种子数据保护' : ''}
+                                <code>{vol.container_path ?? vol.target}</code>{vol.relative_path ? ` ← ${vol.relative_path}` : ''}{typeof vol.file_count === 'number' ? ` · ${vol.file_count} 个文件` : ''}{vol.size_human ? ` · ${vol.size_human}` : ''}{vol.seed_protected ? ' · 初始种子数据保护' : ''}
+                                {vol.name && <button disabled={busy} onClick={() => void run(async () => {
+                                  await downloadFromPlatform(app.slug, { mount: vol.name })
+                                })}>下载备份</button>}
                               </li>
                             ))}
                           </ul>
@@ -482,12 +646,23 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                       {versionList.map(v => (
                         <div key={v.version} className="row" style={{ justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px dashed #e2e8f0' }}>
                           <span><strong>v{v.version}</strong> ({v.status}){v.version_note ? ` · ${v.version_note}` : ''}</span>
+                          <details><summary>版本文件</summary>
+                            {['app.tar', 'skill.zip', 'Dockerfile', 'manifest.json'].map(artifact => (
+                              <button key={artifact} disabled={busy} onClick={() => void run(async () => {
+                                await downloadFromPlatform(app.slug, { version: v.version, artifact })
+                              })}>{artifact}</button>
+                            ))}
+                          </details>
                           {api.appRollback && v.version !== app.current_version && (
                             v.status === 'running' ? (
                               <button disabled={busy} onClick={() => void run(async () => {
+                                if (!window.confirm(`回退到 v${v.version}？\n${ROLLBACK_NOTICE}`)) return
                                 const rb = JSON.parse(await api.appRollback!(app.slug, JSON.stringify({ targetVersion: v.version, reason: `回退至 v${v.version}` }), contextId))
-                                setNotice(`${rb.message || `已回退至 v${v.version}`}（${rb.rollback_notice || ROLLBACK_NOTICE}）`)
+                                setNotice(`${rb.message || `已回退至 v${v.version}`}。${rb.verification?.detail || (rb.local_skill_verified ? "本地技能已通过业务验证。" : "本地技能等待验证。")} ${rb.rollback_notice || ROLLBACK_NOTICE}`)
+                                const res = JSON.parse(await api.appVersions!(app.slug, contextId))
+                                setVersionList(res.versions ?? [])
                                 await loadCatalog()
+                                if (rb.job_id && !rb.local_skill_verified) setSelected(rb.job_id)
                               })}>回退到此版本</button>
                             ) : <small style={{ color: '#94a3b8' }}>部署未成功 · 不可回退</small>
                           )}
@@ -502,6 +677,7 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                           同时清理持久化数据卷
                         </label>
                         <button style={{ color: '#dc2626', borderColor: '#fca5a5' }} disabled={busy} onClick={() => void run(async () => {
+                          if (!window.confirm(purgeVolumes ? '删除应用并清理持久化数据卷？' : '删除此应用？')) return
                           await api.appDelete!(app.slug, purgeVolumes, contextId)
                           setManagingSlug('')
                           await loadCatalog()
@@ -540,6 +716,22 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
 
     {!adding && job && <>
       {job.error && <p className="error">{job.error}</p>}
+      {['review', 'ready', 'failed', 'cancelled'].includes(job.status) && (
+        <div className="row">
+          {job.proposal && api.appHandoff && job.status !== 'cancelled' && (
+            <button disabled={busy} onClick={() => void run(async () => {
+              const result = JSON.parse(await api.appHandoff!(job.id, contextId))
+              await navigator.clipboard.writeText(result.prompt)
+              setNotice('交接提示词已复制')
+            })}>复制交接说明</button>
+          )}
+          <button disabled={busy} onClick={() => {
+            setName(job.name); setSlug(job.slug); setDescription(job.description ?? '')
+            setContainerPort(job.port ? String(job.port) : '')
+            setSource(''); setFile(undefined); setReimportJobId(job.id); setUpgrading(!!(job.upgrade || job.published)); setAdding(true)
+          }}>重新导入源码</button>
+        </div>
+      )}
 
       {/* AI Execution Step Timeline Card */}
       {(job.events.length > 0 || active.has(job.status)) && (
@@ -601,6 +793,9 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
       {currentStep === 2 && (
         <div className="wizard-section-card">
           <h3 className="wizard-section-title">第二步：AI 分析与改造方案</h3>
+          {job.status === 'analyzing' && api.appCancelAnalysis && (
+            <button disabled={busy} onClick={() => void run(() => api.appCancelAnalysis!(job.id, contextId))}>取消分析</button>
+          )}
           {job.status === 'analyzing' && (
             <div className="notice" style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '10px 0' }}>
               <span className="pulse-indicator"><span className="pulse-dot-ping"/><span className="pulse-dot"/></span>
@@ -612,7 +807,10 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px', margin: '10px 0' }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: '#334155', marginBottom: 4 }}>代码扫描结果</div>
               <div style={{ fontSize: 12, color: '#64748b' }}>
-                语言架构：<strong>{job.discoveryReport.language || '未知语言'}</strong>{job.discoveryReport.framework ? ` / ${job.discoveryReport.framework}` : ''} · API 接口：<strong>{job.discoveryReport.api_count ?? 0}</strong> 个 · 前端页面：<strong>{job.discoveryReport.page_count ?? 0}</strong> 个 · 存储目录：<strong>{job.discoveryReport.storage_count ?? 0}</strong> 处
+                运行环境：<strong>{job.discoveryReport.tech_stack?.language || '未知语言'} {job.discoveryReport.tech_stack?.runtime_version}</strong>
+                {job.discoveryReport.tech_stack?.frameworks?.length ? ` · ${job.discoveryReport.tech_stack.frameworks.join('、')}` : ''}
+                {' · '}API {job.discoveryReport.apis_overview?.total ?? 0} 个 · 页面 {job.discoveryReport.pages_overview?.total ?? 0} 个
+                {job.discoveryReport.auth_and_credentials?.api_auth && <p>{job.discoveryReport.auth_and_credentials.api_auth}</p>}
               </div>
             </div>
           )}
@@ -623,16 +821,14 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
             </div>
           )}
 
-          {job.transformationReport?.highlights?.length ? (
-            <details style={{ margin: '10px 0' }}>
-              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#334155' }}>
-                改造与验证要点（{job.transformationReport.highlights.length}）
-              </summary>
-              <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
-                {job.transformationReport.highlights.map((h, i) => <li key={i} style={{ margin: '4px 0', fontSize: 12, color: '#475569' }}>{h}</li>)}
-              </ul>
+          {job.transformationReport?.headline && (
+            <details>
+              <summary>改造与验证要点</summary>
+              <p>{job.transformationReport.headline}</p>
+              {[job.transformationReport.dockerfile_summary, job.transformationReport.storage_summary, job.transformationReport.health_check]
+                .filter(Boolean).map((detail, index) => <p key={index}>{detail}</p>)}
             </details>
-          ) : null}
+          )}
 
           {!!issues.length && (
             <details style={{ margin: '10px 0' }}>
@@ -642,7 +838,7 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
               <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
                 {issues.map((item, i) => (
                   <li key={i} style={{ margin: '4px 0', fontSize: 12 }}>
-                    <strong>[{item.severity}] {item.title}</strong>：{item.detail}{item.resolution ? `（处理：${item.resolution}）` : ''}
+                    <strong>{item.title || item.id || "改造事项"}</strong> · {item.impact || item.detail}{item.recommendation || item.resolution ? ` · ${item.recommendation || item.resolution}` : ""}
                   </li>
                 ))}
               </ul>
@@ -656,15 +852,13 @@ export function AppsPanel({ api, sessionId, contextId, refreshSignal }: { api: O
                 <div key={d.id} style={{ marginTop: 8 }}>
                   <p style={{ margin: '4px 0', fontWeight: 500 }}>{d.question}</p>
                   <div className="row" style={{ marginTop: 4 }}>
-                    {d.options.map(opt => (
-                      <button key={opt.id} type="button" disabled={disabled} onClick={() => {
-                        const line = `关于「${d.question}」：选择「${opt.label}」`
-                        setFeedback(prev => prev.trim() ? `${prev.trim()}
-${line}` : line)
-                      }}>
-                        {opt.label}{opt.recommended ? '（推荐）' : ''}
-                      </button>
-                    ))}
+                    {d.options.map((opt, index) => {
+                      const label = typeof opt === 'string' ? opt : opt.label
+                      return <button key={index} type="button" disabled={disabled} onClick={() => {
+                        const line = `关于「${d.question}」：选择「${label}」`
+                        setFeedback(prev => prev.trim() ? `${prev.trim()}\n${line}` : line)
+                      }}>{label}{typeof opt !== 'string' && opt.recommended ? '（推荐）' : ''}</button>
+                    })}
                   </div>
                 </div>
               ))}
@@ -707,7 +901,7 @@ ${line}` : line)
               value={feedback}
               disabled={disabled}
               onChange={e => setFeedback(e.target.value)}
-              placeholder="可以告诉 AI 应用用途，或回答上面的待确认问题..."
+              placeholder="可以告诉 AI 应用用途，或回答待确认问题。凭据请在业务验证时填写。"
               style={{ width: '100%', minHeight: 70 }}
             />
             <div className="row" style={{ marginTop: 8, justifyContent: 'space-between' }}>
@@ -732,13 +926,17 @@ ${line}` : line)
             服务器将构建并运行这个应用。下面的配置仅供应用运行，不会暴露给模型。
           </p>
 
-          {(job.proposal?.contract.configs ?? []).map(c => {
+          {!!job.preparationChecks?.length && <details>
+            <summary>查看交付检查结果</summary>
+            {job.preparationChecks.map(check => <p key={check.label}><strong>{check.label}</strong> · {check.status === 'passed' ? '通过' : '待验证'}{check.detail ? ` · ${check.detail}` : ''}</p>)}
+          </details>}
+          {[...declaredConfigs, ...extraConfigs.map((key): JobConfig => ({ key, description: key, default: '', required: false, secret: true }))].map(c => {
             const val = bindings[c.key] ? '' : configs[c.key] ?? ''
             const loopback = !bindings[c.key] && isLoopbackConnection(c.key, val)
             return (
               <div key={c.key} style={{ marginBottom: 12, padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
                 <label style={{ margin: 0, fontWeight: 500 }}>
-                  {c.description || c.key} {c.required ? (c.has_original_value ? '（必填 · 已从原项目提取默认值）' : '（必填）') : ''}
+                  {c.description || c.key} {c.required ? (c.has_original_value ? '（必填 · 可沿用原配置）' : '（必填）') : ''}
                   <input
                     type={c.secret ? 'password' : 'text'}
                     autoComplete="off"
@@ -771,7 +969,7 @@ ${line}` : line)
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
                 {storageMounts.map((m, i) => (
                   <li key={i} style={{ margin: '4px 0' }}>
-                    <code>{m.source_rel}</code> → 容器 <code>{m.target}</code>{m.env_key ? `（环境变量 ${m.env_key}）` : ''}{m.seed !== false ? ' · 自动保留初始种子数据' : ''}
+                    <code>{m.relative_path ?? m.source_rel}</code> → 容器 <code>{m.container_path ?? m.target}</code>{m.env_key ? `（环境变量 ${m.env_key}）` : ''}{m.seed !== false ? ' · 自动保留初始种子数据' : ''}
                   </li>
                 ))}
               </ul>
@@ -805,25 +1003,47 @@ ${line}` : line)
           </label>
 
           <div className="row" style={{ marginTop: 14 }}>
-            <button className="primary" disabled={disabled || !confirm} onClick={() => void run(async () => {
-              await api.appPublish(job.id, JSON.stringify({
+            <button className="primary" disabled={disabled || !confirm || draftLoaded !== `${job.id}:${job.artifactHash}`} onClick={() => void run(async () => {
+              const input = {
                 artifactHash: job.artifactHash,
                 version_note: versionNote.trim() || undefined,
-                config: Object.entries(configs).map(([key, value]) => ({
-                  key,
-                  value: bindings[key] ? '' : value,
-                  resource_id: bindings[key] || undefined,
-                  local_connection_confirmed: localConfirmed[key] || undefined,
-                })),
-              }), contextId)
-              setConfigs({}); setConfirm(false); await loadCatalog()
+                config: deploymentRows(),
+              }
+              await draftSaveQueue.current.catch(() => {})
+              const confirmation = JSON.parse(await api.appConfirmDeployment(job.id, JSON.stringify(input), contextId))
+              await api.appPublish(job.id, JSON.stringify({ ...input, ...confirmation }), contextId)
+              setConfirm(false); await loadCatalog()
             })}>确认发布到 OPC</button>
+            {api.appSaveConfigDraft && (
+              <button type="button" disabled={disabled} onClick={() => void run(async () => {
+                await draftSaveQueue.current.catch(() => {})
+                await api.appSaveConfigDraft!(job.id, JSON.stringify({
+                  artifactHash: job.artifactHash, rows: deploymentRows(), versionNote,
+                }), contextId)
+                setSelected('')
+                setNotice('部署配置草稿已保存')
+              })}>保存草稿并退出</button>
+            )}
+            <button type="button" disabled={disabled} onClick={() => void run(async () => {
+              if (skillPreview) { setSkillPreview(''); return }
+              setSkillPreview(JSON.parse(await api.appSkillPreview(job.id, contextId)).markdown)
+            })}>{skillPreview ? '关闭技能预览' : '预览完整应用技能'}</button>
+            {api.appLocalArtifact && (
+              <details><summary>下载交付文件</summary>
+                {['app.tar', 'skill.zip', 'app-manifest.json', 'summary.json'].map(filename => (
+                  <button key={filename} disabled={disabled} onClick={() => void run(async () => {
+                    saveDownload(JSON.parse(await api.appLocalArtifact!(job.id, filename, contextId)))
+                  })}>{filename}</button>
+                ))}
+              </details>
+            )}
             {api.appReopenReview && (
               <button type="button" disabled={disabled} onClick={() => void run(async () => { await api.appReopenReview!(job.id, contextId) })}>
                 返回调整方案
               </button>
             )}
           </div>
+          {skillPreview && <div className="notice"><ReactMarkdown>{skillPreview}</ReactMarkdown></div>}
         </div>
       )}
 
@@ -838,16 +1058,18 @@ ${line}` : line)
           )}
           {deployment?.error_message && <p className="error">{deployment.error_message}</p>}
 
-          {requiredAuthKeys.length > 0 && job.status !== 'verified' && (
+          {credentialFields.length > 0 && job.status !== 'verified' && (
             <details open={job.status === 'failed'} style={{ margin: '10px 0' }}>
-              <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 12 }}>验证凭据（可选，用于受保护接口探针或更新存储凭据）</summary>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 12 }}>应用账号验证</summary>
               <div style={{ marginTop: 6 }}>
-                {requiredAuthKeys.map(k => (
-                  <label key={k} style={{ fontSize: 12, display: 'block', margin: '6px 0' }}>
-                    {k}
-                    <input type="password" autoComplete="off" value={probeCredentials[k] ?? ''} onChange={e => setProbeCredentials({ ...probeCredentials, [k]: e.target.value })} placeholder="留空则使用部署时保存的凭据" style={{ marginTop: 4 }} />
+                <p>填写应用账号和密码，或提供已有会话。默认只用于本次验证。</p>
+                {credentialFields.map(({ key, kind }) => (
+                  <label key={key} style={{ fontSize: 12, display: 'block', margin: '6px 0' }}>
+                    {kind === 'username' ? '应用账号' : kind === 'password' ? '应用密码' : '会话凭据'}（{key}）
+                    <input type={kind === 'username' ? 'text' : 'password'} autoComplete="off" value={probeCredentials[key] ?? ''} onChange={e => setProbeCredentials({ ...probeCredentials, [key]: e.target.value })} style={{ marginTop: 4 }} />
                   </label>
                 ))}
+                <label><input type="checkbox" checked={rememberCredentials} onChange={e => setRememberCredentials(e.target.checked)} /> 验证通过后将凭据保存在本机，供对话调用此应用技能</label>
               </div>
             </details>
           )}
@@ -856,14 +1078,20 @@ ${line}` : line)
             <button className="primary" disabled={disabled} onClick={() => void run(async () => {
               const nonEmptyCreds = Object.fromEntries(Object.entries(probeCredentials).filter(([, v]) => v.trim() !== ''))
               if (Object.keys(nonEmptyCreds).length > 0 && api.appVerifyWithOptions) {
-                await api.appVerifyWithOptions(job.id, JSON.stringify({ credentials: nonEmptyCreds }), contextId)
+                const result = JSON.parse(await api.appVerifyWithOptions(job.id, JSON.stringify({ credentials: nonEmptyCreds, rememberCredentials }), contextId))
+                if (result.status === 'verified') setProbeCredentials({})
               } else {
                 await api.appVerify(job.id, contextId)
               }
-            })}>检查部署并验证业务</button>
+            })}>{job.status === 'unknown' ? '核对发布结果' : deployment?.status === 'running' && job.status === 'failed' ? '仅重试业务验证' : '检查部署并验证业务'}</button>
             {api.appRecheck && <button disabled={busy} onClick={() => void run(async () => { await api.appRecheck!(job.slug, contextId) })}>健康重检</button>}
             <button disabled={busy} onClick={() => void run(async () => { const remote = JSON.parse(await api.appDetails(job.slug, contextId)); setLogs(remote.build_log || remote.error_message || '暂无日志') })}>查看构建日志</button>
             {api.appLogs && <button disabled={busy} onClick={() => void run(async () => { const remote = JSON.parse(await api.appLogs!(job.slug, contextId)); setLogs(remote.runtime_logs || '暂无运行日志') })}>查看运行日志</button>}
+            {job.status === 'failed' && job.published && deployment?.status === 'failed' && (
+              <button disabled={disabled} onClick={() => void run(async () => {
+                await api.appReopenDeployment(job.id, contextId)
+              })}>核对配置并重新部署</button>
+            )}
             {(job.status === 'failed' || deployment?.status === 'failed') && (
               <button style={{ color: '#dc2626', borderColor: '#fca5a5' }} disabled={disabled} onClick={() => void run(async () => {
                 const diagParts = [
@@ -885,15 +1113,18 @@ ${line}` : line)
                 <button className="primary" disabled={disabled} onClick={() => void run(async () => {
                   if (api.appVerifyWithOptions) await api.appVerifyWithOptions(job.id, JSON.stringify({ confirmPageVerification: true }), contextId)
                   else await api.appVerify(job.id, contextId)
-                })}>已完成页面验收，启用技能</button>
+                })}>确认已完成页面验收</button>
               </div>
             </div>
           )}
 
           {job.status === 'verified' && (!deployment || (deployment.status === 'running' && deployment.current_version === job.version)) && (
             <div className="notice" style={{ background: '#ecfdf5', borderColor: '#10b981', color: '#065f46', marginTop: 14 }}>
-              <strong>✓ 应用只读业务验证已通过，技能已成功就绪！</strong>
-              <p style={{ margin: '6px 0 0' }}>回到对话框输入 <strong>/app-{job.slug}</strong> 即可唤起专属应用技能，让 AI 调用业务接口。页面操作尚未验证。<a href={job.url} target="_blank" rel="noreferrer" style={{ marginLeft: 8, color: '#047857', fontWeight: 600 }}>打开应用页面 →</a></p>
+              <strong>{job.pagesVerified ? '页面验收已确认' : '只读业务验证已通过'}，{job.userDisabled ? '技能已停用' : '技能可用'}</strong>
+              <p style={{ margin: '6px 0 0' }}>{!job.userDisabled && <>回到对话框输入 <strong>/app-{job.slug}</strong> 即可唤起专属应用技能。</>}{!job.pagesVerified && '页面操作尚未验证。'}<a href={job.url} target="_blank" rel="noreferrer" style={{ marginLeft: 8, color: '#047857', fontWeight: 600 }}>打开应用页面 →</a></p>
+              {api.appSetSkillEnabled && <button disabled={disabled} onClick={() => void run(async () => {
+                await api.appSetSkillEnabled!(job.id, job.userDisabled === true, contextId)
+              })}>{job.userDisabled ? '启用应用技能' : '停用应用技能'}</button>}
             </div>
           )}
 

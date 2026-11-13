@@ -8,15 +8,9 @@ import re
 try:
     import tomllib
 except ImportError:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        tomllib = None
+    from vendor import tomli as tomllib
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
+from vendor import yaml
 
 from app_delivery.scripts import delivery
 
@@ -26,11 +20,11 @@ def document(source: Path, name: str):
     text = delivery.text_of(path)
     suffix = path.suffix.lower()
     try:
-        if suffix in {".yaml", ".yml"} and yaml is not None:
+        if suffix in {".yaml", ".yml"}:
             return yaml.safe_load(text)
         if suffix == ".json":
             return json.loads(text)
-        if suffix == ".toml" and tomllib is not None:
+        if suffix == ".toml":
             return tomllib.loads(text)
         if path.name.startswith(".env") or suffix == ".properties":
             result = {}

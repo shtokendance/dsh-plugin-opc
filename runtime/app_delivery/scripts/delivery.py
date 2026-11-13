@@ -85,6 +85,9 @@ def secret_lines(text, source_name=""):
         except ValueError:
             pass
     for number, line in enumerate(text.splitlines(), 1):
+        if re.search(r"(?:密码|口令|令牌|授权码)\s*[:：]\s*\S", line):
+            findings.append(number)
+            continue
         if "-----BEGIN " in line and "PRIVATE KEY-----" in line:
             findings.append(number)
             continue
@@ -259,12 +262,23 @@ def context_files(work, contract):
     return files
 
 
+EMBEDDED_CREDENTIAL_FIELDS = {
+    "username", "admin_username", "password", "admin_password",
+    "default_username", "default_password", "default_token",
+    "auth_token", "token", "api_key", "cookie", "default_credential",
+    "login_body", "login_body_template",
+}
+
+
 def validate_credential_references(contract):
     profiles = contract.get("auth_profiles", {})
     require(isinstance(profiles, dict), "credential profiles must be an object")
     for profile in [contract.get("auth_profile", {})] + list(profiles.values()):
         require(isinstance(profile, dict), "credential profile must be an object")
-        require(not any(profile.get(key) for key in ("password", "admin_password", "auth_token", "token", "api_key", "cookie", "default_credential", "login_body_template")), "Use runtime credential references, not embedded credentials")
+        require(not any(profile.get(key) for key in EMBEDDED_CREDENTIAL_FIELDS), "Use runtime credential references, not embedded credentials")
+        for key in ("username_env", "password_env", "token_env"):
+            if key in profile:
+                require(isinstance(profile[key], str) and ENV_NAME.fullmatch(profile[key]), "Credential reference must be an environment variable name")
 
 
 def check_work(work):
@@ -464,6 +478,14 @@ def owned_remove(kind, name, run_id):
     docker(kind, "rm", *(["--force"] if kind == "container" else []), name)
 
 
+def json_matches(data, expected):
+    try:
+        parsed = json.loads(data) if isinstance(data, (str, bytes)) else data
+        return subset(parsed, expected)
+    except Exception:
+        return False
+
+
 def subset(actual, expected):
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(k in actual and subset(actual[k], v) for k, v in expected.items())
@@ -538,7 +560,7 @@ def smoke(args):
             try:
                 code, content_type, data = execute(health_contract, "health", {})
                 evidence["health_last"] = {"status": code, "content_type": content_type, "identity_match": False}
-                matched = code == health["status"] and "application/json" in content_type and subset(json.loads(data), health["json_contains"])
+                matched = code == health["status"] and json_matches(data, health["json_contains"])
                 evidence["health_last"]["identity_match"] = matched
                 require(matched, "health response is not this application's declared identity")
                 break
@@ -550,7 +572,7 @@ def smoke(args):
         evidence["checks"].append({"kind": "health-identity", "ok": True})
         for case in contract["verification"].get("cases", []):
             code, content_type, data = execute(contract, case["operation"], case.get("params", {}), case.get("body"), credential_env=credentials)
-            require(code == case.get("status", 200) and "application/json" in content_type and subset(json.loads(data), case["json_contains"]), "business probe failed: " + case["operation"])
+            require(code == case.get("status", 200) and json_matches(data, case["json_contains"]), "business probe failed: " + case["operation"])
             evidence["checks"].append({"kind": "read-only-business", "operation": case["operation"], "status": code, "ok": True})
         browser_pending = bool(contract["pages"])
         evidence["status"] = "awaiting-browser-verification" if browser_pending else "verified-local"

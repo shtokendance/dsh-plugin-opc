@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 if sys.version_info < (3, 9):
@@ -22,11 +23,10 @@ if sys.version_info < (3, 9):
 
 from app_delivery.scripts import delivery as d
 from app_delivery.scripts.invoke_api import execute
-from app_delivery_auth import resolve_authentication, validate_auth_probe_coverage, validate_auth_questions
+from app_delivery_auth import resolve_authentication, validate_auth_evidence, validate_auth_probe_coverage, validate_auth_questions
 from app_delivery_config import loopback_connection, original_fields, original_value
 from app_delivery_migration import (
     enrich_contract_and_discovery_report,
-    inspect_credentials_in_source,
     inspect_local_sqlite_files,
     scan_app_routes_and_pages,
     select_and_filter_platform_resources,
@@ -109,6 +109,7 @@ def resolve_and_enrich_proposal(
     failure_feedback: str = "",
     revision_count: int = 1,
     feedback_text: str = "",
+    expected_port: int | None = None,
 ) -> tuple[dict, dict | None, dict | None]:
     source = root / "review/source"
     draft_files = load_json_if_exists(root / "draft_files.json", {})
@@ -136,6 +137,8 @@ def resolve_and_enrich_proposal(
     discovery_report = None
     transformation_report = None
     contract = proposal.get("contract")
+    if expected_port is not None and not proposal.get("unresolved") and (contract or {}).get("runtime", {}).get("port") != expected_port:
+        raise ValueError("模型不能静默改变用户选择的容器端口")
     if isinstance(contract, dict) and source.is_dir():
         job_meta = {
             "slug": contract.get("slug", ""),
@@ -178,9 +181,7 @@ def resolve_and_enrich_proposal(
             if not isinstance(config, dict):
                 raise ValueError("配置项必须是对象")
             if config.get("source") is not None:
-                val = original_value(source, config["source"])
-                if not config.get("secret") and not config.get("default") and val:
-                    config["default"] = val
+                original_value(source, config["source"])
 
         unresolved_all = list(proposal.get("unresolved") or []) + list(contract.get("unresolved") or [])
         decisions = proposal.get("decisions", [])
@@ -218,24 +219,15 @@ def resolve_and_enrich_proposal(
 
         validate_auth_questions(proposal)
         resolve_authentication(contract)
-        for rule in contract.get("auth_rules", []):
-            for evidence in rule.get("evidence", []):
-                match = re.fullmatch(r"(.+):(\d+)(?:-\d+)?", str(evidence))
-                if not match:
-                    raise ValueError("认证证据必须是 文件:行号，而不是旧提案或猜测")
-                evidence_path = d.relative(source, match[1])
-                content = next((c["content"] for c in proposal["changes"] if c["path"] == match[1]), None)
-                if content is None:
-                    content = d.text_of(evidence_path) if evidence_path.is_file() else None
-                if content is None or not 1 <= int(match[2]) <= len(content.splitlines()):
-                    raise ValueError("认证证据位置不存在：" + str(evidence))
+        validate_auth_evidence(source, proposal)
+        d.validate_credential_references(contract)
         if not proposal.get("unresolved") and not contract.get("unresolved"):
             validate_auth_probe_coverage(contract)
 
     return proposal, discovery_report, transformation_report
 
 
-def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback=""):
+def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback="", expected_port=None, revision_count=1, feedback_text=""):
     original = root / "review"
     d.require(d.inspect_source(original / "source")[0] == d.load(original / "inventory.json")["files"], "Source changed; import again")
     d.require(isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "summary required")
@@ -246,6 +238,9 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
         repair=repair,
         failed_revision=failed_revision,
         failure_feedback=failure_feedback,
+        expected_port=expected_port,
+        revision_count=revision_count,
+        feedback_text=feedback_text,
     )
     shutil.copytree(original, target)
     seen = set()
@@ -254,17 +249,15 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
         d.require(name not in seen, "Duplicate file change")
         seen.add(name)
         p = d.relative(target / "source", name)
+        executable = (p.exists() and p.stat().st_mode & 0o111) or change.get("executable") is True
         d.require(isinstance(change.get("content"), str) and len(change["content"]) <= 2_000_000, "Invalid complete file content")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(change["content"], encoding="utf-8")
-        p.chmod(0o700 if change.get("executable") else 0o600)
+        p.chmod(0o700 if executable else 0o600)
     contract = proposal["contract"]
     d.require(contract["health"]["path"] == "/healthz" and contract["health"]["json_contains"].get("service") == contract["slug"], "Platform requires /healthz with service=slug")
-    # Credentials stay in original application files or runtime configuration, not generated skills.
-    for profile in [contract.get("auth_profile", {})] + list(contract.get("auth_profiles", {}).values()):
-        d.require(not any(profile.get(k) for k in ("password", "admin_password", "auth_token", "token", "api_key", "secret", "bearer_token", "session_cookie", "cookie_value", "admin_username", "username", "cookie", "default_credential")), "Use credential environment references, not embedded credentials")
     d.save(target / "app-contract.json", contract)
-    d.save(target / "review.json", {"kind": "ai-technical", "scope": "deployment-adaptation", "source": "DSH isolated preparation; deployment requires separate user confirmation", "approved_issue_ids": ["container-adaptation"], "unresolved": []})
+    d.save(target / "review.json", {"kind": "ai-technical", "scope": "deployment-adaptation", "source": "DSH isolated preparation; deployment requires separate user confirmation", "approved_issue_ids": [c["id"] for c in proposal.get("changes", [])] or ["NO_SOURCE_CHANGES"], "unresolved": []})
     (target / "analysis.md").write_text(proposal["summary"], encoding="utf-8")
     d.check_work(target)
     return proposal, discovery_report, transformation_report
@@ -288,6 +281,39 @@ def extract_original_config_values(source: Path, configs: list[dict]) -> tuple[d
 def main(body):
     root = Path(body["root"]).resolve()
     action = body["action"]
+    if action == "redact_feedback":
+        return redact(str(body.get("text", "")))
+    if action == "handoff":
+        job = body["job"]
+        revision = job.get("revision")
+        d.require(not revision or (isinstance(revision, str) and revision.isalnum()), "Invalid revision")
+        source = root / revision / "approved/source" if revision else root / "review/source"
+        inventory, _ = d.inspect_source(source)
+        snapshot = root / "handoff" / uuid.uuid4().hex
+        snapshot.mkdir(parents=True, mode=0o700)
+        for entry in inventory:
+            name = entry["path"]
+            src, dest = d.relative(source, name), d.relative(snapshot, name)
+            dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(src, dest)
+        plan = job["proposal"]
+        prompt = (
+            f"请改造应用 {job['name']}，保持标识 {job['slug']}、地址 {job['url']} 和端口 {job.get('port', 8080)}。\n"
+            f"独立源码副本：{snapshot}。先复制到新目录再修改。\n"
+            "保留原业务、认证、数据库和数据卷。依据实际登录与权限代码规划凭据引用，"
+            "秘密值只在受保护输入中提供。补齐 Dockerfile 和 /healthz，明确区分构建、健康、"
+            "只读业务及页面验证。提供可重新导入的源码，不直接发布。\n"
+            f"此前改造摘要（待核实）：\n{redact(plan.get('summary', ''))}\n"
+            f"待确认事项：{redact(json.dumps(plan.get('unresolved', []), ensure_ascii=False))}"
+        )
+        return {"prompt": prompt, "source_path": str(snapshot)}
+    if action == "validate_credential_references":
+        d.validate_credential_references(body["contract"])
+        return {"valid": True}
+    if action == "validate_verification_contract":
+        d.validate_credential_references(body["contract"])
+        validate_auth_probe_coverage(body["contract"])
+        return {"valid": True}
     if action == "prepare":
         with contextlib.redirect_stdout(io.StringIO()):
             d.prepare(argparse.Namespace(archive=body["source"], work_dir=str(root / "review"), slug=body["slug"], url=body["url"]))
@@ -305,6 +331,9 @@ def main(body):
         start = max(0, int(body.get("start", 1)) - 1)
         lines = redact(content, body["path"]).splitlines()
         excerpt = "\n".join(f"{i + start + 1}: {s[:400]}" for i, s in enumerate(lines[start:start+200]))
+        returned = len(lines[start:start+200])
+        range_info = f"返回第 {start + 1}–{start + returned} 行" if returned else "所请求范围无内容"
+        excerpt = f"{body['path']} 共 {len(lines)} 行，{range_info}。\n{excerpt}"
         fields = original_fields(source_dir, body["path"])
         if fields:
             excerpt += "\nOriginal configuration references (metadata only; values stay local):\n" + json.dumps(fields, ensure_ascii=False)
@@ -341,13 +370,6 @@ def main(body):
         return res
     if action == "inspect_local_storage":
         return inspect_local_sqlite_files(root / "review/source", str(body.get("path", "")))
-    if action == "inspect_credentials":
-        return inspect_credentials_in_source(
-            root / "review/source",
-            str(body.get("path", "")),
-            str(body.get("cipher_text", "")),
-            str(body.get("algorithm_hint", "")),
-        )
     if action == "read_go_dependency":
         target = dependency_path(root / "review/source", str(body.get("module", "")), str(body.get("path", "")))
         if not isinstance(target, Path):
@@ -398,6 +420,7 @@ def main(body):
                 failure_feedback=failure_fb,
                 revision_count=rev_count,
                 feedback_text=fb_text,
+                expected_port=body.get("expected_port"),
             )
             diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
             _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
@@ -418,6 +441,9 @@ def main(body):
                 repair=repair_flag,
                 failed_revision=failed_rev,
                 failure_feedback=failure_fb,
+                expected_port=body.get("expected_port"),
+                revision_count=rev_count,
+                feedback_text=fb_text,
             )
             d.bundle_work(temp_path / "approved", temp_path / "bundle")
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")
@@ -452,6 +478,9 @@ def main(body):
             repair=bool(body.get("repair")),
             failed_revision=str(body.get("failed_revision") or ""),
             failure_feedback=str(body.get("failure_feedback") or ""),
+            expected_port=body.get("expected_port"),
+            revision_count=int(body.get("revision_count") or 1),
+            feedback_text=str(body.get("feedback") or ""),
         )
         result = d.bundle_work(dest / "approved", dest / "bundle")
         syntax_check = check_archive_syntax(dest / "bundle/app.tar")
@@ -501,14 +530,15 @@ def main(body):
                 raise ValueError("回退技能包缺少有效的 references/operations.json")
             ops_raw = zf.read(ops_name).decode("utf-8")
             contract = json.loads(ops_raw)
+            d.validate_credential_references(contract)
             md_name = next((n for n in zf.namelist() if n == "SKILL.md" or n.endswith("/SKILL.md")), None)
             if md_name:
                 skill_markdown = zf.read(md_name).decode("utf-8", errors="replace")
         expected_slug = str(body.get("slug") or "").strip()
-        if expected_slug and contract.get("slug") and contract.get("slug") != expected_slug:
+        if expected_slug and contract.get("slug") != expected_slug:
             raise ValueError("回退技能包的标识与当前应用不一致")
         expected_url = str(body.get("app_url") or "").strip()
-        if expected_url and contract.get("base_url") and str(contract["base_url"]).rstrip("/") != expected_url.rstrip("/"):
+        if expected_url and str(contract.get("base_url", "")).rstrip("/") != expected_url.rstrip("/"):
             raise ValueError("回退技能包的访问地址与当前应用不一致")
         return {"contract": contract, "sha256": actual_sha, "skill_markdown": skill_markdown}
     if action == "probe":

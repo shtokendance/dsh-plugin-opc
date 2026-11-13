@@ -1,18 +1,35 @@
 /** JSON business payloads use the same public methods as the Host Remote service. */
+export interface AppModelGroup {
+  id: string
+  name: string
+  models: readonly { id: string; name: string; reasoning?: { efforts: readonly { id: string; name: string }[] } }[]
+}
 export interface OpcApi {
   appCatalog(context: string): Promise<string>
   appList(context: string): Promise<string>
+  appModels(context: string): Promise<string>
   appCreate(input: string, session: string, context: string): Promise<string>
   appAnalyze(id: string, feedback: string, session: string, context: string): Promise<string>
   appPrepare(id: string, hash: string, context: string): Promise<string>
   appReopenReview?(id: string, context: string): Promise<string>
+  appReopenDeployment(id: string, context: string): Promise<string>
+  appCancelAnalysis?(id: string, context: string): Promise<void>
+  appConfigDraft?(id: string, context: string): Promise<string>
+  appSaveConfigDraft?(id: string, body: string, context: string): Promise<void>
+  appLocalArtifact?(id: string, filename: string, context: string): Promise<string>
+  appHandoff?(id: string, context: string): Promise<string>
+  appSkillPreview(id: string, context: string): Promise<string>
+  appConfirmDeployment(id: string, input: string, context: string): Promise<string>
   appPublish(id: string, confirmation: string, context: string): Promise<string>
   appVerify(id: string, context: string): Promise<string>
   appVerifyWithOptions?(id: string, optionsJson: string, context: string): Promise<string>
+  appSetSkillEnabled?(id: string, enabled: boolean, context: string): Promise<void>
   appResources(context: string): Promise<string>
   appDetails(slug: string, context: string): Promise<string>
   appVersions?(slug: string, context: string): Promise<string>
   appLogs?(slug: string, context: string): Promise<string>
+  appDownload?(slug: string, selection: string, context: string): Promise<string>
+  appSaveDownload(slug: string, selection: string, context: string): Promise<string>
   appStorage?(slug: string, context: string): Promise<string>
   appRecheck?(slug: string, context: string): Promise<string>
   appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>

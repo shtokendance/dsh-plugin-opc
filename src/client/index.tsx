@@ -9,7 +9,7 @@ import { contribution } from '../remote-contract.ts'
 import { Panel, type PanelKind } from './Panel.tsx'
 import type { OpcApi } from './api.ts'
 
-type WireApi = { [K in keyof OpcApi]: OpcApi[K] extends (...args: infer A) => Promise<infer R> ? (...args: A) => Promise<RemoteResult<R>> : OpcApi[K] }
+type WireApi = { [K in keyof OpcApi]: NonNullable<OpcApi[K]> extends (...args: infer A) => Promise<infer R> ? (...args: A) => Promise<RemoteResult<R>> : OpcApi[K] }
 declare module '@deepseek-ai/dsh-typert-protocol' { interface TypertRemoteNamespaceMap { opc: WireApi } }
 export const inject = ['remote']
 export async function apply(ctx: Context): Promise<void> {
@@ -27,13 +27,34 @@ function registerPanels(ctx: Context): void {
   const api: OpcApi = {
     appCatalog: (...args) => unwrap(wire.appCatalog(...args)),
     appList: (...args) => unwrap(wire.appList(...args)),
+    appModels: (...args) => unwrap(wire.appModels(...args)),
     appCreate: (...args) => unwrap(wire.appCreate(...args)),
     appAnalyze: (...args) => unwrap(wire.appAnalyze(...args)),
     appPrepare: (...args) => unwrap(wire.appPrepare(...args)),
+    appCancelAnalysis: (...args) => unwrap(wire.appCancelAnalysis!(...args)),
+    appConfigDraft: (...args) => unwrap(wire.appConfigDraft!(...args)),
+    appSaveConfigDraft: (...args) => unwrap(wire.appSaveConfigDraft!(...args)),
+    appLocalArtifact: (...args) => unwrap(wire.appLocalArtifact!(...args)),
+    appHandoff: (...args) => unwrap(wire.appHandoff!(...args)),
+    appSkillPreview: (...args) => unwrap(wire.appSkillPreview(...args)),
+    appConfirmDeployment: (...args) => unwrap(wire.appConfirmDeployment(...args)),
     appPublish: (...args) => unwrap(wire.appPublish(...args)),
     appVerify: (...args) => unwrap(wire.appVerify(...args)),
     appResources: (...args) => unwrap(wire.appResources(...args)),
     appDetails: (...args) => unwrap(wire.appDetails(...args)),
+    appReopenReview: (...args) => unwrap(wire.appReopenReview!(...args)),
+    appReopenDeployment: (...args) => unwrap(wire.appReopenDeployment(...args)),
+    appVerifyWithOptions: (...args) => unwrap(wire.appVerifyWithOptions!(...args)),
+    appSetSkillEnabled: (...args) => unwrap(wire.appSetSkillEnabled!(...args)),
+    appVersions: (...args) => unwrap(wire.appVersions!(...args)),
+    appLogs: (...args) => unwrap(wire.appLogs!(...args)),
+    appStorage: (...args) => unwrap(wire.appStorage!(...args)),
+    appRecheck: (...args) => unwrap(wire.appRecheck!(...args)),
+    appUpdateConfig: (...args) => unwrap(wire.appUpdateConfig!(...args)),
+    appDelete: (...args) => unwrap(wire.appDelete!(...args)),
+    appRollback: (...args) => unwrap(wire.appRollback!(...args)),
+    appDownload: (...args) => unwrap(wire.appDownload!(...args)),
+    appSaveDownload: (...args) => unwrap(wire.appSaveDownload(...args)),
     state: () => unwrap(wire.state()),
     watchState: signal => wire.watchState(signal),
     startLogin: () => unwrap(wire.startLogin()),

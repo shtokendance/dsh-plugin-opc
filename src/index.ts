@@ -18,7 +18,7 @@ import { attachAppAgent } from './host/app-agent.ts'
 import { AppSkillProvider, registerAppTools } from './host/app-skills.ts'
 
 export const name = 'dsh-plugin-opc'
-export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert']
+export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert', 'llm']
 export interface Config { platformBaseUrl: string; clientId: string; dataHome: string }
 export const Config = z.object({ platformBaseUrl: z.string().default('https://shtokendance.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default('') })
 export function apply(ctx: Context, config: Config): void {

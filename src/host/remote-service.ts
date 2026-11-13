@@ -16,9 +16,11 @@ export class OpcRemoteService extends TypertRemoteService {
   private manager?: Context['mcpManager']
   private readonly core: OpcCore
   private readonly delivery: AppDelivery
+  private readonly host: Context
   constructor(ctx: Context, options: { core: OpcCore; delivery: AppDelivery }) {
     super(ctx, 'opc')
     const { core, delivery } = options
+    this.host = ctx
     this.core = core
     this.delivery = delivery
     ctx.inject(['mcpManager'], child => {
@@ -39,6 +41,20 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appList(expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.list(expectedContextId)) }
   @Remote
+  async appModels(expectedContextId: string): Promise<string> {
+    const scope = this.core.auth.contexts.captureApplication(expectedContextId)
+    const groups = await Promise.all(this.host.llm.listProviders().map(async provider => {
+      const models = await this.host.llm.listModels(provider.id).catch(() => [])
+      const entries = await Promise.all(models.map(async model => {
+        const resolved = await this.host.llm.resolveModelInfo(provider.id, model.id, scope.signal).catch(() => undefined)
+        return { id: model.id, name: model.name, reasoning: resolved?.reasoning }
+      }))
+      return { id: provider.id, name: provider.name, models: entries }
+    }))
+    scope.assertCurrent()
+    return JSON.stringify(groups.filter(group => group.models.length))
+  }
+  @Remote
   async appCatalog(expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.platform('/', expectedContextId)) }
   @Remote
   async appCreate(inputJson: string, sessionId: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.create(JSON.parse(inputJson), sessionId, expectedContextId)) }
@@ -49,11 +65,29 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appReopenReview(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.reopenReview(id, expectedContextId)) }
   @Remote
+  async appReopenDeployment(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.reopenDeployment(id, expectedContextId)) }
+  @Remote
+  async appCancelAnalysis(id: string, expectedContextId: string): Promise<void> { await this.delivery.cancelAnalysis(id, expectedContextId) }
+  @Remote
+  async appConfigDraft(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.configDraft(id, expectedContextId)) }
+  @Remote
+  async appSaveConfigDraft(id: string, body: string, expectedContextId: string): Promise<void> { await this.delivery.saveConfigDraft(id, JSON.parse(body), expectedContextId) }
+  @Remote
+  async appLocalArtifact(id: string, filename: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.localArtifact(id, filename, expectedContextId)) }
+  @Remote
+  async appHandoff(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.handoff(id, expectedContextId)) }
+  @Remote
+  async appSkillPreview(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.skillPreview(id, expectedContextId)) }
+  @Remote
+  async appConfirmDeployment(id: string, inputJson: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.confirmDeployment(id, JSON.parse(inputJson), expectedContextId)) }
+  @Remote
   async appPublish(id: string, confirmationJson: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.publish(id, JSON.parse(confirmationJson), expectedContextId)) }
   @Remote
   async appVerify(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.verify(id, expectedContextId)) }
   @Remote
   async appVerifyWithOptions(id: string, optionsJson: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.verify(id, expectedContextId, optionsJson ? JSON.parse(optionsJson) : undefined)) }
+  @Remote
+  async appSetSkillEnabled(id: string, enabled: boolean, expectedContextId: string): Promise<void> { await this.delivery.setSkillEnabled(id, enabled, expectedContextId) }
   @Remote
   async appResources(expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.platform('/resources', expectedContextId)) }
   @Remote
@@ -68,6 +102,14 @@ export class OpcRemoteService extends TypertRemoteService {
   async appLogs(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.logs(slug, expectedContextId)) }
   @Remote
   async appStorage(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.storage(slug, expectedContextId)) }
+  @Remote
+  async appDownload(slug: string, selectionJson: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.download(slug, JSON.parse(selectionJson), expectedContextId))
+  }
+  @Remote
+  async appSaveDownload(slug: string, selectionJson: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.saveDownload(slug, JSON.parse(selectionJson), expectedContextId))
+  }
   @Remote
   async appRecheck(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.recheck(slug, expectedContextId)) }
   @Remote

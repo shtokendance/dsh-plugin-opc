@@ -17,7 +17,7 @@ export class AppSkillProvider implements SkillProvider {
     options.signal?.throwIfAborted()
     const seenSlugs = new Set<string>()
     const activeVerified = jobs.filter(job => {
-      if (job.status !== 'verified') return false
+      if (job.status !== 'verified' || job.userDisabled) return false
       if (seenSlugs.has(job.slug)) return false
       seenSlugs.add(job.slug)
       return true
@@ -49,6 +49,8 @@ export function registerAppTools(ctx: Context, delivery: AppDelivery) {
       const expected = delivery.core.auth.contexts.applicationContextId
       if (!expected) throw new Error('请先登录企业微信')
       return JSON.stringify(await delivery.invoke(args.job_id, args.operation, JSON.parse(args.params), args.body ? JSON.parse(args.body) : undefined, expected,
-        async () => true, exec.signal))
+        async reason => (await ctx.approval.request({
+          agent: exec.agent!, callId: exec.callId, toolName: 'opc_app_invoke', reason, signal: exec.signal,
+        })) === 'allowed-once', exec.signal))
     } })))
 }

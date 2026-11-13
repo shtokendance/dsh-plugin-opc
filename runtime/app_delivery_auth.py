@@ -2,6 +2,8 @@
 import copy
 import re
 
+from app_delivery.scripts import delivery
+
 
 def resolve_authentication(contract):
     rules = contract.get('auth_rules', [])
@@ -32,11 +34,52 @@ def resolve_authentication(contract):
                 if any(rank(r) == rank(best) and r.get('auth') != best.get('auth') for r in ranked[1:]):
                     raise ValueError('存在互相冲突的认证规则：' + item['path'])
                 item['auth'] = {**copy.deepcopy(best.get('auth', {})), 'evidence': best['evidence']}
-            default_auth = {'type': 'unknown'} if target == 'api' else {'type': 'none'}
-            auth = item.get('auth') or default_auth
+            auth = item.get('auth', {'type': 'unknown'})
             if auth.get('type') == 'unknown':
                 raise ValueError('认证尚未分析：' + item['path'] + '。请读取登录入口、统一中间件和权限检查，填写有证据的 auth 或 auth_rules；不要向用户索要猜测的令牌。')
     return contract
+
+
+def validate_auth_evidence(source, proposal):
+    """Check citations in the exact source snapshot the proposal describes."""
+    contract = proposal["contract"]
+    changes = {change["path"]: change["content"] for change in proposal.get("changes", [])}
+    line_counts = {}
+    for entry in [*contract.get("auth_rules", []), *contract.get("auth_blockers", [])]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("evidence"), list) or not entry["evidence"]:
+            raise ValueError("认证证据必须是非空的 文件:行号 数组")
+        for evidence in entry["evidence"]:
+            match = re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", evidence) if isinstance(evidence, str) else None
+            if not match:
+                raise ValueError("认证证据必须引用源码读取工具返回的 文件:行号")
+            path, start, end = match.groups()
+            if path not in line_counts:
+                source_path = delivery.relative(source, path)
+                content = changes.get(path)
+                if content is None and source_path.is_file():
+                    content = delivery.text_of(source_path)
+                line_counts[path] = len(content.splitlines()) if content is not None else 0
+            count = line_counts[path]
+            if not 1 <= int(start) <= int(end or start) <= count:
+                location = "拟提交文件" if path in changes else "当前导入源码"
+                raise ValueError(
+                    f"认证证据位置不存在：{evidence}。{location} {path} 共 {count} 行。"
+                    "请只重读该文件的登录处理、会话读取或权限检查，用实际行号修正证据后重新提交。"
+                )
+
+
+def verification_credential_fields(contract):
+    """Describe the credential references the verification form may accept."""
+    fields = {}
+    for api in contract.get("apis", []):
+        auth = api.get("auth", {})
+        if auth.get("type") in {"header", "bearer"} and auth.get("env"):
+            fields[auth["env"]] = "session"
+    for profile in [contract.get("auth_profile", {}), *contract.get("auth_profiles", {}).values()]:
+        for key, kind in (("token_env", "session"), ("username_env", "username"), ("password_env", "password")):
+            if profile.get(key):
+                fields[profile[key]] = kind
+    return [{"key": key, "kind": kind} for key, kind in fields.items()]
 
 
 def validate_auth_questions(proposal):
@@ -44,6 +87,8 @@ def validate_auth_questions(proposal):
     contract = proposal.get('contract', {})
     questions = set(proposal.get('unresolved', []) + contract.get('unresolved', []))
     blockers = contract.get('auth_blockers', [])
+    if not isinstance(blockers, list):
+        raise ValueError('auth_blockers 必须是数组')
     for question in questions:
         if re.search(r'令牌|token|登录|账密|凭据|授权码', question, re.I):
             if not any(b.get('question') == question and b.get('evidence') and b.get('affected')
