@@ -371,6 +371,7 @@ export function AppsPanel({
     checking: false,
   })
   const isComposingRef = useRef(false)
+  const isSlugComposingRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Step 2 Footer Bridge
@@ -1664,107 +1665,116 @@ export function AppsPanel({
                 </div>
               )}
 
-              <div className="oa-form-card">
-                <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a', marginBottom: 12 }}>基本信息与访问标识</div>
-                <div className="oa-grid-2">
-                  <div className="oa-field">
-                    <label className="oa-label" htmlFor={`${formId}-app-name`}>应用名称 *</label>
-                    <input id={`${formId}-app-name`}
-                      className="oa-input"
-                      value={appName}
-                      placeholder="例如：费用报销助手"
-                      onCompositionStart={() => {
-                        isComposingRef.current = true
-                      }}
-                      onCompositionEnd={e => {
-                        isComposingRef.current = false
-                        const nextVal = e.currentTarget.value
-                        setAppName(nextVal)
-                        if (!upgradeTarget && !slugManual) {
-                          setAppSlug(toAppSlug(nextVal, { allowTrailingDash: true }))
-                        }
-                      }}
-                      onChange={e => {
-                        const val = e.target.value
-                        setAppName(val)
-                        if (!upgradeTarget && !slugManual && !isComposingRef.current) {
-                          setAppSlug(toAppSlug(val, { allowTrailingDash: true }))
-                        }
-                      }}
-                    />
-                  </div>
-
-                  <div className="oa-field">
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                      <label className="oa-label" htmlFor={`${formId}-app-slug`}>应用标识与访问地址 *</label>
-                      {!upgradeTarget && slugManual && appName.trim() && (
-                        <button
-                          type="button"
-                          className="oa-btn-link"
-                          style={{ fontSize: 11.5 }}
-                          onClick={() => {
-                            setSlugManual(false)
-                            setAppSlug(toAppSlug(appName, { allowTrailingDash: false }))
-                          }}
-                        >
-                          恢复自动生成
-                        </button>
-                      )}
-                    </div>
-                    <div className="oa-compound-url">
-                      <span className="oa-compound-addon">http://</span>
-                      <input id={`${formId}-app-slug`}
-                        className="oa-compound-input oa-mono"
-                        value={appSlug}
-                        disabled={Boolean(upgradeTarget)}
-                        placeholder="my-app-slug"
-                        onChange={e => {
-                          setSlugManual(true)
-                          setAppSlug(toAppSlug(e.target.value, { allowTrailingDash: true }))
-                        }}
-                        onBlur={() => setAppSlug(prev => toAppSlug(prev, { allowTrailingDash: false }))}
-                      />
-                      <span className="oa-compound-addon">.{opcConfig.appDomainRoot}</span>
-                    </div>
-                    {!upgradeTarget && (
-                      <div className="oa-hint">
-                        {slugCheck.checking ? (
-                          '正在校验标识可用性…'
-                        ) : slugCheck.error ? (
-                          <span style={{ color: '#dc2626' }}>{slugCheck.error}</span>
-                        ) : slugCheck.available ? (
-                          <span style={{ color: '#15803d' }}>标识可用 · 预计访问地址：{slugCheck.app_url}</span>
-                        ) : (
-                          '3–40 位小写字母、数字或短横线，须以字母开头（支持输入中文名自动转拼音）'
-                        )}
-                      </div>
-                    )}
-                  </div>
+              <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div className="oa-field">
+                  <label className="oa-label" htmlFor={`${formId}-app-name`}>应用名称 *</label>
+                  <input
+                    id={`${formId}-app-name`}
+                    className="oa-input"
+                    value={appName}
+                    placeholder="例如：报销审批助手 / 阿里云效流水线"
+                    onCompositionStart={() => {
+                      isComposingRef.current = true
+                    }}
+                    onCompositionEnd={e => {
+                      isComposingRef.current = false
+                      const nextVal = e.currentTarget.value
+                      setAppName(nextVal)
+                      if (!upgradeTarget && !slugManual) {
+                        setAppSlug(toAppSlug(nextVal, { allowTrailingDash: true }))
+                      }
+                    }}
+                    onChange={e => {
+                      const val = e.target.value
+                      setAppName(val)
+                      if (!upgradeTarget && !slugManual && !isComposingRef.current) {
+                        setAppSlug(toAppSlug(val, { allowTrailingDash: true }))
+                      }
+                    }}
+                  />
                 </div>
 
-                <div className="oa-grid-2" style={{ marginTop: 12 }}>
-                  <div className="oa-field">
-                    <label className="oa-label" htmlFor={`${formId}-port`}>容器监听端口 *</label>
-                    <input id={`${formId}-port`}
-                      className="oa-input oa-mono"
-                      type="number"
-                      min={1}
-                      max={65535}
-                      value={containerPort}
-                      onChange={e => setContainerPort(e.target.value)}
-                    />
-                    <span className="oa-hint">应用容器实际监听的内部端口（默认 {opcConfig.defaultPort}），AI 会按此核对服务入口。</span>
+                <div className="oa-field">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <label className="oa-label" htmlFor={`${formId}-app-slug`}>应用访问子域名 (唯一标识) *</label>
+                    {!upgradeTarget && slugManual && appName.trim() && (
+                      <button
+                        type="button"
+                        className="oa-btn-link"
+                        style={{ fontSize: 11.5 }}
+                        onClick={() => {
+                          setSlugManual(false)
+                          setAppSlug(toAppSlug(appName, { allowTrailingDash: false }))
+                        }}
+                      >
+                        根据应用名称重新生成
+                      </button>
+                    )}
                   </div>
+                  <div className="oa-compound-url">
+                    <span className="oa-compound-addon prefix">http://</span>
+                    <input
+                      id={`${formId}-app-slug`}
+                      className="oa-compound-input oa-mono"
+                      value={appSlug}
+                      disabled={Boolean(upgradeTarget)}
+                      placeholder="例如：devops-aly（仅限小写字母、数字和中划线）"
+                      onCompositionStart={() => {
+                        isSlugComposingRef.current = true
+                      }}
+                      onCompositionEnd={e => {
+                        isSlugComposingRef.current = false
+                        setSlugManual(true)
+                        setAppSlug(toAppSlug(e.currentTarget.value, { allowTrailingDash: true }))
+                      }}
+                      onChange={e => {
+                        setSlugManual(true)
+                        const val = e.target.value
+                        setAppSlug(isSlugComposingRef.current ? val : toAppSlug(val, { allowTrailingDash: true }))
+                      }}
+                      onBlur={() => setAppSlug(prev => toAppSlug(prev, { allowTrailingDash: false }))}
+                    />
+                    <span className="oa-compound-addon suffix" title={`.${opcConfig.appDomainRoot}`}>
+                      .{opcConfig.appDomainRoot}
+                    </span>
+                  </div>
+                  <div className="oa-url-preview-bar">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' }}>
+                      <span style={{ color: '#64748b', flexShrink: 0 }}>内网访问直达地址：</span>
+                      <span
+                        className="oa-mono"
+                        style={{ color: '#2563eb', fontWeight: 500, wordBreak: 'break-all', userSelect: 'all' }}
+                      >
+                        http://{appSlug.trim() || 'your-app'}.{opcConfig.appDomainRoot}
+                      </span>
+                      {!upgradeTarget && slugCheck.checking && (
+                        <span className="oa-pill">正在校验…</span>
+                      )}
+                      {!upgradeTarget && !slugCheck.checking && !slugCheck.error && slugCheck.available && (
+                        <span className="oa-pill oa-pill-ok">标识可用</span>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11.5, color: '#64748b', flexShrink: 0 }}>
+                      (默认容器端口: {containerPort || opcConfig.defaultPort})
+                    </span>
+                  </div>
+                  {!upgradeTarget && slugCheck.error && (
+                    <div className="oa-hint" style={{ color: '#dc2626', marginTop: 4 }}>
+                      {slugCheck.error}
+                    </div>
+                  )}
+                </div>
 
-                  <div className="oa-field">
-                    <label className="oa-label" htmlFor={`${formId}-description`}>应用功能简介（可选）</label>
-                    <input id={`${formId}-description`}
-                      className="oa-input"
-                      value={appDescription}
-                      placeholder="简述核心业务用途，方便智能体理解何时调用此应用"
-                      onChange={e => setAppDescription(e.target.value)}
-                    />
-                  </div>
+                <div className="oa-field">
+                  <label className="oa-label" htmlFor={`${formId}-description`}>应用描述</label>
+                  <textarea
+                    id={`${formId}-description`}
+                    className="oa-textarea"
+                    rows={2}
+                    value={appDescription}
+                    placeholder="简述该应用功能，将自动用于 AI 技能描述与调用匹配"
+                    onChange={e => setAppDescription(e.target.value)}
+                  />
                 </div>
               </div>
 

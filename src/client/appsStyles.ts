@@ -384,34 +384,66 @@ export const appsCss = `
 }
 .oa-compound-url {
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  width: 100%;
   border: 1px solid var(--oa-line-strong);
   border-radius: 9px;
   overflow: hidden;
   background: var(--oa-panel);
+  transition: border-color .15s, box-shadow .15s;
 }
-.oa-compound-url:focus-within { border-color: var(--oa-accent); }
+.oa-compound-url:focus-within {
+  border-color: var(--oa-accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
 .oa-compound-addon {
-  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
   background: var(--oa-paper);
   color: var(--oa-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
+  font-size: 12.5px;
   white-space: nowrap;
   flex-shrink: 0;
+  user-select: none;
 }
 .oa-compound-addon.prefix { border-right: 1px solid var(--oa-line); }
-.oa-compound-addon.suffix { border-left: 1px solid var(--oa-line); }
-.oa-compound-input {
+.oa-compound-addon.suffix {
+  display: block;
+  line-height: 1.5;
+  border-left: 1px solid var(--oa-line);
+  max-width: 52%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+}
+.opc-apps-root .oa-compound-input {
   border: none !important;
   border-radius: 0 !important;
+  box-shadow: none !important;
   outline: none;
-  padding: 8px 10px !important;
+  padding: 8px 12px !important;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12.5px;
-  min-width: 100px;
-  flex: 1;
+  font-size: 13px;
+  width: 0;
+  min-width: 120px;
+  flex: 1 1 0%;
   background: transparent !important;
+  color: var(--oa-ink);
+}
+.oa-url-preview-bar {
+  margin-top: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--oa-paper);
+  border: 1px solid var(--oa-line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
 }
 
 .oa-grid-2 {
