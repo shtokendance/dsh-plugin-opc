@@ -88,7 +88,7 @@ function buildInstructions(isRepair: boolean): string {
 4. 提供完整 Dockerfile、0.0.0.0 监听和同一服务的 /healthz 返回 {service:slug}，并确认拟提交的运行源码里确实包含 /healthz 路由处理（即使原应用已有其他健康端点；仅修改 contract.health 不会生成路由）。沿用已确认的 container_port，保留原启动脚本的执行权限。build_context 包含必要源码，排除构建缓存。
 5. 所有已映射为运行时环境变量的原配置项，请将 configs[].source 设为 read 返回的 Original configuration references 元数据中的精确 {"path":..., "keys":[...]} 引用（系统会在本地安全保留原值并在部署时注入，修改配置文件时严禁丢失原有敏感字段）。
 6. 认证只使用运行配置的环境变量引用（auth_profile / auth_profiles 的 username_env/password_env/token_env，以及 auth_rules 有证据的继承规则），绝不把明文密码、令牌放进报告、契约或技能。scanner 的 auth=unknown 代表尚未分析，绝不能当成公开接口；读取实际登录、会话与角色代码，引用 read 返回的真实行号。如果某文件已通过 opc_delivery_propose_file 暂存修改，请用 action=read 且 proposed=true 读取拟交付版本并引用其中的真实行号；若拟交付文件遗漏了原认证或业务处理函数，先补全再修正引用。若证据无效，针对相关文件重新读取并修正。常规业务验证所需账号、密码或会话在部署后填写，只有真实阻塞改造的外部授权或角色决定才带 auth_blockers 提问。
-7. 对于要新增或修改的文件，优先使用 opc_delivery_propose_file 逐个提交完整文件内容（暂存到提案区，不修改原源码），然后在 opc_delivery_submit 的 changes 中按 {id, path, reason, group} 引用，避免在单个大 JSON 字符串中塞入全部文件正文导致截断；小改动也可直接在 opc_delivery_submit 的 changes 中提供完整 content。
+7. 对于要新增或修改的文件，优先使用 opc_delivery_propose_file 逐个暂存完整文件内容，然后在 opc_delivery_submit 的结构化 changes 中按 {id, path, reason, group} 引用。小改动可直接在 changes 中提供完整 content。
 8. scan_routes_and_pages 已在后端自动缓存全部扫描到的 API 与页面，并在 opc_delivery_submit 时自动合并进 contract.apis 与 contract.pages；严禁把“接口数量多/扫描截断/添加 healthz/创建 Dockerfile”等内部技术动作放进 unresolved。
 9. verification.cases 为真实只读业务探针（每种受保护认证身份均需覆盖），不能编造业务记录或以健康探针代替。
 10. 有需要用户决定的真实阻塞（如外部连接替换、缺失外部授权）时提交 unresolved，并可在 decisions 中提供 [{id, question, impact, options}]（最多 4 个简短选项）；没有阻塞时 unresolved 设为空数组 [] 并提交完整可校验提案。summary 请按多段【应用定位】、【运行环境】、【接口与页面】、【登录与鉴权】、【数据与存储】、【改造与技能】清晰换行排版。工具校验失败应修正后重提，提交成功后结束本轮。`
@@ -210,8 +210,17 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             const res = await worker({ action: 'propose_file', root, ...args }, abort)
             return JSON.stringify(res)
           } }))
-        child.tools.register(defineTool({ name: 'opc_delivery_submit', description: '提交完整改造提案 JSON，系统校验后交给用户核对；不发布应用。若已用 opc_delivery_propose_file 暂存文件，changes 中可仅传 {id, path, reason, group}。',
-          parameters: { proposal: { type: 'string', required: true } }, output,
+        child.tools.register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
+          parameters: {
+            summary: { type: 'string' },
+            issues: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            unresolved: { type: 'array', items: { type: 'string' } },
+            changes: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            contract: { type: 'object', additionalProperties: true },
+            decisions: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            four_step_report: { type: 'object', additionalProperties: true },
+            proposal: { type: 'string' },
+          }, output,
           async execute(args) {
             if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
             if (repeatedProposal || validationErrors.length >= 6) throw new Error('技术方案连续校验未通过，已停止自动重试')
@@ -219,10 +228,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             delivery.core.emit('change')
             let candidate: AppDocument | undefined
             try {
-              candidate = JSON.parse(args.proposal)
+              const { proposal, ...fields } = args
+              candidate = proposal ? JSON.parse(proposal) : { issues: [], unresolved: [], changes: [], decisions: [], ...fields }
               if (candidate && typeof candidate.contract === 'object' && candidate.contract !== null) {
-                candidate.contract.slug = job.slug
-                candidate.contract.base_url = job.url
+                candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
               }
               await delivery.submit(job, root, candidate!, abort)
             } catch (error) {

@@ -340,7 +340,13 @@ export function AppDeliveryReview({
     setBusy(true)
     setError('')
     try {
-      const raw = await api.appPrepare(jobId, pHash, contextId)
+      let hash = pHash
+      if (currentRef.current?.failureStage === 'preparation' && api.appReopenReview) {
+        const reopened = JSON.parse(await api.appReopenReview(jobId, contextId)) as AppDeliveryJob
+        if (!reopened.proposalHash) throw new Error('找不到上次核对的方案')
+        hash = reopened.proposalHash
+      }
+      const raw = await api.appPrepare(jobId, hash, contextId)
       const result = JSON.parse(raw) as AppDeliveryJob
       accept(result)
       if (result.status === 'analyzing') preparing.current = ''
@@ -878,12 +884,12 @@ export function AppDeliveryReview({
                 {job?.status === 'failed' ? ' 原始源码和你的选择已保留，可以继续准备。' : ' 请重试当前操作。'}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {job?.status === 'failed' && (
+                {job?.status === 'failed' && job.failureStage !== 'preparation' && (
                   <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void sendFeedback('', true)}>
                     继续准备
                   </button>
                 )}
-                {job?.status === 'review' && !questions.length && (
+                {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
                   <button type="button" className="oa-btn oa-btn-sm" disabled={running} onClick={() => void prepare()}>
                     重试准备
                   </button>

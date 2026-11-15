@@ -60,16 +60,17 @@ export function AppDeliveryArtifacts({
   api,
   contextId,
   slug,
-  onVerified,
+  version,
+  onOpenVerification,
 }: {
   api: OpcApi
   contextId: string
   slug: string
-  onVerified?: () => void
+  version?: number
+  onOpenVerification: (job: AppDeliveryJob) => void
 }) {
   const [job, setJob] = useState<AppDeliveryJob | null>(null)
   const [message, setMessage] = useState('')
-  const [enablingSkill, setEnablingSkill] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -78,7 +79,7 @@ export function AppDeliveryArtifacts({
       .then(raw => {
         if (!alive) return
         const jobs = JSON.parse(raw) as AppDeliveryJob[]
-        const matched = jobs.find(j => j.slug === slug && j.artifactHash) || null
+        const matched = jobs.find(j => j.slug === slug && j.published && j.version === version && j.artifactHash) ?? null
         setJob(matched)
         if (!matched) setMessage('本机尚无该应用的交付包记录')
       })
@@ -88,7 +89,7 @@ export function AppDeliveryArtifacts({
     return () => {
       alive = false
     }
-  }, [api, contextId, slug])
+  }, [api, contextId, slug, version])
 
   const artifacts = Object.entries(job?.artifacts || {})
 
@@ -135,24 +136,11 @@ export function AppDeliveryArtifacts({
           {job && (
             <button
               type="button"
-              disabled={enablingSkill}
               className="oa-btn oa-btn-sm oa-btn-primary"
-              onClick={async () => {
-                setEnablingSkill(true)
-                setMessage('正在校验实际部署及只读业务能力…')
-                try {
-                  await api.appVerify(job.id, contextId)
-                  setMessage('业务验证通过，本地应用技能已成功启用')
-                  onVerified?.()
-                } catch (e) {
-                  setMessage(String(e))
-                } finally {
-                  setEnablingSkill(false)
-                }
-              }}
+              onClick={() => onOpenVerification(job)}
             >
-              <AppIcon name={enablingSkill ? 'refresh' : 'sparkle'} size={13} className={enablingSkill ? 'oa-spin' : ''} />
-              <span>{enablingSkill ? '正在校验…' : '验证并启用本地技能'}</span>
+              <AppIcon name="sparkle" size={13} />
+              <span>业务验证与技能设置</span>
             </button>
           )}
         </div>

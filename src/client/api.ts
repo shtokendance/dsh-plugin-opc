@@ -132,6 +132,7 @@ export interface AppDeliveryJob {
   analysis_mode?: 'analysis' | 'repair' | string
   analysisMode?: 'analysis' | 'repair'
   analysis_failure?: string
+  failureStage?: 'import' | 'analysis' | 'preparation' | 'deployment' | 'verification'
   failedRevision?: string
   conversation?: { role: string; text: string; revision?: number }[]
   proposalHash?: string

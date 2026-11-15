@@ -19,6 +19,8 @@ export interface DeliveryJob {
   events: string[]; error?: string; proposal?: AppDocument; revision?: string; failedRevision?: string
   revisionCount?: number; feedbackHistory?: string; analysisMode?: 'analysis' | 'repair'
   analysisFailure?: string
+  failureStage?: 'import' | 'analysis' | 'preparation' | 'deployment' | 'verification'
+  restoredVersion?: boolean
   conversation?: { role: 'user' | 'assistant'; text: string; revision?: number }[]
   discoveryReport?: AppDocument; transformationReport?: AppDocument; preparationChecks?: AppDocument[]
   diffs?: Record<string, string>; hasOriginalKeys?: string[]; skillMarkdown?: string; dockerfileContent?: string
@@ -165,8 +167,9 @@ export class AppDelivery {
     }
     throw Object.assign(new Error('应用任务不存在'), { code: 'ENOENT' })
   }
-  private recordFailureState(job: DeliveryJob, errorMsg: string, extraLog?: string, remoteVersion?: number) {
+  private recordFailureState(job: DeliveryJob, errorMsg: string, extraLog?: string, remoteVersion?: number, stage: 'deployment' | 'verification' = 'deployment') {
     job.status = 'failed'
+    job.failureStage = stage
     job.error = errorMsg
     job.failedRevision = job.revision || job.failedRevision
     const combinedLog = [errorMsg, extraLog].filter(Boolean).join('\n')
@@ -179,6 +182,18 @@ export class AppDelivery {
       storageMounts: job.proposal?.contract?.storage_mounts ?? [],
       verificationError: errorMsg,
     }
+  }
+  private async recoverInterrupted(root: string, job: DeliveryJob) {
+    const interrupted = { importing: 'import', analyzing: 'analysis', preparing: 'preparation', verifying: 'verification' } as const
+    if (job.status === 'publishing') {
+      job.status = 'unknown'
+      job.error = '发布结果未知，请查询状态，不要重复发布'
+    } else if (job.status in interrupted) {
+      job.failureStage = interrupted[job.status as keyof typeof interrupted]
+      job.status = 'failed'
+      job.error = '上次任务中断，可从当前步骤继续'
+    } else return
+    await this.save(root, job)
   }
   private async archivePublishedVersion(scopeDir: string, job: DeliveryJob, bundleDir: string) {
     const { slug, version, requestId, id: jobId } = job
@@ -233,15 +248,7 @@ export class AppDelivery {
         // A task can finish between the first disk read and the busy check.
         await this.exclusive(id, async () => {
           job = (await this.open(scope.directory, id)).job
-          if (['importing', 'analyzing', 'preparing', 'verifying'].includes(job.status)) {
-            job.status = 'failed'
-            job.error = '上次任务中断，可重新分析或验证'
-            await this.save(root, job)
-          } else if (job.status === 'publishing') {
-            job.status = 'unknown'
-            job.error = '发布结果未知，请查询状态，不要重复发布'
-            await this.save(root, job)
-          }
+          await this.recoverInterrupted(root, job)
         })
       }
       if (!this.busy.has(id) && ['unknown', 'building'].includes(job.status)) {
@@ -298,15 +305,7 @@ export class AppDelivery {
     if (!this.busy.has(id) && ['importing', 'analyzing', 'preparing', 'verifying', 'publishing'].includes(job.status)) {
       await this.exclusive(id, async () => {
         job = (await this.open(scope.directory, id)).job
-        if (['importing', 'analyzing', 'preparing', 'verifying'].includes(job.status)) {
-          job.status = 'failed'
-          job.error = '上次任务中断，可重新分析或验证'
-          await this.save(root, job)
-        } else if (job.status === 'publishing') {
-          job.status = 'unknown'
-          job.error = '发布结果未知，请查询状态，不要重复发布'
-          await this.save(root, job)
-        }
+        await this.recoverInterrupted(root, job)
       })
     }
     scope.assertCurrent()
@@ -395,7 +394,7 @@ export class AppDelivery {
       proposal: proposal && {
         summary: proposal.summary,
         issues: proposal.issues ?? [],
-        unresolved: proposal.unresolved ?? [],
+        unresolved: [...new Set([...(proposal.unresolved ?? []), ...(proposal.contract.unresolved ?? [])])],
         decisions: proposal.decisions ?? [],
         changes: proposal.changes?.map((change: AppDocument) => ({
           id: change.id,
@@ -506,7 +505,7 @@ export class AppDelivery {
         ? { provider: input.modelSelection.provider, model: input.modelSelection.model, reasoningEffort: typeof input.modelSelection.reasoningEffort === 'string' ? input.modelSelection.reasoningEffort : undefined }
         : undefined,
       feedbackHistory: previous?.feedbackHistory,
-      conversation: previous?.conversation,
+      conversation: previous?.conversation?.filter(message => message.role === 'user'),
       session,
       status: 'importing',
       events: ['正在创建源码隔离副本'],
@@ -532,7 +531,7 @@ export class AppDelivery {
         }
         await worker({ action: 'prepare', root, source, slug: job.slug, url: job.url }, scope.signal)
         scope.assertCurrent(); job.status = 'draft'; job.events.push('已导入独立副本，原项目保持不变')
-      } catch (error) { job.status = 'failed'; job.error = String(error) }
+      } catch (error) { job.status = 'failed'; job.failureStage = 'import'; job.error = String(error) }
       await this.save(root, job)
     })
     return this.public(job, root)
@@ -639,6 +638,7 @@ export class AppDelivery {
       }
     }
     job.status = 'analyzing'
+    job.failureStage = undefined
     job.error = undefined
     job.checks = undefined
     job.events.push(
@@ -648,7 +648,10 @@ export class AppDelivery {
           ? '🔧 AI 正在读取失败制品与日志进行专项修复分析'
           : '🚀 AI 正在分析源码；尚未执行发布',
     )
-    try { await this.save(root, job) } catch (error) {
+    try {
+      await rm(join(root, 'failed_files_read.json'), { force: true })
+      await this.save(root, job)
+    } catch (error) {
       this.analyses.delete(id)
       this.busy.delete(id)
       throw error
@@ -665,6 +668,7 @@ export class AppDelivery {
           ? '用户取消分析'
           : error instanceof Error ? error.message : String(error)
         job.status = controller.signal.aborted ? 'cancelled' : 'failed'
+        if (!controller.signal.aborted) job.failureStage = 'analysis'
         job.error = msg
         if (!controller.signal.aborted && !job.analysisFailure) job.analysisFailure = msg
       }
@@ -777,20 +781,24 @@ export class AppDelivery {
     return worker({ action: 'handoff', root, job: {
       name: job.name, slug: job.slug, url: job.url, port: job.port,
       revision: job.status === 'ready' ? job.revision : undefined,
-      status: job.status, proposal: job.proposal,
+      status: job.status, proposal: this.public(job).proposal,
+      revision_count: job.revisionCount ?? 1, feedback: job.feedbackHistory ?? '',
     } }, scope.signal)
   }
 
   async submit(job: DeliveryJob, root: string, proposal: AppDocument, signal: AbortSignal) {
     if (proposal.contract?.slug !== job.slug || proposal.contract?.base_url !== job.url) throw new Error('应用标识或地址与导入时不一致')
     if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-    if (!Array.isArray(proposal.unresolved)) throw new Error('unresolved 必须为数组')
-    if (!proposal.unresolved.length && proposal.contract?.runtime?.port !== (job.port ?? 8080)) throw new Error('模型不能静默改变用户选择的容器端口')
+    if (!Array.isArray(proposal.unresolved) || (proposal.contract.unresolved !== undefined && !Array.isArray(proposal.contract.unresolved))) {
+      throw new Error('unresolved 必须为数组')
+    }
+    const hasQuestions = Boolean(proposal.unresolved.length || proposal.contract.unresolved?.length)
+    if (!hasQuestions && proposal.contract.runtime?.port !== (job.port ?? 8080)) throw new Error('模型不能静默改变用户选择的容器端口')
     const validated = await worker({
       action: 'validate',
       root,
       proposal,
-      allow_unresolved: Boolean(proposal.unresolved.length),
+      allow_unresolved: hasQuestions,
       repair: Boolean(job.failedRevision),
       failed_revision: job.failedRevision ?? '',
       failure_feedback: job.failureContext ?? '',
@@ -808,14 +816,17 @@ export class AppDelivery {
       job.conversation = [...(job.conversation ?? []), { role: 'assistant', text: job.proposal.summary, revision: job.revisionCount ?? 1 }]
     }
     job.status = 'review'
-    job.events.push(job.proposal!.unresolved.length ? 'AI 分析完成，请回答待确认事项' : '方案校验通过，请核对改造内容并生成部署包')
+    job.analysisFailure = undefined
+    job.events.push(job.proposal!.unresolved.length || job.proposal!.contract.unresolved?.length
+      ? 'AI 分析完成，请回答待确认事项' : '方案校验通过，请核对改造内容并生成部署包')
+    await this.save(root, job)
   }
   async prepare(id: string, proposalHash: string, expected: string) {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
     return this.exclusive(id, async () => {
       if (job.status !== 'review' || !job.proposal || fingerprint(job.proposal) !== proposalHash) throw new Error('方案已变化，请刷新后核对')
-      job.status = 'preparing'; job.error = undefined; await this.save(root, job)
+      job.status = 'preparing'; job.failureStage = undefined; job.error = undefined; await this.save(root, job)
       try {
         const revision = randomUUID().replaceAll('-', '')
         const result = await worker({
@@ -847,10 +858,11 @@ export class AppDelivery {
         job.status = 'ready'
         job.version = undefined
         job.published = undefined
+        job.restoredVersion = undefined
         job.requestId = randomUUID().replaceAll('-', '')
         job.confirmationToken = undefined
         job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
-      } catch (error) { job.status = 'failed'; job.error = String(error) }
+      } catch (error) { job.status = 'failed'; job.failureStage = 'preparation'; job.error = String(error) }
       await this.save(root, job); return this.public(job, root)
     })
   }
@@ -950,7 +962,7 @@ export class AppDelivery {
       scope.assertCurrent()
       await this.credentials.write(`publish-config-${requestId}`, { rows: JSON.stringify(configs) })
       scope.assertCurrent()
-      job.status = 'publishing'; job.error = undefined; job.checks = undefined; await this.save(root, job)
+      job.status = 'publishing'; job.failureStage = undefined; job.error = undefined; job.checks = undefined; await this.save(root, job)
       this.core.emit('skills-changed')
       try {
         const result = await this.platform('/publish', expected, { form })
@@ -998,8 +1010,17 @@ export class AppDelivery {
   }
   async verify(id: string, expected: string, options?: AppDocument) {
     const scope = this.scope(expected)
-    const { root, job } = await this.open(scope.directory, id)
+    if (options?.automatic === true && this.busy.has(id)) {
+      const { root, job } = await this.open(scope.directory, id)
+      return this.public(job, root)
+    }
     return this.exclusive(id, async () => {
+      const { root, job } = await this.open(scope.directory, id)
+      if (options?.automatic === true && !['building', 'unknown'].includes(job.status)) {
+        const view = this.public(job, root)
+        if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
+        return view
+      }
       if (!['building', 'unknown', 'awaiting_page_verification', 'verified', 'failed', 'publishing', 'verifying'].includes(job.status) || !job.hashes || !job.proposal) throw new Error('应用尚未发布')
       if (job.status === 'unknown' || job.status === 'publishing') {
         if (!job.requestId) throw new Error('缺少上次发布请求号，无法核对结果')
@@ -1012,7 +1033,7 @@ export class AppDelivery {
           await this.save(root, job)
           return this.public(job, root)
         }
-        if (!['accepted', 'building', 'running'].includes(receipt.status)) throw new Error('平台尚未确认上次发布，请稍后再查询')
+        if (!['accepted', 'building', 'running'].includes(receipt.status)) return this.public(job, root)
         job.published = true
         job.version = receipt.version
         job.status = 'building'
@@ -1020,7 +1041,6 @@ export class AppDelivery {
         await this.save(root, job)
       }
       const contract = job.proposal.contract
-      await worker({ action: 'validate_verification_contract', root, contract }, scope.signal)
       const supplied: Record<string, string> = {}
       if (options?.credentials !== undefined) {
         if (!options.credentials || typeof options.credentials !== 'object' || Array.isArray(options.credentials)) {
@@ -1034,36 +1054,35 @@ export class AppDelivery {
           supplied[key] = value
         }
       }
-      let remote: AppDocument
-      try { remote = await this.platform('/' + job.slug, expected) } catch (error) {
-        throw error
-      }
+      const remote = await this.platform('/' + job.slug, expected)
       if (remote.status === 'running' && job.version && remote.current_version !== job.version) {
         const history = await this.platform('/' + job.slug + '/versions', expected)
         const attempted = history.versions?.find((version: AppDocument) => version.version === job.version)
         if (attempted?.status === 'failed' && attempted.app_tar_sha256 === job.hashes['app.tar'] &&
             attempted.skill_zip_sha256 === job.hashes['skill.zip']) {
-          this.recordFailureState(job, attempted.error_message || '本次发布失败，旧版本仍在运行', remote.build_log?.slice(-8000), job.version)
+          this.recordFailureState(job, attempted.error_message || '本次发布失败，旧版本仍在运行', attempted.build_log?.slice(-8000), job.version)
           await this.save(root, job)
           this.core.emit('skills-changed')
           return this.public(job, root)
         }
+        if (attempted && ['accepted', 'building'].includes(attempted.status) &&
+            attempted.app_tar_sha256 === job.hashes['app.tar'] && attempted.skill_zip_sha256 === job.hashes['skill.zip']) {
+          return this.public(job, root)
+        }
       }
       if (remote.status !== 'running') {
-        if (remote.status === 'failed') {
-          this.recordFailureState(job, remote.error_message || '部署失败', remote.build_log?.slice(-8000), remote.current_version ?? job.version)
-        } else {
-          job.status = 'building'
-          job.error = remote.error_message
-        }
+        if (!['failed', 'unhealthy'].includes(remote.status)) return this.public(job, root)
+        if (job.version && remote.current_version !== job.version) throw new Error('线上版本发生变化，无法验证此交付任务')
+        this.recordFailureState(job, remote.error_message || '构建或健康检查未通过', remote.build_log?.slice(-8000), job.version)
         await this.save(root, job)
         this.core.emit('skills-changed')
         return this.public(job, root)
       }
       if (remote.app_url !== job.url || (job.version && remote.current_version !== job.version)) throw new Error('线上版本或地址不一致，拒绝启用技能')
       if (!matchesReceipt(remote.build_log, job.hashes)) throw new Error('服务器制品回执不一致')
-      job.status = 'verifying'; job.error = undefined; job.checks = undefined; job.pagesVerified = undefined; await this.save(root, job)
+      job.status = 'verifying'; job.failureStage = undefined; job.error = undefined; job.checks = undefined; job.pagesVerified = undefined; await this.save(root, job)
       try {
+        await worker({ action: 'validate_verification_contract', root, contract }, scope.signal)
         const credentials = { ...await this.readVersionCredentials(job), ...supplied }
         const healthPath = contract.health?.path ?? '/healthz'
         const health = { base_url: job.url, apis: [{ id: 'health', path: healthPath, method: 'GET', effect: 'read', parameters: [], auth: { type: 'none' } }] }
@@ -1073,7 +1092,10 @@ export class AppDelivery {
         for (const test of contract.verification?.cases ?? []) {
           const api = contract.apis.find((a: AppDocument) => a.id === test.operation)
           if (!api) throw new Error(`业务验证接口不存在：${test.operation}`)
-          if (api.path === healthPath) continue
+          if (api.path === healthPath) {
+            if (job.restoredVersion) throw new Error('回滚后必须使用有效的只读业务接口验证')
+            continue
+          }
           if (api.effect !== 'read') throw new Error('业务验证只能使用只读接口')
           const result = await worker({ action: 'probe', root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials }, scope.signal)
           if (!probeMatches(result, test.status ?? 200, test.json_contains)) throw new Error(`业务验证失败：${test.operation}`)
@@ -1122,7 +1144,7 @@ export class AppDelivery {
           job.events.push('健康身份和只读业务验证通过；页面尚未验证')
         }
       } catch (error) {
-        this.recordFailureState(job, String(error), remote.build_log?.slice(-8000), remote.current_version ?? job.version)
+        this.recordFailureState(job, String(error), remote.build_log?.slice(-8000), remote.current_version ?? job.version, 'verification')
       }
       await this.save(root, job); this.core.emit('skills-changed')
       const view = this.public(job, root)
@@ -1230,6 +1252,16 @@ export class AppDelivery {
       method: 'POST',
       body: { target_version: targetVersion, reason: reason || `回退至版本 v${targetVersion}` },
     })
+    try {
+      return await this.syncRolledBackSkill(slug, targetVersion, expected, rbResult, scope)
+    } catch (error) {
+      scope.assertCurrent()
+      return { ...rbResult, active_version: targetVersion, local_skill_synced: false, local_skill_verified: false,
+        skill_enabled: false, verification: { status: 'probe-warning', detail: `应用已回退，技能未同步或未验证：${String(error)}` },
+        rollback_notice: ROLLBACK_NOTICE }
+    }
+  }
+  private async syncRolledBackSkill(slug: string, targetVersion: number, expected: string, rbResult: AppDocument, scope: ReturnType<AppDelivery['scope']>) {
     const current = await this.platform(`/${slug}`, expected)
     if (current.status !== 'running' || current.current_version !== targetVersion) {
       throw new Error('回滚后线上版本状态不一致')
@@ -1324,7 +1356,9 @@ export class AppDelivery {
       }
       opened.job.version = targetVersion
       opened.job.published = true
+      opened.job.restoredVersion = true
       opened.job.pagesVerified = undefined
+        opened.job.checks = undefined
       opened.job.configFingerprint = current.config_fingerprint ?? rbResult.config_fingerprint
       if (expectedAppTarSha && expectedSkillSha) {
         opened.job.hashes = {
@@ -1357,6 +1391,7 @@ export class AppDelivery {
       if (localSkillSynced && opened.job.proposal?.contract && matchesReceipt(current.build_log, opened.job.hashes)) {
         try {
           const contract = opened.job.proposal.contract
+          await worker({ action: 'validate_verification_contract', root: opened.root, contract }, scope.signal)
           const archivedJobId = localMeta?.hashes?.['skill.zip'] === expectedSkillSha && localMeta?.hashes?.['app.tar'] === expectedAppTarSha
             && typeof localMeta.jobId === 'string' && /^[a-f0-9-]{36}$/.test(localMeta.jobId) ? localMeta.jobId : undefined
           if (archivedJobId && archivedJobId !== opened.job.id) {
@@ -1372,8 +1407,9 @@ export class AppDelivery {
           const checks: AppDocument[] = []
           for (const test of contract.verification?.cases ?? []) {
             const api = (contract.apis ?? []).find((a: AppDocument) => a.id === test.operation)
-            if (!api || api.path === '/healthz') continue
-            if (api.effect !== 'read') throw new Error('业务验证只能使用只读接口')
+            if (!api || api.path === (contract.health?.path ?? '/healthz') || api.effect !== 'read') {
+              throw new Error('回滚后必须使用有效的只读业务接口验证')
+            }
             const res = await worker({ action: 'probe', root: opened.root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials }, scope.signal)
             if (!probeMatches(res, test.status ?? 200, test.json_contains)) {
               throw new Error(`回滚后业务验证失败：${test.operation}`)
@@ -1381,41 +1417,47 @@ export class AppDelivery {
             checks.push({ operation: test.operation, status: res.status })
           }
           const latest = await this.platform(`/${slug}`, expected)
-          if (latest.status !== 'running' || latest.current_version !== targetVersion ||
+          if (latest.status !== 'running' || latest.current_version !== targetVersion || latest.app_url !== opened.job.url ||
               latest.config_fingerprint !== current.config_fingerprint || !matchesReceipt(latest.build_log, opened.job.hashes)) {
             throw new Error('回滚验证期间线上版本或配置发生变化')
           }
           if (checks.length > 0) {
             opened.job.checks = checks
+            opened.job.failureStage = undefined
+            opened.job.error = undefined
             opened.job.status = 'verified'
             opened.job.events.push(`已回退至 v${targetVersion}，历史技能与业务探针验证通过`)
             localSkillVerified = true
             verification = { status: 'verified-rolled-back' }
-          } else if (Array.isArray(contract.pages) && contract.pages.length > 0 && !(contract.apis ?? []).some((a: AppDocument) => a.path !== '/healthz')) {
+          } else if (Array.isArray(contract.pages) && contract.pages.length > 0 &&
+              !(contract.apis ?? []).some((a: AppDocument) => a.path !== (contract.health?.path ?? '/healthz'))) {
             opened.job.status = 'awaiting_page_verification'
+            opened.job.failureStage = undefined
+            opened.job.error = undefined
             verification = { status: 'awaiting_page_verification', detail: '请打开页面完成人工验收' }
             opened.job.events.push(`已回退至 v${targetVersion}，请打开页面完成人工验收后启用技能`)
           } else {
-            opened.job.status = 'building'
-            opened.job.events.push(`已回退至 v${targetVersion}，请重新验证业务后启用技能`)
+            throw new Error('缺少只读业务验证，应用技能尚未启用')
           }
         } catch (error) {
-          opened.job.status = 'building'
-          opened.job.error = String(error)
+          this.recordFailureState(opened.job, String(error), undefined, targetVersion, 'verification')
           verification = { status: 'probe-warning', detail: opened.job.error }
           opened.job.events.push(`已回退至 v${targetVersion}，请重新验证业务后启用技能`)
         }
-      } else if (opened.job.status === 'verified') {
-        opened.job.status = 'building'
-        opened.job.events.push(`已回退至 v${targetVersion}，请重新验证业务后启用技能`)
+      } else {
+        this.recordFailureState(opened.job, '回滚完成，技能包或线上制品回执尚未核实', undefined, targetVersion, 'verification')
+        verification = { status: 'probe-warning', detail: opened.job.error }
       }
+      scope.assertCurrent()
       await this.save(opened.root, opened.job)
     }
     this.core.emit('skills-changed')
     return {
       ...rbResult,
+      active_version: targetVersion,
       local_skill_synced: localSkillSynced,
       local_skill_verified: localSkillVerified,
+      skill_enabled: localSkillVerified && !(await this.isSkillDisabled(scope.directory, slug)),
       verification,
       job_id: primary?.job.id,
       rollback_notice: ROLLBACK_NOTICE,
