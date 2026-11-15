@@ -12,6 +12,7 @@ import { PlatformHttp } from './host/http.ts'
 import { OpcCore } from './host/core.ts'
 import { EnterpriseSkillProvider } from './host/skill-provider.ts'
 import { OpcRemoteService } from './host/remote-service.ts'
+import { OpcConfigStore } from './host/opc-config.ts'
 import { registerTools } from './host/tools.ts'
 import { AppDelivery } from './host/app-delivery.ts'
 import { attachAppAgent } from './host/app-agent.ts'
@@ -23,7 +24,14 @@ export interface Config { platformBaseUrl: string; clientId: string; dataHome: s
 export const Config = z.object({ platformBaseUrl: z.string().default('https://shtokendance.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default(''), appDomainRoot: z.string().default(''), appDefaultPort: z.number().default(8080) })
 export function apply(ctx: Context, config: Config): void {
   const key = credentialKey(name, 'enterprise')
-  const auth = new AuthManager(new PlatformHttp(config.platformBaseUrl), {
+  const home = config.dataHome || resolveDshHome()
+  const configStore = new OpcConfigStore(home, {
+    platformBaseUrl: config.platformBaseUrl,
+    appDomainRoot: config.appDomainRoot,
+    appDefaultPort: config.appDefaultPort,
+  })
+  const initialConfig = configStore.loadSync()
+  const auth = new AuthManager(new PlatformHttp(initialConfig.platform_base), {
     async read() {
       const record = await ctx.credentials.readRecord(key)
       if (record?.kind !== 'grant') return undefined
@@ -43,8 +51,8 @@ export function apply(ctx: Context, config: Config): void {
     async write(id, payload) {
       await ctx.credentials.modifyRecord(credentialKey(name, `app-${id}`), async () => ({ kind: 'grant', payload }))
     },
-  }, { appDomainRoot: config.appDomainRoot, appDefaultPort: config.appDefaultPort })
-  ctx.plugin(OpcRemoteService, { core, delivery })
+  }, { appDomainRoot: initialConfig.app_domain_root, appDefaultPort: initialConfig.app_default_port })
+  ctx.plugin(OpcRemoteService, { core, delivery, configStore })
   ctx.inject(['systemPrompt'], child => attachAppAgent(child, delivery))
   ctx.effect(() => ctx.skills.registerProvider(control => new AppSkillProvider(delivery, control)))
   registerAppTools(ctx, delivery)

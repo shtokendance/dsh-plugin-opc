@@ -125,7 +125,18 @@ export class AppDelivery {
   private busy = new Set<string>()
   private analyses = new Map<string, AbortController>()
   analyze?: (job: DeliveryJob, root: string, feedback: string, signal: AbortSignal) => Promise<void>
-  constructor(readonly core: OpcCore, readonly home: string, private readonly credentials: CredentialStore, private readonly options: AppDeliveryOptions = {}) {}
+  constructor(readonly core: OpcCore, readonly home: string, private readonly credentials: CredentialStore, private options: AppDeliveryOptions = {}) {}
+  getOptions(): Readonly<AppDeliveryOptions> {
+    return { ...this.options }
+  }
+  updateOptions(next: AppDeliveryOptions): void {
+    this.options = {
+      ...this.options,
+      ...(next.appDomainRoot !== undefined ? { appDomainRoot: next.appDomainRoot } : {}),
+      ...(next.appDefaultPort !== undefined ? { appDefaultPort: next.appDefaultPort } : {}),
+    }
+    this.core.emit('change')
+  }
   private scope(expected?: string) {
     const captured = this.core.auth.contexts.captureApplication(expected)
     const directory = join(this.home, 'opc', 'apps', identityHash(captured.context))

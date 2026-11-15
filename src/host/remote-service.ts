@@ -8,6 +8,7 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { OpcCore } from './core.ts'
 import { contextId, OpcError } from './context.ts'
 import { AppDelivery } from './app-delivery.ts'
+import { OpcConfigStore } from './opc-config.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -20,13 +21,18 @@ export class OpcRemoteService extends TypertRemoteService {
   private manager?: Context['mcpManager']
   private readonly core: OpcCore
   private readonly delivery: AppDelivery
+  private readonly configStore: OpcConfigStore
   private readonly host: Context
-  constructor(ctx: Context, options: { core: OpcCore; delivery: AppDelivery }) {
+  constructor(ctx: Context, options: { core: OpcCore; delivery: AppDelivery; configStore?: OpcConfigStore }) {
     super(ctx, 'opc')
-    const { core, delivery } = options
+    const { core, delivery, configStore } = options
     this.host = ctx
     this.core = core
     this.delivery = delivery
+    this.configStore = configStore ?? new OpcConfigStore(delivery.home, {
+      platformBaseUrl: core.auth.http.base.href,
+      ...delivery.getOptions(),
+    })
     ctx.inject(['mcpManager'], child => {
       const manager = child.mcpManager
       const mounts = new ManagedMcpMounts(core, (name, entry) => manager.register(name, entry), this.requestApproval, { autoMount: true })
@@ -175,11 +181,43 @@ export class OpcRemoteService extends TypertRemoteService {
     const parsed = JSON.parse(payloadJson)
     return JSON.stringify(await this.delivery.rollback(slug, Number(parsed.targetVersion ?? parsed.target_version ?? 0), String(parsed.reason ?? ''), expectedContextId))
   }
+  private async applyConfigChange(result: { config: ReturnType<OpcConfigStore['getPayload']>; platform_base_changed: boolean }): Promise<string> {
+    const { config, platform_base_changed } = result
+    await this.core.auth.setPlatformBase(config.platform_base)
+    this.delivery.updateOptions({
+      appDomainRoot: config.app_domain_root,
+      appDefaultPort: config.app_default_port,
+    })
+    if (platform_base_changed) this.core.emit('skills-changed')
+    return JSON.stringify({ ...config, platform_base_changed })
+  }
+  @Remote
+  async opcConfigGet(): Promise<string> {
+    return JSON.stringify(this.configStore.getPayload(this.core.auth.http.base.href))
+  }
+  @Remote
+  async opcConfigUpdate(payloadJson: string): Promise<string> {
+    const parsed = JSON.parse(payloadJson) as Record<string, unknown>
+    return this.applyConfigChange(await this.configStore.update({
+      platform_base: parsed.platform_base,
+      app_domain_root: parsed.app_domain_root,
+      app_default_port: parsed.app_default_port,
+    }))
+  }
+  @Remote
+  async opcConfigReset(): Promise<string> {
+    return this.applyConfigChange(await this.configStore.reset())
+  }
+  @Remote
+  async opcConfigTest(url: string): Promise<string> {
+    return JSON.stringify(await this.configStore.testConnection(url))
+  }
   @Remote
   async state(): Promise<string> {
     const state = this.core.auth.state
     const mounted = this.mounts?.list() ?? []
-    return JSON.stringify({ ...state, knowledgeMentionScopeVersion: 1, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), context: state.context ? { ...state.context, contextId: contextId(state.context), applicationContextId: this.core.auth.contexts.applicationContextId, epoch: this.core.auth.contexts.epoch } : null })
+    const cfg = this.configStore.getPayload(this.core.auth.http.base.href)
+    return JSON.stringify({ ...state, knowledgeMentionScopeVersion: 1, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), opcConfig: { platformBaseUrl: cfg.platform_base, appDomainRoot: cfg.effective_app_domain_root, rawAppDomainRoot: cfg.app_domain_root, defaultPort: cfg.app_default_port }, context: state.context ? { ...state.context, contextId: contextId(state.context), applicationContextId: this.core.auth.contexts.applicationContextId, epoch: this.core.auth.contexts.epoch } : null })
   }
   @Remote({ mode: 'stream' })
   async *watchState(signal: AbortSignal): AsyncIterable<string> {

@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http'
 import { hostname, platform, arch } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { ContextStore, OpcError, type EnterpriseContext } from './context.ts'
-import { PlatformHttp, TokenRefresh, type PlatformResponse } from './http.ts'
+import { parsePlatformBaseUrl, PlatformHttp, TokenRefresh, type PlatformResponse } from './http.ts'
 
 export interface StoredGrant { refreshToken: string; platformBaseUrl: string; lastContext: EnterpriseContext }
 /** Implemented by the host's namespaced credentials service; never local plaintext files. */
@@ -119,6 +119,14 @@ export class AuthManager extends EventEmitter {
     await this.persist(() => this.grants.delete())
   }
   async invalidateSession(): Promise<void> { await this.clear() }
+  async setPlatformBase(baseUrl: string): Promise<boolean> {
+    const next = parsePlatformBaseUrl(baseUrl)
+    if (next.href === this.http.base.href) return false
+    await this.invalidateSession()
+    this.http.setBase(next.href)
+    this.changed()
+    return true
+  }
   async logout(): Promise<void> {
     const refresh = this.#refresh, access = this.#access
     await this.clear()
