@@ -14,6 +14,8 @@ export const ROLLBACK_NOTICE = '回滚恢复代码与运行配置，不自动回
 export type AppDocument = Record<string, any>
 export interface DeliveryJob {
   id: string; name: string; slug: string; url: string; session: string
+  analysisSessionId?: string
+  analysisSessions?: string[]
   port?: number; description?: string; upgrade?: boolean; versionNote?: string
   status: 'importing' | 'draft' | 'analyzing' | 'review' | 'preparing' | 'ready' | 'publishing' | 'building' | 'verifying' | 'awaiting_page_verification' | 'verified' | 'failed' | 'unknown' | 'cancelled'
   events: string[]; error?: string; proposal?: AppDocument; revision?: string; failedRevision?: string
@@ -124,7 +126,13 @@ export interface AppDeliveryOptions {
 export class AppDelivery {
   private busy = new Set<string>()
   private analyses = new Map<string, AbortController>()
-  analyze?: (job: DeliveryJob, root: string, feedback: string, signal: AbortSignal) => Promise<void>
+  analyze?: (
+    job: DeliveryJob,
+    root: string,
+    feedback: string,
+    signal: AbortSignal,
+    onSessionReady: (sessionId: string) => Promise<void>,
+  ) => Promise<void>
   constructor(readonly core: OpcCore, readonly home: string, private readonly credentials: CredentialStore, private options: AppDeliveryOptions = {}) {}
   getOptions(): Readonly<AppDeliveryOptions> {
     return { ...this.options }
@@ -240,14 +248,17 @@ export class AppDelivery {
       }
     }
   }
-  async list(expected: string) {
-    const scope = this.scope(expected)
-    const directories = await this.directories(scope.directory)
+  private async localJobIds(directory: string) {
+    const directories = await this.directories(directory)
     const entries = (await Promise.all(directories.map(directory => readdir(directory).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return []
       throw error
     })))).flat()
-    const jobs = await Promise.all([...new Set(entries.filter(id => /^[a-f0-9-]{36}$/.test(id)))].map(async id => {
+    return [...new Set(entries.filter(id => /^[a-f0-9-]{36}$/.test(id)))]
+  }
+  async list(expected: string) {
+    const scope = this.scope(expected)
+    const jobs = await Promise.all((await this.localJobIds(scope.directory)).map(async id => {
       const result = await this.open(scope.directory, id).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== 'ENOENT') throw error
         return undefined
@@ -324,6 +335,18 @@ export class AppDelivery {
     if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
     return view
   }
+  async getJobByAnalysisSession(sessionId: string, expected: string) {
+    const scope = this.scope(expected)
+    if (!/^[a-f0-9-]{36}$/.test(sessionId)) return null
+    const jobs = await Promise.all((await this.localJobIds(scope.directory)).map(id =>
+      this.open(scope.directory, id).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+        return undefined
+      })))
+    scope.assertCurrent()
+    const match = jobs.find(entry => entry?.job.analysisSessions?.includes(sessionId))
+    return match ? this.getJob(match.job.id, expected) : null
+  }
   async checkSlug(slug: string, expected: string) {
     const trimmed = slug.trim()
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(trimmed)) throw new Error('应用唯一标识需为 3–40 位小写字母、数字或连字符，且以字母开头')
@@ -361,7 +384,7 @@ export class AppDelivery {
     }
   }
   public(job: DeliveryJob, root?: string): AppDocument {
-    const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft: _draft, confirmationToken: _token, ...rest } = job
+    const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft: _draft, confirmationToken: _token, analysisSessions: _analysisSessions, ...rest } = job
     const hasOrigSet = new Set(job.hasOriginalKeys ?? [])
     const runtimeConfigs = (proposal?.contract?.configs ?? []).map((c: AppDocument) => {
       const hasOrig = hasOrigSet.has(c.key) || Boolean(c.has_original_value)
@@ -604,7 +627,7 @@ export class AppDelivery {
     const resume = options?.mode === 'resume'
     if (resume && (job.status !== 'failed' || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
     this.busy.add(id)
-    job.session = session || job.session
+    if (session && !job.analysisSessions?.includes(session)) job.session = session
     let trimmedFeedback: string
     try {
       trimmedFeedback = await worker({ action: 'redact_feedback', root, text: feedback.slice(0, 20_000) }, scope.signal)
@@ -649,6 +672,7 @@ export class AppDelivery {
       }
     }
     job.status = 'analyzing'
+    delete job.analysisSessionId
     job.failureStage = undefined
     job.error = undefined
     job.checks = undefined
@@ -670,7 +694,14 @@ export class AppDelivery {
     this.core.emit('skills-changed')
     void (async () => {
       try {
-        await this.analyze!(job, root, trimmedFeedback, analysisSignal)
+        await this.analyze!(job, root, trimmedFeedback, analysisSignal, async sessionId => {
+          analysisSignal.throwIfAborted()
+          scope.assertCurrent()
+          const analysisSessions = [...(job.analysisSessions ?? []).filter(id => id !== sessionId), sessionId]
+          await this.save(root, { ...job, analysisSessions, analysisSessionId: sessionId })
+          job.analysisSessions = analysisSessions
+          job.analysisSessionId = sessionId
+        })
         analysisSignal.throwIfAborted()
         scope.assertCurrent()
         if (!job.proposal || job.status === 'analyzing') throw new Error('AI 未提交有效改造方案，请补充说明后重试')

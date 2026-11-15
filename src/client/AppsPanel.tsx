@@ -12,6 +12,7 @@ import type {
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
 import { AppDeliveryConfig, needsConnectionDecision } from './AppDeliveryConfig.tsx'
 import { AppDeliveryReview } from './AppDeliveryReview.tsx'
+import type { PrepareAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { AppIcon } from './AppIcon.tsx'
 import { AppSkillPreview } from './AppSkillPreview.tsx'
 import { toAppSlug } from './appSlug.ts'
@@ -208,6 +209,7 @@ function inferStepForJob(job: AppDeliveryJob): WizardStep {
     case 'ready':
       return 3
     case 'building':
+    case 'publishing':
     case 'verifying':
     case 'awaiting_page_verification':
     case 'verified':
@@ -215,6 +217,7 @@ function inferStepForJob(job: AppDeliveryJob): WizardStep {
       return 4
     case 'failed':
       if (job.failureStage === 'import') return 1
+      if (job.failureStage === 'deployment' || job.failureStage === 'verification') return 4
       if (job.failureStage === 'analysis' || job.failureStage === 'preparation' || job.analysis_failure && !job.published) return 2
       if (job.published) return 4
       if (job.proposal) return 2
@@ -320,13 +323,25 @@ export function AppsPanel({
   sessionId,
   contextId,
   refreshSignal = 0,
+  prepareAnalysisNavigation,
 }: {
   api: OpcApi
   sessionId: string
   contextId: string
   refreshSignal?: number
+  prepareAnalysisNavigation?: PrepareAnalysisNavigation
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('list')
+  const [loadingLinkedJob, setLoadingLinkedJob] = useState(Boolean(api.appJobByAnalysisSession))
+  const [linkedJob, setLinkedJob] = useState<AppDeliveryJob | null>(null)
+  const restoredLinkedJob = useRef(false)
+  const analysisViewActive = useRef(false)
+  useEffect(() => {
+    analysisViewActive.current = viewMode === 'wizard'
+    return () => { analysisViewActive.current = false }
+  }, [viewMode])
+  const beginAnalysisNavigation = () =>
+    prepareAnalysisNavigation?.(sessionId, contextId, () => analysisViewActive.current)
   const [loadingList, setLoadingList] = useState(true)
   const [apps, setApps] = useState<DeployedApp[]>([])
   const [jobs, setJobs] = useState<AppDeliveryJob[]>([])
@@ -766,7 +781,7 @@ export function AppsPanel({
   )
 
   const resumeWizardJob = useCallback(
-    async (job: AppDeliveryJob, overrideStep?: WizardStep) => {
+    async (job: AppDeliveryJob, overrideStep?: WizardStep, useSnapshot = false) => {
       setWizardError(null)
       setWizardNotice(null)
       setVerifyCredentials({})
@@ -776,7 +791,7 @@ export function AppsPanel({
       setReviewInitialFeedback('')
       setConfigSubTab('configs')
       setViewMode('wizard')
-      const fresh = (await refreshWizardJob(job.id)) ?? job
+      const fresh = useSnapshot ? job : (await refreshWizardJob(job.id)) ?? job
       setWizardJob(fresh)
       setUpgradeTarget(fresh.published || fresh.upgrade ? apps.find(a => a.slug === fresh.slug && a.can_manage === true) ?? null : null)
       const targetStep = overrideStep ?? inferStepForJob(fresh)
@@ -796,6 +811,40 @@ export function AppsPanel({
     },
     [apps, fetchWizardLogs, opcConfig.defaultPort, refreshWizardJob, syncStep3Drafts],
   )
+
+  const openLinkedJob = useCallback(async (job: AppDeliveryJob, refresh = true) => {
+    const fresh = refresh ? (await refreshWizardJob(job.id)) ?? job : job
+    if (fresh.status === 'verified') await openAppDetail(fresh.slug)
+    else await resumeWizardJob(fresh, undefined, true)
+  }, [openAppDetail, refreshWizardJob, resumeWizardJob])
+
+  useEffect(() => {
+    if (!api.appJobByAnalysisSession) return
+    let active = true
+    void api.appJobByAnalysisSession(sessionId, contextId)
+      .then(raw => {
+        if (active) setLinkedJob(parseJson<AppDeliveryJob | null>(raw, null))
+      })
+      .catch(error => {
+        if (active) setBannerError(readErrorMessage(error, '无法恢复与当前会话关联的任务'))
+      })
+      .finally(() => {
+        if (active) setLoadingLinkedJob(false)
+      })
+    return () => { active = false }
+  }, [api, contextId, sessionId])
+
+  useEffect(() => {
+    if (loadingLinkedJob || !linkedJob || restoredLinkedJob.current) return
+    restoredLinkedJob.current = true
+    void openLinkedJob(linkedJob, false)
+  }, [linkedJob, loadingLinkedJob, openLinkedJob])
+
+  useEffect(() => {
+    if (viewMode !== 'wizard' || wizardJob?.id !== linkedJob?.id || upgradeTarget || !(wizardJob?.upgrade || wizardJob?.published)) return
+    const target = apps.find(app => app.slug === wizardJob.slug && app.can_manage === true)
+    if (target) setUpgradeTarget(target)
+  }, [apps, linkedJob?.id, upgradeTarget, viewMode, wizardJob])
 
   // Step 1 Submit: Create Job & Trigger Analysis
   const handleStep1Submit = async (e: React.FormEvent) => {
@@ -833,6 +882,7 @@ export function AppsPanel({
       return
     }
 
+    const navigate = beginAnalysisNavigation()
     setWizardBusy(true)
     try {
       const payload: Record<string, unknown> = {
@@ -875,7 +925,10 @@ export function AppsPanel({
       void analyzePromise
         .then(updatedRaw => {
           const updated = parseJson<AppDeliveryJob | null>(updatedRaw, null)
-          if (updated) setWizardJob(updated)
+          if (updated) {
+            setWizardJob(updated)
+            navigate?.(updated)
+          }
           void loadWorkspaceData(true)
         })
         .catch(err => {
@@ -1092,6 +1145,7 @@ export function AppsPanel({
 
   const handleLaunchRepair = async () => {
     if (!wizardJob) return
+    const navigate = beginAnalysisNavigation()
     setWizardBusy(true)
     setWizardError(null)
     try {
@@ -1110,7 +1164,10 @@ export function AppsPanel({
       void analyzePromise
         .then(raw => {
           const updated = parseJson<AppDeliveryJob | null>(raw, null)
-          if (updated) setWizardJob(updated)
+          if (updated) {
+            setWizardJob(updated)
+            navigate?.(updated)
+          }
         })
         .catch(err => {
           setWizardError(readErrorMessage(err, '启动修复分析失败'))
@@ -1396,7 +1453,16 @@ export function AppsPanel({
         </div>
       )}
 
-      {resumableJob && (() => {
+      {linkedJob && (
+        <div className="oa-draft-banner">
+          <div><strong>{linkedJob.name}</strong></div>
+          <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void openLinkedJob(linkedJob)}>
+            回到当前任务
+          </button>
+        </div>
+      )}
+
+      {resumableJob && resumableJob.id !== linkedJob?.id && (() => {
         const tone = jobStatusTone(resumableJob.status, resumableJob.userDisabled)
         return (
           <div className="oa-draft-banner">
@@ -1947,6 +2013,7 @@ export function AppsPanel({
               sessionId={sessionId}
               contextId={contextId}
               jobId={wizardJob.id}
+              beginAnalysisNavigation={beginAnalysisNavigation}
               footerMode="external"
               onlineResources={resources}
               repairMode={wizardJob.analysis_mode === 'repair' || wizardJob.analysisMode === 'repair'}
@@ -3092,7 +3159,9 @@ export function AppsPanel({
   return (
     <div className="opc-apps-root">
       <style>{appsCss}</style>
-      {viewMode === 'list' && renderAppListView()}
+      {viewMode === 'list' && (loadingLinkedJob || linkedJob && !restoredLinkedJob.current
+        ? <p role="status">正在查找当前会话的应用任务…</p>
+        : renderAppListView())}
       {viewMode === 'wizard' && renderWizardView()}
       {viewMode === 'detail' && renderDetailView()}
     </div>

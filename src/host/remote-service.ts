@@ -53,6 +53,10 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appJob(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.getJob(id, expectedContextId)) }
   @Remote
+  async appJobByAnalysisSession(sessionId: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.getJobByAnalysisSession(sessionId, expectedContextId))
+  }
+  @Remote
   async appCheckSlug(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.checkSlug(slug, expectedContextId)) }
   @Remote
   async appOpcConfig(expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.opcConfig(expectedContextId)) }
