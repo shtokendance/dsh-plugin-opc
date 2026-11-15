@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-agent'
+import type { AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { AppDelivery, type AppDocument, fingerprint, verificationCredentialFields, worker } from './app-delivery.ts'
@@ -100,42 +100,14 @@ function buildInstructions(isRepair: boolean): string {
 }
 
 export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
-  delivery.analyze = async (job, root, feedback, signal) => {
+  delivery.analyze = async (job, root, feedback, signal, onSessionReady) => {
     const parent = ctx.agents.get(job.session as never)
-    if (!parent) throw new Error('请先在当前工作区创建对话，再打开 OPC 应用进行分析')
     const configured = job.modelSelection
     const selection = configured ? { provider: configured.provider, model: configured.model,
       reasoningEffort: configured.reasoningEffort ? ReasoningEffortId(configured.reasoningEffort) : undefined }
-      : parent.model.current() ?? parent.session.requestHeader()?.config
+      : parent?.model.current() ?? parent?.session.requestHeader()?.config
     const appCtxId = delivery.core.auth.contexts.applicationContextId!
-    const previous = job.published
-      ? await delivery.platform('/' + job.slug, appCtxId).catch(() => undefined)
-      : undefined
-    const runtimeLogs = job.published
-      ? await delivery.platform('/' + job.slug + '/logs', appCtxId).catch(() => undefined)
-      : undefined
-    const rawResources = await delivery.platform('/resources', appCtxId).catch(() => ({ resources: [] }))
-    const filteredRes = await worker({
-      action: 'filter_resources',
-      root,
-      resources: rawResources?.resources ?? [],
-      slug: job.slug,
-      default_only: true,
-    }, signal).catch(() => ({ resources: [] }))
-
     const isRepair = Boolean(job.failedRevision || job.failedSnapshot || job.failureContext || job.analysisMode === 'repair')
-    if (isRepair || previous?.error_message || previous?.build_log || runtimeLogs?.runtime_logs) {
-      const mergedFailure = [
-        job.failureContext,
-        previous?.error_message,
-        previous?.build_log?.slice(-8000),
-        runtimeLogs?.runtime_logs?.slice(-4000),
-      ].filter(Boolean).join('\n')
-      if (mergedFailure) {
-        job.failureContext = await worker({ action: 'redact_feedback', root, text: mergedFailure.slice(-24_000) }, signal)
-      }
-    }
-
     const instructions = buildInstructions(isRepair)
     const prevPlan = compactPreviousPlan(job.proposal)
     const taskInstruction = isRepair
@@ -155,8 +127,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         draftFileChanges = Object.values(draftsRaw).map((c: any) => ({ id: c?.id, path: c?.path, reason: c?.reason }))
       }
     } catch { /* no staged draft files yet */ }
-    const handle = await ctx.agents.create({ sessionId: randomUUID() as never, meta: { cwd: root },
-      agentOptions: selection ? { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort } : { ...parent.options }, signal: abort,
+    const agentOptions = selection
+      ? { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
+      : { ...parent?.options }
+    const options: Omit<ResumeAgentOptions, 'resumeSessionId'> = {
+      agentOptions,
+      signal: abort,
       setup(child) {
         child.tools.restrict({ allow: [] })
         child.systemPrompt.section({ name: 'opc-delivery', order: 1, text: instructions, complete: true, interpolate: false })
@@ -259,11 +235,25 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             }
             return '方案已提交。请结束本轮，等待用户核对。'
           } }))
-      } })
-    const cancel = () => { handle.agent.cancel({ kind: 'user' }) }
+      },
+    }
+    const previousSessionId = job.analysisSessions?.at(-1)
+    let handle: AgentHandle | undefined
+    if (previousSessionId && !ctx.agents.get(previousSessionId as never)) {
+      try {
+        handle = await ctx.agents.resume({ ...options, resumeSessionId: previousSessionId as never })
+      } catch {
+        abort.throwIfAborted()
+        // A missing or occupied transcript can be replaced; task history is stored separately.
+      }
+    }
+    const analysis = handle ?? await ctx.agents.create({
+      ...options, sessionId: randomUUID() as never, meta: { cwd: root },
+    })
+    const cancel = () => { analysis.agent.cancel({ kind: 'user' }) }
     abort.addEventListener('abort', cancel, { once: true })
     const send = (text: string) => {
-      handle.agent.followup({
+      analysis.agent.followup({
         id: randomUUID() as never,
         role: 'user',
         source: { kind: 'user' },
@@ -274,6 +264,36 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       })
     }
     try {
+      abort.throwIfAborted()
+      await onSessionReady(String(analysis.agent.session.id))
+      abort.throwIfAborted()
+      const previous = job.published
+        ? await delivery.platform('/' + job.slug, appCtxId).catch(() => undefined)
+        : undefined
+      const runtimeLogs = job.published
+        ? await delivery.platform('/' + job.slug + '/logs', appCtxId).catch(() => undefined)
+        : undefined
+      const rawResources = await delivery.platform('/resources', appCtxId).catch(() => ({ resources: [] }))
+      const filteredRes = await worker({
+        action: 'filter_resources',
+        root,
+        resources: rawResources?.resources ?? [],
+        slug: job.slug,
+        default_only: true,
+      }, signal).catch(() => ({ resources: [] }))
+
+      if (isRepair || previous?.error_message || previous?.build_log || runtimeLogs?.runtime_logs) {
+        const mergedFailure = [
+          job.failureContext,
+          previous?.error_message,
+          previous?.build_log?.slice(-8000),
+          runtimeLogs?.runtime_logs?.slice(-4000),
+        ].filter(Boolean).join('\n')
+        if (mergedFailure) {
+          job.failureContext = await worker({ action: 'redact_feedback', root, text: mergedFailure.slice(-24_000) }, signal)
+        }
+      }
+
       abort.throwIfAborted()
       let prompt = JSON.stringify({
         name: job.name,
@@ -296,7 +316,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         let transientError = ''
         try {
           send(prompt)
-          await handle.agent.whenIdle()
+          await analysis.agent.whenIdle()
         } catch (err) {
           if (signal.aborted || (abort.aborted && !repeatedProposal)) throw err
           const msg = err instanceof Error ? err.message : String(err)
@@ -328,7 +348,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         delivery.core.emit('change')
         prompt = `继续当前任务，保留原业务和用户选择。待处理的技术反馈：${reason}。复用已暂存的文件修改，只修正未通过的部分，再用 opc_delivery_submit 提交完整结构化结果。`
       }
-    } finally { abort.removeEventListener('abort', cancel); await handle.dispose() }
+    } finally { abort.removeEventListener('abort', cancel); await analysis.dispose() }
   }
   ctx.effect(() => () => { delivery.analyze = undefined })
 }

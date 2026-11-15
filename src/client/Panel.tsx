@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import type { AuthState, OpcApi, Resource } from './api.ts'
 import { AppsPanel } from './AppsPanel.tsx'
+import type { PrepareAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { OpcSettingsPanel } from './OpcSettingsPanel.tsx'
 export type PanelKind = 'knowledge' | 'skills' | 'mcp' | 'apps'
 import { labels as titles, OpcIcon } from './branding.tsx'
@@ -805,7 +806,12 @@ const css = `
 }
 `
 
-export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string; kind: PanelKind }) {
+export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
+  api: OpcApi
+  sessionId: string
+  kind: PanelKind
+  prepareAnalysisNavigation?: PrepareAnalysisNavigation
+}) {
   const [state, setState] = useState<AuthState>({ signedIn: false, loginInProgress: false, context: null })
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [q, setQ] = useState('')
   const [items, setItems] = useState<Resource[]>([]), [hits, setHits] = useState<Record<string, unknown>[]>([])
@@ -966,6 +972,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
           api={api}
           sessionId={sessionId}
           contextId={context.applicationContextId}
+          prepareAnalysisNavigation={prepareAnalysisNavigation}
           refreshSignal={appsRefreshTrigger}
         />
       )}

@@ -8,6 +8,7 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import { contribution } from '../remote-contract.ts'
 import { Panel, type PanelKind } from './Panel.tsx'
 import type { OpcApi } from './api.ts'
+import { registerAnalysisNavigation } from './app-analysis-navigation.tsx'
 
 type WireApi = { [K in keyof OpcApi]: NonNullable<OpcApi[K]> extends (...args: infer A) => Promise<infer R> ? (...args: A) => Promise<RemoteResult<R>> : OpcApi[K] }
 declare module '@deepseek-ai/dsh-typert-protocol' { interface TypertRemoteNamespaceMap { opc: WireApi } }
@@ -28,6 +29,7 @@ function registerPanels(ctx: Context): void {
     appCatalog: (...args) => unwrap(wire.appCatalog(...args)),
     appList: (...args) => unwrap(wire.appList(...args)),
     appJob: (...args) => unwrap(wire.appJob!(...args)),
+    appJobByAnalysisSession: (...args) => unwrap(wire.appJobByAnalysisSession!(...args)),
     appCheckSlug: (...args) => unwrap(wire.appCheckSlug!(...args)),
     opcConfigGet: () => unwrap(wire.opcConfigGet!()),
     opcConfigUpdate: (payloadJson: string) => unwrap(wire.opcConfigUpdate!(payloadJson)),
@@ -86,10 +88,11 @@ function registerPanels(ctx: Context): void {
     decideDebugInvocation: (...args) => unwrap(wire.decideDebugInvocation(...args)),
   }
   ctx.inject(['inputTriggers'], child => registerMentions(child, api))
+  const prepareAnalysisNavigation = registerAnalysisNavigation(ctx, api)
   for (const [index, kind] of (['knowledge', 'skills', 'mcp', 'apps'] as const).entries()) {
     const id = `dsh-plugin-opc/${kind}`
     ctx.effect(() => ctx.sidebarRightTabs.register({ id, kind: `opc-${kind}`, priority: 'extension', title: () => labels[kind], guide: [{ id: `opc-${kind}`, order: 10 + index, icon: OpcIcon, title: () => labels[kind], description: () => 'OPC 工作空间' }] }))
     ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {labels[kind]}</>)))
-    ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: id, inject: sessionId => ({ api, sessionId: String(sessionId), kind }) }, Panel)))
+    ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: id, inject: sessionId => ({ api, sessionId: String(sessionId), kind, prepareAnalysisNavigation }) }, Panel)))
   }
 }

@@ -180,6 +180,7 @@ export function AppDeliveryReview({
   onReplaceSource,
   onNextStep,
   onInvalidate,
+  beginAnalysisNavigation,
   initialFeedback = '',
   repairMode = false,
   onlineResources = [],
@@ -195,6 +196,7 @@ export function AppDeliveryReview({
   onNextStep?: () => void
   onlineResources?: ResourceSummary[]
   onInvalidate?: () => void
+  beginAnalysisNavigation?: () => ((job: AppDeliveryJob) => void) | undefined
   initialFeedback?: string
   repairMode?: boolean
   footerMode?: 'inline' | 'external'
@@ -291,15 +293,18 @@ export function AppDeliveryReview({
   const sendFeedback = async (customText?: string, resume = false) => {
     const content = (customText ?? feedback).trim()
     if ((!content && !resume) || running || inFlight.current) return
+    const navigate = beginAnalysisNavigation?.()
     inFlight.current = true
     setBusy(true)
     setError('')
     try {
       const mode = resume ? 'resume' : repairMode || job?.analysis_mode === 'repair' || job?.analysisMode === 'repair' ? 'repair' : 'analysis'
-      if (api.appAnalyzeWithMode) {
-        await api.appAnalyzeWithMode(jobId, resume ? '' : content, sessionId, mode, contextId)
-      } else {
-        await api.appAnalyze(jobId, content, sessionId, contextId)
+      const raw = api.appAnalyzeWithMode
+        ? await api.appAnalyzeWithMode(jobId, resume ? '' : content, sessionId, mode, contextId)
+        : await api.appAnalyze(jobId, content, sessionId, contextId)
+      if (navigate) {
+        const updated = JSON.parse(raw) as AppDeliveryJob | null
+        if (updated?.id === jobId) navigate(updated)
       }
       onInvalidate?.()
       preparing.current = ''

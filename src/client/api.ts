@@ -115,6 +115,7 @@ export interface DeployedApp {
 
 export interface AppDeliveryJob {
   id: string
+  analysisSessionId?: string
   slug: string
   name: string
   description?: string
@@ -200,6 +201,7 @@ export interface OpcApi {
   appCatalog(context: string): Promise<string>
   appList(context: string): Promise<string>
   appJob?(id: string, context: string): Promise<string>
+  appJobByAnalysisSession?(sessionId: string, context: string): Promise<string>
   appCheckSlug?(slug: string, context: string): Promise<string>
   appOpcConfig?(context: string): Promise<string>
   appPickSourceFolder?(context: string): Promise<string>
