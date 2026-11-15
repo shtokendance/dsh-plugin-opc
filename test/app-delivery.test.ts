@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { AppDelivery, AppRequestError, fingerprint, worker } from '../src/host/app-delivery.ts'
 import { AppSkillProvider } from '../src/host/app-skills.ts'
-import { ContextStore } from '../src/host/context.ts'
+import { ContextStore, identityHash } from '../src/host/context.ts'
 import type { OpcCore } from '../src/host/core.ts'
 
 function proposal(url: string) {
@@ -63,7 +63,7 @@ async function publishConfirmed(delivery: AppDelivery, id: string, input: Record
   return delivery.publish(id, { ...input, ...confirmation }, context)
 }
 
-test('whole-application backups stream past 64 MiB and discard a partial or mismatched file', async () => {
+test('a backup response streams past 64 MiB and a mismatched file is discarded', async () => {
   const root = await mkdtemp(join(tmpdir(), 'opc-app-stream-'))
   const contexts = new ContextStore()
   contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
@@ -433,6 +433,21 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     const afterRb = (await delivery.list(expected))[0]
     assert.equal(afterRb.status, 'verified')
     assert.equal(afterRb.version, 1)
+
+    const bundle = JSON.parse(await readFile(join(jobDir, 'job.json'), 'utf8'))
+    const { unzipSync, zipSync } = await import('fflate')
+    const archive = unzipSync(new Uint8Array(v1SkillZipBytes!))
+    const operationFile = Object.keys(archive).find(name => name.endsWith('references/operations.json'))!
+    const historicalContract = JSON.parse(Buffer.from(archive[operationFile]).toString())
+    historicalContract.verification.cases.push({ operation: 'missing-operation', json_contains: { ok: true } })
+    archive[operationFile] = Buffer.from(JSON.stringify(historicalContract))
+    v1SkillZipBytes = Buffer.from(zipSync(archive))
+    v1Hashes = { ...bundle.hashes, 'skill.zip': createHash('sha256').update(v1SkillZipBytes).digest('hex') }
+    const invalid = await delivery.rollback('align-app', 1, '版本包含无效验证用例', expected)
+    assert.equal(invalid.local_skill_verified, false)
+    assert.equal(invalid.verification?.status, 'probe-warning')
+    assert.match(invalid.verification?.detail, /有效的只读业务接口/)
+    assert.equal((await delivery.getJob(invalid.job_id!, expected)).failureStage, 'verification')
   } finally {
     server.closeAllConnections()
     await new Promise<void>(r => server.close(() => r()))
@@ -761,6 +776,7 @@ test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha2
     }
     const paused = await delivery.getJob(created.id, expected)
     assert.equal(paused.status, 'failed')
+    assert.equal(paused.failureStage, 'analysis')
     assert.match(String(paused.analysis_failure), /模拟分析超时/)
 
     await worker(
@@ -812,4 +828,31 @@ test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha2
   } finally {
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('a healthy old version does not end polling for a newer build', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-pending-upgrade-'))
+  try {
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { async read() { return {} }, async write() {} })
+    const id = '2e9fda92-f3b7-4d23-9ae9-9fd1d7d2aa07', url = 'http://127.0.0.1:1'
+    const root = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context), id)
+    await mkdir(root, { recursive: true })
+    const hashes = { 'app.tar': 'new-app', 'skill.zip': 'new-skill' }
+    await writeFile(join(root, 'job.json'), JSON.stringify({ id, name: 'App', slug: 'test-app', url,
+      status: 'building', published: true, version: 2, events: [], proposal: proposal(url), hashes }))
+    let status = 'building'
+    delivery.platform = async path => path.endsWith('/versions')
+      ? { versions: [{ version: 2, status, app_tar_sha256: hashes['app.tar'], skill_zip_sha256: hashes['skill.zip'], error_message: 'build failed' }] }
+      : { status: 'running', current_version: 1, app_url: url }
+    assert.equal((await delivery.verify(id, expected)).status, 'building')
+    status = 'failed'
+    const failed = await delivery.verify(id, expected)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.failureStage, 'deployment')
+    assert.equal(failed.error, 'build failed')
+  } finally { await rm(home, { recursive: true, force: true }) }
 })

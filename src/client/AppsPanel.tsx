@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type {
   AppConfigItem,
   AppDeliveryJob,
@@ -214,6 +214,8 @@ function inferStepForJob(job: AppDeliveryJob): WizardStep {
     case 'unknown':
       return 4
     case 'failed':
+      if (job.failureStage === 'import') return 1
+      if (job.failureStage === 'analysis' || job.failureStage === 'preparation' || job.analysis_failure && !job.published) return 2
       if (job.published) return 4
       if (job.proposal) return 2
       return 1
@@ -385,10 +387,11 @@ export function AppsPanel({
   const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
   const [versionNote, setVersionNote] = useState('')
   const draftSaveTimerRef = useRef<number | null>(null)
+  const draftSaveRequest = useRef<Promise<void>>(Promise.resolve())
 
   // Step 4 Publish & Verify State
   const [verifyCredentials, setVerifyCredentials] = useState<Record<string, string>>({})
-  const [rememberCredentials, setRememberCredentials] = useState(true)
+  const [rememberCredentials, setRememberCredentials] = useState(false)
   const [wizardLogsOpen, setWizardLogsOpen] = useState(false)
   const [wizardLogsLoading, setWizardLogsLoading] = useState(false)
   const [wizardLogsData, setWizardLogsData] = useState<{ runtime?: string; build?: string }>({})
@@ -400,6 +403,10 @@ export function AppsPanel({
   const [detailBusy, setDetailBusy] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailNotice, setDetailNotice] = useState<string | null>(null)
+  const [versionsError, setVersionsError] = useState<string | null>(null)
+  const [logsError, setLogsError] = useState<string | null>(null)
+  const detailLoad = useRef(0)
+  const formId = useId()
   const [versions, setVersions] = useState<AppVersionItem[]>([])
   const [storageOverview, setStorageOverview] = useState<AppStorageOverview | null>(null)
   const [editPort, setEditPort] = useState<string>('8080')
@@ -604,21 +611,40 @@ export function AppsPanel({
     [api, contextId],
   )
 
+  const progressJobId = wizardJob?.id
+  const progressStatus = wizardJob?.status
   useEffect(() => {
-    if (viewMode !== 'wizard' || wizardStep !== 4 || !wizardJob) return
-    if (wizardJob.status !== 'building' && wizardJob.status !== 'verifying') return
-    const timer = window.setInterval(() => {
-      void refreshWizardJob(wizardJob.id).then(updated => {
-        if (updated && updated.status !== 'building' && updated.status !== 'verifying') {
+    if (viewMode !== 'wizard' || wizardStep !== 4 || !progressJobId || wizardBusy ||
+        !['building', 'verifying', 'unknown'].includes(progressStatus ?? '')) return
+    let alive = true
+    let timer: number
+    const poll = async () => {
+      let keepPolling = true
+      try {
+        const raw = progressStatus === 'verifying' && api.appJob
+          ? await api.appJob(progressJobId, contextId)
+          : await (api.appVerifyWithOptions
+            ? api.appVerifyWithOptions(progressJobId, JSON.stringify({ automatic: true }), contextId)
+            : api.appVerify(progressJobId, contextId))
+        if (!alive) return
+        const updated = JSON.parse(raw) as AppDeliveryJob
+        setWizardError(null)
+        setWizardJob(current => current?.id === updated.id ? updated : current)
+        keepPolling = ['building', 'verifying', 'unknown'].includes(updated.status)
+        if (!keepPolling) {
           void loadWorkspaceData(true)
-          if (updated.status === 'failed' || wizardLogsOpen) {
-            void fetchWizardLogs(updated.slug)
-          }
+          if (updated.status === 'failed') void fetchWizardLogs(updated.slug)
         }
-      })
-    }, 2000)
-    return () => window.clearInterval(timer)
-  }, [fetchWizardLogs, loadWorkspaceData, refreshWizardJob, viewMode, wizardJob, wizardLogsOpen, wizardStep])
+      } catch (error) {
+        if (!alive) return
+        setWizardError(readErrorMessage(error, '暂时无法核对部署状态，将继续查询'))
+      } finally {
+        if (alive && keepPolling) timer = window.setTimeout(() => void poll(), 2000)
+      }
+    }
+    void poll()
+    return () => { alive = false; window.clearTimeout(timer) }
+  }, [api, contextId, fetchWizardLogs, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep])
 
   // Load Step 3 draft data when entering Step 3
   useEffect(() => {
@@ -631,28 +657,39 @@ export function AppsPanel({
 
   // Open Detail View & load all 5 tabs data
   const openAppDetail = useCallback(
-    async (slug: string, initialTab: DetailTab = 'artifacts') => {
+    async (slug: string, initialTab: DetailTab = 'artifacts', preserveFeedback = false) => {
+      const request = ++detailLoad.current
       setViewMode('detail')
       setDetailTab(initialTab)
       setDetailLoading(true)
-      setDetailError(null)
-      setDetailNotice(null)
+      if (!preserveFeedback) {
+        setDetailError(null)
+        setDetailNotice(null)
+        setDetailApp(null)
+      }
+      setVersionsError(null)
+      setLogsError(null)
       setRollbackTarget(null)
       setDeleteBoxOpen(false)
       setDeleteConfirmText('')
       try {
-        const [detRaw, verRaw, stgRaw, logRaw] = await Promise.all([
-          api.appDetails(slug, contextId),
-          api.appVersions?.(slug, contextId).catch(() => '{"versions":[]}') ?? Promise.resolve('{"versions":[]}'),
-          api.appStorage?.(slug, contextId).catch(() => 'null') ?? Promise.resolve('null'),
-          api.appLogs?.(slug, contextId).catch(() => '{}') ?? Promise.resolve('{}'),
-        ])
-        const detail = parseJson<DeployedApp | null>(detRaw, null)
+        const detail = JSON.parse(await api.appDetails(slug, contextId)) as DeployedApp | null
+        if (request !== detailLoad.current) return
         if (!detail) throw new Error('未能读取应用详情')
-        const verParsed = parseJson<{ versions?: AppVersionItem[] }>(verRaw, { versions: [] })
-        const stgParsed = parseJson<AppStorageOverview | null>(stgRaw, null)
+        const canManage = detail.can_manage === true
+        const [verRaw, stgRaw, logRaw] = canManage ? await Promise.allSettled([
+          api.appVersions?.(slug, contextId) ?? Promise.resolve('{"versions":[]}'),
+          api.appStorage?.(slug, contextId).catch(() => 'null') ?? Promise.resolve('null'),
+          api.appLogs?.(slug, contextId) ?? Promise.resolve('{}'),
+        ]) : []
+        if (request !== detailLoad.current) return
+        if (!canManage) setDetailTab('artifacts')
+        if (verRaw?.status === 'rejected') setVersionsError(readErrorMessage(verRaw.reason, '版本历史加载失败'))
+        if (logRaw?.status === 'rejected') setLogsError(readErrorMessage(logRaw.reason, '日志加载失败'))
+        const verParsed = parseJson<{ versions?: AppVersionItem[] }>(verRaw?.status === 'fulfilled' ? verRaw.value : null, { versions: [] })
+        const stgParsed = parseJson<AppStorageOverview | null>(stgRaw?.status === 'fulfilled' ? stgRaw.value : null, null)
         const logParsed = parseJson<{ runtime_logs?: string; logs?: string; content?: string; build_log?: string; dockerfile?: string }>(
-          logRaw,
+          logRaw?.status === 'fulfilled' ? logRaw.value : null,
           {},
         )
         setDetailApp(detail)
@@ -666,16 +703,17 @@ export function AppsPanel({
           dockerfile: logParsed.dockerfile ?? detail.dockerfile_content ?? '',
         })
       } catch (error) {
-        setDetailError(readErrorMessage(error, '加载应用详情失败'))
+        if (request === detailLoad.current) setDetailError(readErrorMessage(error, '加载应用详情失败'))
       } finally {
-        setDetailLoading(false)
+        if (request === detailLoad.current) setDetailLoading(false)
       }
     },
     [api, contextId, opcConfig.defaultPort],
   )
 
   const refreshDetailLogs = useCallback(async () => {
-    if (!detailApp) return
+    if (detailApp?.can_manage !== true) return
+    setLogsError(null)
     try {
       const logRaw = await api.appLogs?.(detailApp.slug, contextId)
       const logParsed = parseJson<{ runtime_logs?: string; logs?: string; content?: string; build_log?: string; dockerfile?: string }>(
@@ -688,7 +726,7 @@ export function AppsPanel({
         dockerfile: logParsed.dockerfile ?? detailApp.dockerfile_content ?? '',
       })
     } catch (error) {
-      setDetailError(readErrorMessage(error, '刷新日志失败'))
+      setLogsError(readErrorMessage(error, '刷新日志失败'))
     }
   }, [api, contextId, detailApp])
 
@@ -713,6 +751,7 @@ export function AppsPanel({
       setReviewInitialFeedback('')
       setConfigSubTab('configs')
       setVerifyCredentials({})
+      setRememberCredentials(false)
       setWizardLogsOpen(false)
       setWizardLogsData({})
     },
@@ -724,6 +763,7 @@ export function AppsPanel({
       setWizardError(null)
       setWizardNotice(null)
       setVerifyCredentials({})
+      setRememberCredentials(false)
       setWizardLogsOpen(false)
       setWizardLogsData({})
       setReviewInitialFeedback('')
@@ -731,6 +771,7 @@ export function AppsPanel({
       setViewMode('wizard')
       const fresh = (await refreshWizardJob(job.id)) ?? job
       setWizardJob(fresh)
+      setUpgradeTarget(fresh.published || fresh.upgrade ? apps.find(a => a.slug === fresh.slug && a.can_manage === true) ?? null : null)
       const targetStep = overrideStep ?? inferStepForJob(fresh)
       setWizardStep(targetStep)
       if (targetStep === 1) {
@@ -740,7 +781,6 @@ export function AppsPanel({
         setSlugManual(true)
         setContainerPort(String(fresh.port ?? opcConfig.defaultPort))
         setAppDescription(fresh.description ?? '')
-        setUpgradeTarget(fresh.upgrade ? apps.find(a => a.slug === fresh.slug) ?? null : null)
       } else if (targetStep === 3) {
         await syncStep3Drafts(fresh)
       } else if (targetStep === 4 && (fresh.status === 'failed' || fresh.status === 'verification_failed')) {
@@ -862,22 +902,47 @@ export function AppsPanel({
     }
   }
 
-  // Step 3 Config draft persistence (debounced)
+  const saveDraft = useCallback((job: AppDeliveryJob, rows: AppConfigItem[], note: string) => {
+    if (!api.appSaveConfigDraft || !job.artifactHash) return Promise.resolve()
+    const body = JSON.stringify({ artifactHash: job.artifactHash, rows: sanitizeConfigRowsForApi(rows), versionNote: note })
+    const request = draftSaveRequest.current.catch(() => {}).then(() => api.appSaveConfigDraft!(job.id, body, contextId))
+    draftSaveRequest.current = request
+    return request
+  }, [api, contextId])
+
   const scheduleDraftSave = useCallback(
     (job: AppDeliveryJob, nextConfigs: AppConfigItem[], nextNote: string) => {
       if (!api.appSaveConfigDraft || !job.artifactHash) return
       if (draftSaveTimerRef.current) window.clearTimeout(draftSaveTimerRef.current)
       draftSaveTimerRef.current = window.setTimeout(() => {
-        const body = {
-          artifactHash: job.artifactHash,
-          rows: sanitizeConfigRowsForApi(nextConfigs),
-          versionNote: nextNote,
-        }
-        void api.appSaveConfigDraft!(job.id, JSON.stringify(body), contextId).catch(() => {})
+        draftSaveTimerRef.current = null
+        void saveDraft(job, nextConfigs, nextNote).catch(error => {
+          setWizardError(readErrorMessage(error, '配置草稿保存失败，请重试'))
+        })
       }, 450)
     },
-    [api, contextId],
+    [api, saveDraft],
   )
+
+  const flushDraft = async () => {
+    if (draftSaveTimerRef.current !== null) {
+      window.clearTimeout(draftSaveTimerRef.current)
+      draftSaveTimerRef.current = null
+    }
+    if (wizardJob?.status === 'ready' && wizardStep === 3) await saveDraft(wizardJob, configDrafts, versionNote)
+  }
+
+  const leaveWizard = async () => {
+    if (wizardBusy) return
+    setWizardBusy(true)
+    try {
+      await flushDraft()
+      setViewMode('list')
+      void loadWorkspaceData(true)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '配置草稿保存失败，请重试'))
+    } finally { setWizardBusy(false) }
+  }
 
   const handleStep3ConfigsChange = (nextConfigs: AppConfigItem[]) => {
     setConfigDrafts(nextConfigs)
@@ -894,6 +959,7 @@ export function AppsPanel({
     setWizardBusy(true)
     setWizardError(null)
     try {
+      await flushDraft()
       if (api.appReopenReview) {
         const raw = await api.appReopenReview(wizardJob.id, contextId)
         const updated = parseJson<AppDeliveryJob | null>(raw, null)
@@ -923,6 +989,7 @@ export function AppsPanel({
 
     setWizardBusy(true)
     try {
+      await flushDraft()
       const cleanConfigs = sanitizeConfigRowsForApi(configDrafts)
       const confirmRaw = await api.appConfirmDeployment(
         wizardJob.id,
@@ -948,6 +1015,10 @@ export function AppsPanel({
       )
       const published = parseJson<AppDeliveryJob | null>(publishRaw, null)
       if (published) setWizardJob(published)
+      if (published?.status === 'ready') {
+        setWizardError(published.error || '平台未接受本次发布，请核对配置后重试')
+        return
+      }
       setWizardStep(4)
       void loadWorkspaceData(true)
 
@@ -963,12 +1034,16 @@ export function AppsPanel({
   }
 
   // Step 4 Actions: Verify, Confirm Page Verification, Toggle Skill, Repair, Reopen
-  const handleRunVerification = async (confirmPageVerification = false, useCredentials = false) => {
+  const handleRunVerification = async (confirmPageVerification = false, useCredentials = false, recheckHealth = false) => {
     if (!wizardJob) return
     setWizardBusy(true)
     setWizardError(null)
     setWizardNotice(null)
     try {
+      if (recheckHealth && api.appRecheck) {
+        const result = JSON.parse(await api.appRecheck(wizardJob.slug, contextId)) as { ok?: boolean; error?: string; detail?: string }
+        if (!result.ok) throw new Error(result.error || result.detail || '健康检查未通过')
+      }
       const options: Record<string, unknown> = {}
       if (confirmPageVerification) options.confirmPageVerification = true
       if (useCredentials) {
@@ -980,12 +1055,8 @@ export function AppsPanel({
         : await api.appVerify(wizardJob.id, contextId)
       const updated = parseJson<AppDeliveryJob | null>(raw, null)
       if (updated) setWizardJob(updated)
-      if (confirmPageVerification && updated?.status === 'verified' && updated.userDisabled && api.appSetSkillEnabled) {
-        await api.appSetSkillEnabled(updated.id, true, contextId)
-        await refreshWizardJob(updated.id)
-      }
       if (updated?.status === 'verified') {
-        setWizardNotice('验证已通过，应用与智能体技能状态已同步')
+        setWizardNotice(updated.userDisabled ? '业务验证已通过，技能仍保持停用' : '验证已通过，应用技能可用')
       }
       void loadWorkspaceData(true)
     } catch (error) {
@@ -1124,9 +1195,10 @@ export function AppsPanel({
       )
       const msg = res.detail || (res.ok ? `健康检测通过（状态：${res.status || 'running'}）` : res.error || '健康检测未通过')
       if (inDetail) {
-        if (res.ok) setDetailNotice(msg)
-        else setDetailError(msg)
-        await openAppDetail(slug, detailTab)
+        if (res.ok) {
+          setDetailNotice(msg)
+          await openAppDetail(slug, detailTab, true)
+        } else setDetailError(msg)
       } else {
         if (res.ok) setBannerNotice(msg)
         else setBannerError(msg)
@@ -1169,7 +1241,7 @@ export function AppsPanel({
         contextId,
       )
       setDetailNotice('配置已更新并触发容器重启，正在刷新最新状态…')
-      await openAppDetail(detailApp.slug, 'configs')
+      await openAppDetail(detailApp.slug, 'configs', true)
       void loadWorkspaceData(true)
     } catch (error) {
       setDetailError(readErrorMessage(error, '保存运行配置失败'))
@@ -1195,22 +1267,30 @@ export function AppsPanel({
       const res = parseJson<{
         ok?: boolean
         active_version?: number
+        current_version?: number
+        skill_enabled?: boolean
         verification?: { status?: string; detail?: string }
         job_id?: string
       }>(raw, {})
       setRollbackTarget(null)
       setRollbackReason('')
-      if (res.verification?.status === 'awaiting_page_verification' && res.job_id) {
-        setDetailNotice(`已回滚至 v${res.active_version ?? rollbackTarget.version}，请前往发布验证页确认页面可用后启用技能`)
+      const restored = `已回滚至 v${res.active_version ?? res.current_version ?? rollbackTarget.version}`
+      if (['awaiting_page_verification', 'probe-warning'].includes(res.verification?.status ?? '') && res.job_id) {
+        const next = res.verification?.status === 'awaiting_page_verification' ? '请确认页面可用' : '请补充业务验证'
+        setDetailNotice(`${restored}，${next}`)
         const job = await refreshWizardJob(res.job_id)
         if (job) {
           await resumeWizardJob(job, 4)
+          setWizardNotice(`${restored}，${next}`)
           return
         }
       } else {
-        setDetailNotice(`已成功回滚至 v${res.active_version ?? rollbackTarget.version}${res.verification?.detail ? `：${res.verification.detail}` : ''}`)
+        const skillStatus = res.skill_enabled ? '业务验证已通过，技能可用'
+          : res.verification?.status === 'verified-rolled-back' ? '业务验证已通过，技能仍保持停用'
+          : res.verification?.detail || '应用技能尚未通过业务验证'
+        setDetailNotice(`${restored}。 ${skillStatus}`)
       }
-      await openAppDetail(detailApp.slug, 'versions')
+      await openAppDetail(detailApp.slug, 'versions', true)
       void loadWorkspaceData(true)
     } catch (error) {
       setDetailError(readErrorMessage(error, '版本回滚失败'))
@@ -1258,11 +1338,11 @@ export function AppsPanel({
     }
   }
 
-  // Filter versions per work-opc convention: if any version is running/active, hide pure failed historical attempts
-  const visibleVersions = useMemo(() => {
-    const hasRunning = versions.some(v => v.status === 'running' || v.is_active)
-    return hasRunning ? versions.filter(v => v.status !== 'failed' || v.is_active) : versions
-  }, [versions])
+  const currentVersion = (version: AppVersionItem) => version.is_active ||
+    (detailApp?.status === 'running' && detailApp.current_version === version.version)
+  const hasRunningVersion = detailApp?.status === 'running' || versions.some(v => v.status === 'running' || v.is_active)
+  const visibleVersions = versions.filter((version, index) =>
+    currentVersion(version) || version.status !== 'failed' || (!hasRunningVersion && index === 0))
 
   // Render View 1: App List
   const renderAppListView = () => (
@@ -1290,7 +1370,7 @@ export function AppsPanel({
       </div>
 
       {bannerError && (
-        <div className="oa-alert oa-alert-danger">
+        <div role="alert" className="oa-alert oa-alert-danger">
           <AppIcon name="warning" size={16} />
           <div style={{ flex: 1 }}>{bannerError}</div>
           <button type="button" className="oa-btn oa-btn-xs" onClick={() => setBannerError(null)}>
@@ -1300,7 +1380,7 @@ export function AppsPanel({
       )}
 
       {bannerNotice && (
-        <div className="oa-alert oa-alert-ok">
+        <div role="status" className="oa-alert oa-alert-ok">
           <AppIcon name="check" size={16} />
           <div style={{ flex: 1 }}>{bannerNotice}</div>
           <button type="button" className="oa-btn oa-btn-xs" onClick={() => setBannerNotice(null)}>
@@ -1363,7 +1443,7 @@ export function AppsPanel({
         <div className="oa-apps-grid">
           {apps.map(app => {
             const tone = jobStatusTone(app.status)
-            const readOnly = app.can_manage === false
+            const readOnly = app.can_manage !== true
             const isFailed = app.status === 'failed' || app.status === 'unhealthy'
             const matchingJob = jobs.find(j => j.slug === app.slug)
             return (
@@ -1451,14 +1531,14 @@ export function AppsPanel({
                           恢复 / 重新部署
                         </button>
                       )}
-                      {api.appRecheck && (
+                      {!readOnly && api.appRecheck && (
                         <button type="button" className="oa-btn oa-btn-sm" onClick={() => void handleRecheckApp(app.slug, false)}>
                           <AppIcon name="refresh" size={13} />
                           <span>重新检测</span>
                         </button>
                       )}
-                      <button type="button" className="oa-btn oa-btn-sm" onClick={() => void openAppDetail(app.slug, 'logs')}>
-                        查看日志
+                      <button type="button" className="oa-btn oa-btn-sm" onClick={() => void openAppDetail(app.slug, readOnly ? 'artifacts' : 'logs')}>
+                        {readOnly ? '查看详情' : '查看日志'}
                       </button>
                     </>
                   ) : (
@@ -1470,7 +1550,7 @@ export function AppsPanel({
                         </a>
                       )}
                       <button type="button" className="oa-btn oa-btn-sm" onClick={() => void openAppDetail(app.slug, 'artifacts')}>
-                        详情与管理
+                        {readOnly ? '查看详情' : '详情与管理'}
                       </button>
                       {!readOnly && (
                         <button type="button" className="oa-btn oa-btn-sm oa-btn-accent-soft" onClick={() => startWizardNew(app)}>
@@ -1520,13 +1600,11 @@ export function AppsPanel({
             <button
               type="button"
               className="oa-btn oa-btn-sm"
-              onClick={() => {
-                setViewMode('list')
-                void loadWorkspaceData(true)
-              }}
+              disabled={wizardBusy}
+              onClick={() => void leaveWizard()}
             >
               <AppIcon name="arrowLeft" size={13} />
-              <span>返回列表</span>
+              <span>{wizardStep === 3 ? '保存草稿并退出' : '返回列表'}</span>
             </button>
             <div style={{ minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1554,7 +1632,7 @@ export function AppsPanel({
 
         <div className="oa-overlay-body">
           {wizardError && (
-            <div className="oa-alert oa-alert-danger">
+            <div role="alert" className="oa-alert oa-alert-danger">
               <AppIcon name="warning" size={16} />
               <div style={{ flex: 1 }}>{wizardError}</div>
               <button type="button" className="oa-btn oa-btn-xs" onClick={() => setWizardError(null)}>
@@ -1564,7 +1642,7 @@ export function AppsPanel({
           )}
 
           {wizardNotice && (
-            <div className="oa-alert oa-alert-ok">
+            <div role="status" className="oa-alert oa-alert-ok">
               <AppIcon name="check" size={16} />
               <div style={{ flex: 1 }}>{wizardNotice}</div>
               <button type="button" className="oa-btn oa-btn-xs" onClick={() => setWizardNotice(null)}>
@@ -1575,7 +1653,7 @@ export function AppsPanel({
 
           {/* STEP 1 */}
           {wizardStep === 1 && (
-            <form id="opc-wizard-step1-form" onSubmit={e => void handleStep1Submit(e)} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <form id={`${formId}-source-form`} onSubmit={e => void handleStep1Submit(e)} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {upgradeTarget && (
                 <div className="oa-alert oa-alert-info">
                   <AppIcon name="sparkle" size={16} />
@@ -1590,8 +1668,8 @@ export function AppsPanel({
                 <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a', marginBottom: 12 }}>基本信息与访问标识</div>
                 <div className="oa-grid-2">
                   <div className="oa-field">
-                    <label className="oa-label">应用名称 *</label>
-                    <input
+                    <label className="oa-label" htmlFor={`${formId}-app-name`}>应用名称 *</label>
+                    <input id={`${formId}-app-name`}
                       className="oa-input"
                       value={appName}
                       placeholder="例如：费用报销助手"
@@ -1618,7 +1696,7 @@ export function AppsPanel({
 
                   <div className="oa-field">
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                      <label className="oa-label">应用标识与访问地址 *</label>
+                      <label className="oa-label" htmlFor={`${formId}-app-slug`}>应用标识与访问地址 *</label>
                       {!upgradeTarget && slugManual && appName.trim() && (
                         <button
                           type="button"
@@ -1635,7 +1713,7 @@ export function AppsPanel({
                     </div>
                     <div className="oa-compound-url">
                       <span className="oa-compound-addon">http://</span>
-                      <input
+                      <input id={`${formId}-app-slug`}
                         className="oa-compound-input oa-mono"
                         value={appSlug}
                         disabled={Boolean(upgradeTarget)}
@@ -1666,8 +1744,8 @@ export function AppsPanel({
 
                 <div className="oa-grid-2" style={{ marginTop: 12 }}>
                   <div className="oa-field">
-                    <label className="oa-label">容器监听端口 *</label>
-                    <input
+                    <label className="oa-label" htmlFor={`${formId}-port`}>容器监听端口 *</label>
+                    <input id={`${formId}-port`}
                       className="oa-input oa-mono"
                       type="number"
                       min={1}
@@ -1679,8 +1757,8 @@ export function AppsPanel({
                   </div>
 
                   <div className="oa-field">
-                    <label className="oa-label">应用功能简介（可选）</label>
-                    <input
+                    <label className="oa-label" htmlFor={`${formId}-description`}>应用功能简介（可选）</label>
+                    <input id={`${formId}-description`}
                       className="oa-input"
                       value={appDescription}
                       placeholder="简述核心业务用途，方便智能体理解何时调用此应用"
@@ -1700,8 +1778,8 @@ export function AppsPanel({
                 ) : (
                   <div className="oa-grid-3">
                     <div className="oa-field">
-                      <label className="oa-label">模型提供商</label>
-                      <select
+                      <label className="oa-label" htmlFor={`${formId}-provider`}>模型提供商</label>
+                      <select id={`${formId}-provider`}
                         className="oa-select"
                         value={selectedProvider}
                         onChange={e => setSelectedProvider(e.target.value)}
@@ -1714,8 +1792,8 @@ export function AppsPanel({
                       </select>
                     </div>
                     <div className="oa-field">
-                      <label className="oa-label">分析模型</label>
-                      <select className="oa-select" value={selectedModel} onChange={e => setSelectedModel(e.target.value)}>
+                      <label className="oa-label" htmlFor={`${formId}-model`}>分析模型</label>
+                      <select id={`${formId}-model`} className="oa-select" value={selectedModel} onChange={e => setSelectedModel(e.target.value)}>
                         {(selectedModelGroup?.models ?? []).map(m => (
                           <option key={m.id} value={m.id}>
                             {m.name || m.id}
@@ -1724,8 +1802,8 @@ export function AppsPanel({
                       </select>
                     </div>
                     <div className="oa-field">
-                      <label className="oa-label">推理深度</label>
-                      <select
+                      <label className="oa-label" htmlFor={`${formId}-effort`}>推理深度</label>
+                      <select id={`${formId}-effort`}
                         className="oa-select"
                         value={selectedEffort}
                         disabled={availableEfforts.length === 0}
@@ -1825,9 +1903,9 @@ export function AppsPanel({
                   </div>
                 ) : (
                   <div className="oa-field">
-                    <label className="oa-label">本机源码文件夹路径</label>
+                    <label className="oa-label" htmlFor={`${formId}-folder`}>本机源码文件夹路径</label>
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <input
+                      <input id={`${formId}-folder`}
                         className="oa-input oa-mono"
                         value={folderPath}
                         placeholder="/Users/.../my-project"
@@ -1923,8 +2001,8 @@ export function AppsPanel({
                 </div>
 
                 <div className="oa-field" style={{ marginTop: 12 }}>
-                  <label className="oa-label">版本发布说明（可选）</label>
-                  <input
+                  <label className="oa-label" htmlFor={`${formId}-version-note`}>版本发布说明（可选）</label>
+                  <input id={`${formId}-version-note`}
                     className="oa-input"
                     value={versionNote}
                     placeholder={wizardJob.upgrade ? '例如：新增审批导出接口、修复环境变量读取' : '例如：首次上线发布'}
@@ -1939,7 +2017,7 @@ export function AppsPanel({
                   <div>{missingConfigAlert}</div>
                 </div>
               ) : (
-                <div className="oa-alert oa-alert-ok">
+                <div role="status" className="oa-alert oa-alert-ok">
                   <AppIcon name="check" size={16} />
                   <div>运行配置与依赖资源已校验就绪，可点击右下角按钮确认并发布上线。</div>
                 </div>
@@ -2033,10 +2111,9 @@ export function AppsPanel({
           {/* STEP 4 */}
           {wizardStep === 4 && wizardJob && (() => {
             const tone = jobStatusTone(wizardJob.status, wizardJob.userDisabled)
-            const needsPageConfirm =
-              wizardJob.status === 'awaiting_page_verification' ||
-              (wizardJob.status === 'verified' && (wizardJob.userDisabled || wizardJob.verification?.skill_enabled === false))
-            const isFailed = wizardJob.status === 'failed' || wizardJob.status === 'verification_failed' || wizardJob.status === 'unknown'
+            const needsPageConfirm = wizardJob.status === 'awaiting_page_verification'
+            const isFailed = wizardJob.status === 'failed' || wizardJob.status === 'verification_failed'
+            const skillDisabled = wizardJob.userDisabled || wizardJob.verification?.skill_enabled === false
             const credFields = wizardJob.proposal?.contract?.verification_credential_fields ?? []
 
             return (
@@ -2074,7 +2151,11 @@ export function AppsPanel({
                       type="button"
                       className="oa-btn oa-btn-sm"
                       disabled={wizardBusy}
-                      onClick={() => void refreshWizardJob(wizardJob.id)}
+                      onClick={() => {
+                        if (wizardJob.status === 'verified' || wizardJob.status === 'awaiting_page_verification' || wizardJob.status === 'verifying') {
+                          void refreshWizardJob(wizardJob.id)
+                        } else void handleRunVerification()
+                      }}
                     >
                       <AppIcon name="refresh" size={13} />
                       <span>刷新状态</span>
@@ -2105,10 +2186,10 @@ export function AppsPanel({
                   <div className="oa-subcard" style={{ borderColor: '#fde68a', background: '#fffbeb' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                       <div>
-                        <strong style={{ color: '#92400e', fontSize: 13.5 }}>容器已上线，请确认页面可用后启用应用技能</strong>
+                        <strong style={{ color: '#92400e', fontSize: 13.5 }}>容器已上线，请确认页面可用</strong>
                         <p className="oa-hint" style={{ marginTop: 4, color: '#92400e' }}>
                           {wizardJob.verification?.detail ||
-                            `后端健康检查与接口冒烟已通过。请先打开 ${wizardJob.url} 确认页面渲染正常，再启用技能 app-${wizardJob.slug}。`}
+                            `应用已通过健康检查。请先打开 ${wizardJob.url} 确认页面可用，再提交验收结果。`}
                         </p>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -2123,7 +2204,7 @@ export function AppsPanel({
                           onClick={() => void handleRunVerification(true, false)}
                         >
                           <AppIcon name="check" size={13} />
-                          <span>页面可用，启用应用技能</span>
+                          <span>确认页面可用</span>
                         </button>
                       </div>
                     </div>
@@ -2131,12 +2212,12 @@ export function AppsPanel({
                 )}
 
                 {/* Verified & Skill Active Banner */}
-                {wizardJob.status === 'verified' && !needsPageConfirm && (
+                {wizardJob.status === 'verified' && (
                   <div className="oa-alert oa-alert-ok" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <AppIcon name="check" size={16} />
                       <span>
-                        <strong>部署与验证已完成</strong> · 智能体技能 <span className="oa-code">app-{wizardJob.slug}</span> 已启用并同步到当前工作区。
+                        <strong>部署与验证已完成</strong> · 智能体技能 <span className="oa-code">app-{wizardJob.slug}</span> {skillDisabled ? '已停用' : '可在当前工作区使用'}。
                       </span>
                     </div>
                     {api.appSetSkillEnabled && (
@@ -2144,9 +2225,9 @@ export function AppsPanel({
                         type="button"
                         className="oa-btn oa-btn-sm"
                         disabled={wizardBusy}
-                        onClick={() => void handleToggleWizardSkill(false)}
+                        onClick={() => void handleToggleWizardSkill(Boolean(skillDisabled))}
                       >
-                        暂时停用技能
+                        {skillDisabled ? '启用应用技能' : '暂时停用技能'}
                       </button>
                     )}
                   </div>
@@ -2176,51 +2257,29 @@ export function AppsPanel({
                 )}
 
                 {/* Verification Credentials Form */}
-                {(credFields.length > 0 || isFailed) && (
+                {credFields.length > 0 && (isFailed || wizardJob.status === 'verified') && (
                   <div className="oa-subcard">
                     <div className="oa-subcard-head">
                       <span>带鉴权凭据重新验证</span>
                       <span className="oa-hint">若应用受登录保护，可填写测试账号密码或会话 Token 进行自动验证</span>
                     </div>
-                    {credFields.length > 0 ? (
-                      <div className="oa-grid-2" style={{ marginBottom: 10 }}>
-                        {credFields.map(field => (
-                          <div key={field.key} className="oa-field">
-                            <label className="oa-label">
-                              {field.key}（{field.kind === 'password' ? '密码' : field.kind === 'session' ? '会话/Token' : '账号'}）
-                            </label>
-                            <input
-                              className="oa-input"
-                              type={field.kind === 'password' ? 'password' : 'text'}
-                              value={verifyCredentials[field.key] ?? ''}
-                              onChange={e => setVerifyCredentials(prev => ({ ...prev, [field.key]: e.target.value }))}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="oa-grid-2" style={{ marginBottom: 10 }}>
-                        <div className="oa-field">
-                          <label className="oa-label">测试账号 / Cookie / Bearer Token</label>
+                    <div className="oa-grid-2" style={{ marginBottom: 10 }}>
+                      {credFields.map(field => (
+                        <div key={field.key} className="oa-field">
+                          <label className="oa-label" htmlFor={`${formId}-credential-${field.key}`}>
+                            {field.key}（{field.kind === 'password' ? '密码' : field.kind === 'session' ? '会话/Token' : '账号'}）
+                          </label>
                           <input
                             className="oa-input"
-                            value={verifyCredentials.username ?? ''}
-                            placeholder="选填"
-                            onChange={e => setVerifyCredentials(prev => ({ ...prev, username: e.target.value }))}
+                            type={field.kind === 'username' ? 'text' : 'password'}
+                            id={`${formId}-credential-${field.key}`}
+                            autoComplete="off"
+                            value={verifyCredentials[field.key] ?? ''}
+                            onChange={e => setVerifyCredentials(prev => ({ ...prev, [field.key]: e.target.value }))}
                           />
                         </div>
-                        <div className="oa-field">
-                          <label className="oa-label">密码 / Token 值</label>
-                          <input
-                            className="oa-input"
-                            type="password"
-                            value={verifyCredentials.password ?? ''}
-                            placeholder="选填"
-                            onChange={e => setVerifyCredentials(prev => ({ ...prev, password: e.target.value }))}
-                          />
-                        </div>
-                      </div>
-                    )}
+                      ))}
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#475569' }}>
                         <input
@@ -2236,7 +2295,7 @@ export function AppsPanel({
                         disabled={wizardBusy}
                         onClick={() => void handleRunVerification(false, true)}
                       >
-                        用凭据重试验证
+                        仅重试业务验证
                       </button>
                     </div>
                   </div>
@@ -2265,17 +2324,17 @@ export function AppsPanel({
                           返回方案核对
                         </button>
                       )}
-                      {api.appRecheck && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRunVerification(false, false)}>
+                      {wizardJob.published && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRunVerification(false, false, wizardJob.failureStage !== 'verification')}>
                           <AppIcon name="refresh" size={13} />
-                          <span>重新验证服务</span>
+                          <span>{wizardJob.failureStage === 'verification' ? '重新验证业务' : '重新检查健康状态'}</span>
                         </button>
                       )}
                       <button
                         type="button"
                         className="oa-btn oa-btn-sm"
                         disabled={wizardBusy}
-                        onClick={() => startWizardNew(upgradeTarget ?? undefined, wizardJob)}
+                        onClick={() => startWizardNew(apps.find(app => app.slug === wizardJob.slug && app.can_manage === true) ?? upgradeTarget ?? undefined, wizardJob)}
                       >
                         重新导入源码
                       </button>
@@ -2354,7 +2413,7 @@ export function AppsPanel({
               >
                 取消
               </button>
-              <button type="submit" form="opc-wizard-step1-form" className="oa-btn oa-btn-primary" disabled={!canSubmitStep1}>
+              <button type="submit" form={`${formId}-source-form`} className="oa-btn oa-btn-primary" disabled={!canSubmitStep1}>
                 {wizardBusy ? '正在导入源码…' : '创建并开始 AI 分析'}
               </button>
             </>
@@ -2445,8 +2504,15 @@ export function AppsPanel({
     }
 
     const tone = jobStatusTone(detailApp.status)
-    const readOnly = detailApp.can_manage === false
+    const readOnly = detailApp.can_manage !== true
     const matchingJob = jobs.find(j => j.slug === detailApp.slug && j.version === detailApp.current_version) ?? jobs.find(j => j.slug === detailApp.slug)
+    const detailTabs = {
+      artifacts: '能力与技能',
+      configs: '运行配置',
+      storage: '持久化存储',
+      versions: `版本历史 (${visibleVersions.length})`,
+      logs: '日志与 Dockerfile',
+    } satisfies Record<DetailTab, string>
 
     return (
       <div className="oa-overlay-view">
@@ -2489,7 +2555,7 @@ export function AppsPanel({
 
         <div className="oa-overlay-body">
           {detailError && (
-            <div className="oa-alert oa-alert-danger">
+            <div role="alert" className="oa-alert oa-alert-danger">
               <AppIcon name="warning" size={16} />
               <div style={{ flex: 1 }}>{detailError}</div>
               <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailError(null)}>
@@ -2499,7 +2565,7 @@ export function AppsPanel({
           )}
 
           {detailNotice && (
-            <div className="oa-alert oa-alert-ok">
+            <div role="status" className="oa-alert oa-alert-ok">
               <AppIcon name="check" size={16} />
               <div style={{ flex: 1 }}>{detailNotice}</div>
               <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailNotice(null)}>
@@ -2517,7 +2583,7 @@ export function AppsPanel({
                   {detailApp.error_message && <div style={{ marginTop: 2 }}>{detailApp.error_message}</div>}
                 </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {!readOnly && <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {api.appRecheck && (
                   <button type="button" className="oa-btn oa-btn-xs" disabled={detailBusy} onClick={() => void handleRecheckApp(detailApp.slug, true)}>
                     重新检测状态
@@ -2526,7 +2592,7 @@ export function AppsPanel({
                 <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailTab('logs')}>
                   查看日志
                 </button>
-              </div>
+              </div>}
             </div>
           )}
 
@@ -2595,36 +2661,36 @@ export function AppsPanel({
           </div>
 
           {/* 5 Segmented Detail Tabs */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-            <div className="oa-segmented">
-              <button type="button" className={`oa-segmented-btn ${detailTab === 'artifacts' ? 'active' : ''}`} onClick={() => setDetailTab('artifacts')}>
-                能力与技能
-              </button>
-              <button type="button" className={`oa-segmented-btn ${detailTab === 'configs' ? 'active' : ''}`} onClick={() => setDetailTab('configs')}>
-                运行配置
-              </button>
-              <button type="button" className={`oa-segmented-btn ${detailTab === 'storage' ? 'active' : ''}`} onClick={() => setDetailTab('storage')}>
-                持久化存储
-              </button>
-              <button type="button" className={`oa-segmented-btn ${detailTab === 'versions' ? 'active' : ''}`} onClick={() => setDetailTab('versions')}>
-                版本历史 ({visibleVersions.length})
-              </button>
-              <button type="button" className={`oa-segmented-btn ${detailTab === 'logs' ? 'active' : ''}`} onClick={() => setDetailTab('logs')}>
-                日志与 Dockerfile
-              </button>
+          {!readOnly && (
+            <div className="oa-segmented" role="tablist" aria-label="应用详情">
+              {(Object.keys(detailTabs) as DetailTab[]).map((tab, index, tabs) => (
+                <button key={tab} id={`${formId}-tab-${tab}`} type="button" role="tab"
+                  aria-selected={detailTab === tab} aria-controls={`${formId}-detail-panel`} tabIndex={detailTab === tab ? 0 : -1}
+                  className={`oa-segmented-btn ${detailTab === tab ? 'active' : ''}`} onClick={() => setDetailTab(tab)}
+                  onKeyDown={event => {
+                    const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
+                      : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
+                      : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : undefined
+                    if (next === undefined) return
+                    event.preventDefault()
+                    setDetailTab(tabs[next])
+                    document.getElementById(`${formId}-tab-${tabs[next]}`)?.focus()
+                  }}>
+                  {detailTabs[tab]}
+                </button>
+              ))}
             </div>
-          </div>
+          )}
 
+          {!readOnly && <div id={`${formId}-detail-panel`} role="tabpanel" aria-labelledby={`${formId}-tab-${detailTab}`} tabIndex={0}>
           {/* Tab 1: Artifacts & Skill */}
           {detailTab === 'artifacts' && (
             <AppDeliveryArtifacts
               api={api}
               contextId={contextId}
               slug={detailApp.slug}
-              onVerified={() => {
-                void openAppDetail(detailApp.slug, 'artifacts')
-                void loadWorkspaceData(true)
-              }}
+              version={detailApp.current_version}
+              onOpenVerification={job => void resumeWizardJob(job, 4)}
             />
           )}
 
@@ -2644,8 +2710,8 @@ export function AppsPanel({
               </div>
 
               <div className="oa-field" style={{ maxWidth: 260 }}>
-                <label className="oa-label">容器监听端口</label>
-                <input
+                <label className="oa-label" htmlFor={`${formId}-edit-port`}>容器监听端口</label>
+                <input id={`${formId}-edit-port`}
                   className="oa-input oa-mono"
                   type="number"
                   min={1}
@@ -2766,8 +2832,8 @@ export function AppsPanel({
                     {ROLLBACK_NOTICE}
                   </p>
                   <div className="oa-field" style={{ marginBottom: 10 }}>
-                    <label className="oa-label">回滚原因说明（可选）</label>
-                    <input
+                    <label className="oa-label" htmlFor={`${formId}-rollback-reason`}>回滚原因说明（可选）</label>
+                    <input id={`${formId}-rollback-reason`}
                       className="oa-input"
                       value={rollbackReason}
                       placeholder={`例如：v${detailApp.current_version} 出现回归异常，临时切回 v${rollbackTarget.version}`}
@@ -2785,7 +2851,9 @@ export function AppsPanel({
                 </div>
               )}
 
-              {visibleVersions.length === 0 ? (
+              {versionsError ? (
+                <div role="alert" className="oa-alert oa-alert-danger">{versionsError}</div>
+              ) : visibleVersions.length === 0 ? (
                 <div className="oa-hint">暂无历史版本记录。</div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -2794,14 +2862,14 @@ export function AppsPanel({
                       <div className="oa-subcard-head">
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           <strong style={{ fontSize: 13.5, color: '#0f172a' }}>v{ver.version}</strong>
-                          {ver.is_active && <span className="oa-pill oa-pill-ok">当前运行</span>}
+                          {currentVersion(ver) && <span className="oa-pill oa-pill-ok">当前运行</span>}
                           {ver.status === 'failed' && <span className="oa-pill oa-pill-danger">失败版本（未上线）</span>}
-                          {ver.status && ver.status !== 'failed' && !ver.is_active && <span className="oa-pill">{ver.status}</span>}
+                          {ver.status && ver.status !== 'failed' && !currentVersion(ver) && <span className="oa-pill">{jobStatusTone(ver.status).text}</span>}
                           <span className="oa-hint">{formatDateTime(ver.created_at)}</span>
                           {ver.deployed_by && <span className="oa-hint">发布人：{ver.deployed_by}</span>}
                         </div>
 
-                        {!readOnly && !ver.is_active && ver.status !== 'failed' && api.appRollback && (
+                        {!currentVersion(ver) && ver.status === 'running' && api.appRollback && (
                           <button
                             type="button"
                             className="oa-btn oa-btn-xs oa-btn-accent-soft"
@@ -2824,7 +2892,7 @@ export function AppsPanel({
                             type="button"
                             className="oa-btn oa-btn-xs"
                             onClick={() =>
-                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'app_tar' }, `v${ver.version} app.tar`)
+                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'app.tar' }, `v${ver.version} app.tar`)
                             }
                           >
                             app.tar{ver.app_tar_size ? ` (${formatFileSize(ver.app_tar_size)})` : ''}
@@ -2835,7 +2903,7 @@ export function AppsPanel({
                             type="button"
                             className="oa-btn oa-btn-xs"
                             onClick={() =>
-                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'skill_zip' }, `v${ver.version} skill.zip`)
+                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'skill.zip' }, `v${ver.version} skill.zip`)
                             }
                           >
                             skill.zip{ver.skill_zip_size ? ` (${formatFileSize(ver.skill_zip_size)})` : ''}
@@ -2846,7 +2914,7 @@ export function AppsPanel({
                             type="button"
                             className="oa-btn oa-btn-xs"
                             onClick={() =>
-                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'dockerfile' }, `v${ver.version} Dockerfile`)
+                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'Dockerfile' }, `v${ver.version} Dockerfile`)
                             }
                           >
                             Dockerfile
@@ -2857,7 +2925,7 @@ export function AppsPanel({
                             type="button"
                             className="oa-btn oa-btn-xs"
                             onClick={() =>
-                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'manifest' }, `v${ver.version} manifest`)
+                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'manifest.json' }, `v${ver.version} manifest`)
                             }
                           >
                             manifest.json
@@ -2926,7 +2994,8 @@ export function AppsPanel({
                 </div>
               </div>
 
-              <pre className="oa-log-terminal">
+              {logsError && <div role="alert" className="oa-alert oa-alert-danger">{logsError}</div>}
+              {!logsError && <pre className="oa-log-terminal">
                 {formatLogOutput(
                   detailLogsSubTab === 'runtime'
                     ? detailLogsData.runtime
@@ -2934,9 +3003,11 @@ export function AppsPanel({
                       ? detailLogsData.build
                       : detailLogsData.dockerfile,
                 ) || '暂无内容'}
-              </pre>
+              </pre>}
             </div>
           )}
+
+          </div>}
 
           {/* Danger Zone: Delete App */}
           {!readOnly && api.appDelete && (
@@ -2963,8 +3034,8 @@ export function AppsPanel({
                     <span>同时彻底清理持久化数据卷内容（勾选后不可恢复）</span>
                   </label>
                   <div className="oa-field" style={{ maxWidth: 360 }}>
-                    <label className="oa-label">请输入应用标识「{detailApp.slug}」以确认删除</label>
-                    <input
+                    <label className="oa-label" htmlFor={`${formId}-delete`}>请输入应用标识「{detailApp.slug}」以确认删除</label>
+                    <input id={`${formId}-delete`}
                       className="oa-input oa-mono"
                       value={deleteConfirmText}
                       placeholder={detailApp.slug}
