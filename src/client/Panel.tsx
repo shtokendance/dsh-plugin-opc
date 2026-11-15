@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import type { AuthState, OpcApi, Resource } from './api.ts'
 import { AppsPanel } from './AppsPanel.tsx'
+import { OpcSettingsPanel } from './OpcSettingsPanel.tsx'
 export type PanelKind = 'knowledge' | 'skills' | 'mcp' | 'apps'
 import { labels as titles, OpcIcon } from './branding.tsx'
 
@@ -811,6 +812,7 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
   const [kb, setKb] = useState(''), [doc, setDoc] = useState(''), [filter, setFilter] = useState('all')
   const [services, setServices] = useState<Record<string, unknown>[]>([])
   const [appsRefreshTrigger, setAppsRefreshTrigger] = useState(0)
+  const [showSettings, setShowSettings] = useState(false)
   const [kbSearchMode, setKbSearchMode] = useState<'doc' | 'kb'>('doc')
   const [docQuery, setDocQuery] = useState('')
   const [hasSearchedDoc, setHasSearchedDoc] = useState(false)
@@ -857,12 +859,18 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
     if (state.signedIn) void run(load)
   }, [state.context?.contextId, sessionId, kind])
 
+  useEffect(() => {
+    if (state.signedIn && kind === 'apps') {
+      setAppsRefreshTrigger(prev => prev + 1)
+    }
+  }, [state.signedIn, kind, state.opcConfig?.appDomainRoot, state.opcConfig?.defaultPort, state.opcConfig?.platformBaseUrl])
+
   const context = state.context
   const action = (fn: () => Promise<void>) => () => void run(fn)
 
   return <section className="opc-panel">
     <style>{css}</style>
-    {/* Title Bar with Integrated Auth, Space Switcher, Refresh, and Logout */}
+    {/* Title Bar with Integrated Auth, Space Switcher, Refresh, Settings, and Logout */}
     <header className="opc-header-bar">
       <div className="header-brand">
         <div className="brand-icon-wrap">
@@ -870,50 +878,78 @@ export function Panel({ api, sessionId, kind }: { api: OpcApi; sessionId: string
         </div>
         <div className="brand-text">
           <h2 className="brand-title">{titles[kind]}</h2>
-          <span className="brand-sub">OPC 工作空间</span>
+          <span className="brand-sub" title={state.opcConfig?.platformBaseUrl || 'OPC 工作空间'}>OPC 工作空间</span>
         </div>
       </div>
-      {state.signedIn && context && <div className="header-actions">
-        <div className="user-pill" title={context.email ? `${context.displayName || context.subject} (${context.email})` : (context.displayName || context.subject)}>
-          <span className="user-avatar">{((context.displayName || context.subject)[0] || 'U').toUpperCase()}</span>
-          <span className="user-name">{context.displayName || context.subject}</span>
-        </div>
-        {<select
-          aria-label="企业空间"
-          className="space-select"
-          value={context.tenant}
-          disabled={busy}
-          onChange={e => void run(() => api.switchTenant(e.target.value))}
-        >
-          {(context.spacesDetail ?? context.spaces.map(id => ({ id, name: id }))).map(space => (
-            <option key={space.id} value={space.id}>{space.name}</option>
-          ))}
-        </select>}
+      <div className="header-actions">
+        {state.signedIn && context && <>
+          <div className="user-pill" title={context.email ? `${context.displayName || context.subject} (${context.email})` : (context.displayName || context.subject)}>
+            <span className="user-avatar">{((context.displayName || context.subject)[0] || 'U').toUpperCase()}</span>
+            <span className="user-name">{context.displayName || context.subject}</span>
+          </div>
+          {<select
+            aria-label="企业空间"
+            className="space-select"
+            value={context.tenant}
+            disabled={busy}
+            onChange={e => void run(() => api.switchTenant(e.target.value))}
+          >
+            {(context.spacesDetail ?? context.spaces.map(id => ({ id, name: id }))).map(space => (
+              <option key={space.id} value={space.id}>{space.name}</option>
+            ))}
+          </select>}
+          {!showSettings && <button
+            className="btn-header"
+            disabled={busy}
+            onClick={action(load)}
+            title="刷新"
+          >
+            刷新
+          </button>}
+        </>}
         <button
+          type="button"
           className="btn-header"
-          disabled={busy}
-          onClick={action(load)}
-          title="刷新"
+          onClick={() => setShowSettings(prev => !prev)}
+          title={showSettings ? '返回工作台' : 'OPC 平台配置'}
         >
-          刷新
+          {showSettings ? '返回' : '⚙ 设置'}
         </button>
-        <button
-          className="btn-header btn-logout"
-          disabled={busy}
-          onClick={action(() => api.logout())}
-          title="退出登录"
-        >
-          退出
-        </button>
-      </div>}
+        {state.signedIn && context && (
+          <button
+            className="btn-header btn-logout"
+            disabled={busy}
+            onClick={action(() => api.logout())}
+            title="退出登录"
+          >
+            退出
+          </button>
+        )}
+      </div>
     </header>
 
-    {!state.signedIn || !context ? <div className="gate">
+    {showSettings ? (
+      <main className="opc-panel-main">
+        <OpcSettingsPanel
+          api={api}
+          onClose={() => setShowSettings(false)}
+          onSaved={() => setAppsRefreshTrigger(prev => prev + 1)}
+        />
+      </main>
+    ) : !state.signedIn || !context ? <div className="gate">
       <h3>连接 OPC 工作空间</h3>
       <p>登录后使用 OPC 知识库、技能与企业应用。企业身份与 DSH 个人账号独立。</p>
+      {state.opcConfig?.platformBaseUrl && (
+        <p style={{ fontSize: 12, color: '#64748b', marginTop: -8, marginBottom: 16, wordBreak: 'break-all' }}>
+          当前平台网关：<code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{state.opcConfig.platformBaseUrl}</code>
+        </p>
+      )}
       <div className="row" style={{ justifyContent: 'center' }}>
         <button className="primary" style={{ padding: '8px 18px', fontSize: 13 }} disabled={busy || state.loginInProgress} onClick={action(async () => { await api.startLogin() })}>
           企业微信 / SSO 登录
+        </button>
+        <button type="button" onClick={() => setShowSettings(true)}>
+          平台设置
         </button>
       </div>
       {state.loginInProgress && <div className="notice" style={{ textAlign: 'left', marginTop: 16 }}>

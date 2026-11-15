@@ -2,13 +2,32 @@ import { OpcError } from './context.ts'
 
 export interface PlatformResponse { status: number; body: Record<string, unknown>; headers: Headers }
 
+export function parsePlatformBaseUrl(base: string): URL {
+  let url: URL
+  try {
+    url = new URL(base.trim())
+  } catch {
+    throw new OpcError('INVALID_PLATFORM_URL', '平台网关地址格式无效，请输入完整的 https:// 服务地址。')
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new OpcError('INVALID_PLATFORM_URL', '平台网关地址不能包含用户名、密码、查询参数或锚点。')
+  }
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname))) {
+    throw new OpcError('INSECURE_PLATFORM_URL', '平台网关地址必须使用 https://（本机调试可使用 http://localhost 或 http://127.0.0.1）。')
+  }
+  return url
+}
+
 /** Redirects are rejected so bearer credentials never follow a platform redirect. */
 export class PlatformHttp {
-  readonly base: URL
+  #base: URL
+  get base(): URL { return this.#base }
   constructor(base: string, private readonly timeoutMs = 15_000, private readonly fetcher: typeof fetch = fetch) {
-    this.base = new URL(base)
-    if (this.base.username || this.base.password || this.base.search || this.base.hash) throw new OpcError('INVALID_PLATFORM_URL')
-    if (this.base.protocol !== 'https:' && !(this.base.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(this.base.hostname))) throw new OpcError('INSECURE_PLATFORM_URL')
+    this.#base = parsePlatformBaseUrl(base)
+  }
+  setBase(base: string): URL {
+    this.#base = parsePlatformBaseUrl(base)
+    return this.#base
   }
   async archive(path: string, token: string, signal: AbortSignal): Promise<{ bytes: Buffer; sha256: string | null }> {
     if (!path.startsWith('/integration/v1/resources/skills/')) throw new OpcError('INVALID_PLATFORM_PATH')

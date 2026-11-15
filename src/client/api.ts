@@ -174,7 +174,29 @@ export interface AppDeliveryJob {
   }
 }
 
+export interface OpcPlatformConfig {
+  platform_base: string
+  app_domain_root: string
+  app_default_port: number
+  default_platform_base: string
+  default_app_domain_root: string
+  default_app_default_port?: number
+  effective_app_domain_root: string
+  platform_base_changed?: boolean
+}
+
+export interface OpcConnectionTestResult {
+  ok: boolean
+  status_code?: number
+  latency_ms?: number
+  error?: string
+}
+
 export interface OpcApi {
+  opcConfigGet?(): Promise<string>
+  opcConfigUpdate?(payloadJson: string): Promise<string>
+  opcConfigReset?(): Promise<string>
+  opcConfigTest?(url: string): Promise<string>
   appCatalog(context: string): Promise<string>
   appList(context: string): Promise<string>
   appJob?(id: string, context: string): Promise<string>
@@ -239,6 +261,7 @@ export interface AuthState {
   mountedServices?: string[]
   approvals?: { id: string; contextId: string; serviceId: string; toolName: string; arguments: Record<string, unknown> }[]
   signedIn: boolean; loginInProgress: boolean; loginAuthorizeUrl?: string; loginError?: { code: string; message: string }
+  opcConfig?: { platformBaseUrl: string; appDomainRoot: string; rawAppDomainRoot?: string; defaultPort: number }
   context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; applicationContextId?: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
 }
 export interface Resource { name: string; description?: string; tenant_id: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }
