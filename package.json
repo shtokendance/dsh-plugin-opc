@@ -49,6 +49,7 @@
   },
   "files": [
     "lib",
+    "LICENSE-Inter.txt",
     "runtime",
     "README.md",
     "config/overlay.example.yml"

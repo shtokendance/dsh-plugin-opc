@@ -54,9 +54,9 @@ const settingsCss = `
 .opc-settings-pill {
   font-size: 11px;
   font-weight: 500;
-  color: #245c9f;
-  background: #edf4fc;
-  border: 1px solid #d0e2f9;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #dbeafe;
   padding: 2px 10px;
   border-radius: 999px;
   white-space: nowrap;
@@ -101,7 +101,7 @@ const settingsCss = `
 }
 .opc-panel .opc-settings-input:focus {
   outline: none;
-  border-color: #245c9f;
+  border-color: #2563eb;
   background: #ffffff;
 }
 .opc-panel .opc-settings-port-input {
@@ -155,8 +155,8 @@ const settingsCss = `
   line-height: 1.5;
 }
 .opc-settings-banner-info {
-  background: #edf4fc;
-  border: 1px solid #d0e2f9;
+  background: #eff6ff;
+  border: 1px solid #dbeafe;
   color: #1e40af;
   border-radius: 8px;
   padding: 10px 12px;
