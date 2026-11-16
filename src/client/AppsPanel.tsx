@@ -186,9 +186,29 @@ function jobStatusTone(status?: string, userDisabled?: boolean): { text: string;
   }
 }
 
+type AppHealthCheck = { ok: boolean; status: 'running' | 'failed' | 'unhealthy'; message: string }
+
+function healthFailureDetail(message?: string): string {
+  return message && !/^HTTP\s+2\d{2}\b/i.test(message.trim()) ? message : ''
+}
+
+function readAppHealthCheck(raw: string): AppHealthCheck {
+  const check = parseJson<{
+    ok?: boolean; healthy?: boolean; status?: string; message?: string; detail?: string; error?: string
+    container_running?: boolean
+  } | null>(raw, null)
+  const ok = check?.ok ?? check?.healthy
+  if (!check || typeof ok !== 'boolean') throw new Error('未收到有效的健康检查结果')
+  const reported = healthFailureDetail(check.message || check.detail || check.error)
+  const status = ok ? 'running' : check.container_running === false || check.status === 'failed' ? 'failed' : 'unhealthy'
+  const message = ok ? '健康检查通过，应用正常运行。'
+    : check.container_running === false ? '健康检查未通过：应用容器未运行。'
+    : reported ? `健康检查未通过：${reported}` : '健康检查未通过，请查看服务器日志。'
+  return { ok, status, message }
+}
+
 function isResumableJob(job: AppDeliveryJob): boolean {
   if (!job || !job.id) return false
-  if (job.status === 'verified' && !job.userDisabled) return false
   return [
     'draft',
     'importing',
@@ -197,11 +217,114 @@ function isResumableJob(job: AppDeliveryJob): boolean {
     'preparing',
     'ready',
     'building',
+    'publishing',
     'verifying',
     'awaiting_page_verification',
     'unknown',
     'failed',
+    'verification_failed',
   ].includes(job.status)
+}
+
+function isVerificationPending(job: AppDeliveryJob) {
+  return job.status === 'awaiting_page_verification' || job.status === 'verification_failed' ||
+    (job.status === 'failed' && job.failureStage === 'verification')
+}
+
+function showTaskBanner(job: AppDeliveryJob, apps: DeployedApp[], loading: boolean) {
+  if (!isResumableJob(job)) return false
+  if (!job.published || !isVerificationPending(job)) return true
+  // A previous version running must not hide an unfinished upgrade.
+  return !loading && !apps.some(app => app.status === 'running' && app.slug === job.slug &&
+    job.version != null && app.current_version === job.version)
+}
+
+function deploymentProgress(job: AppDeliveryJob) {
+  switch (job.status) {
+    case 'verified':
+      return { label: '部署成功', tone: 'ok', detail: job.userDisabled || job.verification?.skill_enabled === false
+        ? '应用验证通过，技能仍按你的设置停用。' : '应用验证通过，本地技能已启用。' }
+    case 'failed':
+    case 'verification_failed':
+      return job.status === 'verification_failed' || job.failureStage === 'verification'
+        ? { label: '应用已运行 · 技能待验证', tone: 'danger', detail: '业务验证尚未通过，请查看验证结果。' }
+        : { label: '部署未通过', tone: 'danger', detail: '构建或健康检查未通过，请查看服务器部署日志。' }
+    case 'awaiting_page_verification':
+      return { label: '应用已运行 · 待页面验收', tone: 'warn', detail: '请打开应用，确认页面可正常使用。' }
+    case 'verifying':
+      return { label: '正在验证业务…', tone: 'warn', detail: '正在核对交付版本并执行只读业务验证。' }
+    case 'unknown':
+      return { label: '正在核对发布结果…', tone: 'warn', detail: '正在查询服务器是否已接收这次发布。' }
+    default:
+      return { label: '正在构建部署…', tone: 'warn', detail: '服务器正在构建并启动应用，请稍候。' }
+  }
+}
+
+const isDeploymentInProgress = (status?: string) =>
+  status === 'publishing' || status === 'building' || status === 'verifying' || status === 'unknown'
+
+function DeploymentLogs({ fetchLogs, live, buildOnly, failed, onCopy, copied }: {
+  fetchLogs: () => Promise<string>
+  live: boolean
+  buildOnly: boolean
+  failed: boolean
+  onCopy: (text: string) => void
+  copied: boolean
+}) {
+  const [open, setOpen] = useState(live || failed)
+  const [logs, setLogs] = useState('')
+  const [error, setError] = useState(false)
+  const logRef = useRef<HTMLPreElement>(null)
+  const followTail = useRef(true)
+  useEffect(() => {
+    if (!open) return
+    let active = true
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const data = JSON.parse(await fetchLogs()) as { build_log?: string; runtime_logs?: string; logs?: string; content?: string }
+        const build = formatLogOutput(data.build_log)
+        const runtime = buildOnly ? '' : formatLogOutput(data.runtime_logs ?? data.logs ?? data.content)
+        const output = build && runtime && runtime !== build ? `${build}\n\n运行日志\n${runtime}` : build || runtime
+        if (!active) return
+        if (output) setLogs(output)
+        setError(false)
+      } catch {
+        if (active) setError(true)
+      } finally {
+        if (active && live) timer = window.setTimeout(() => void poll(), 2000)
+      }
+    }
+    void poll()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [buildOnly, fetchLogs, live, open])
+  useEffect(() => {
+    const log = logRef.current
+    if (log && followTail.current) log.scrollTop = log.scrollHeight
+  }, [logs, open])
+
+  return (
+    <details className="oa-deploy-logs" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+      <summary>查看服务器部署日志</summary>
+      {open && (
+        <>
+          {logs && <button type="button" className="oa-btn oa-btn-xs" onClick={() => onCopy(logs)}>
+            <AppIcon name={copied ? 'check' : 'copy'} size={12} />
+            {copied ? '已复制' : '复制日志'}
+          </button>}
+          {error && <p className="oa-hint" role="status">{live ? '暂时无法读取最新日志，将自动重试。' : '暂时无法读取日志，可重新展开查看。'}</p>}
+          <pre
+            className="oa-log-terminal"
+            ref={logRef}
+            onScroll={event => {
+              const element = event.currentTarget
+              followTail.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 20
+            }}
+          >{logs || '等待输出…'}</pre>
+        </>
+      )}
+    </details>
+  )
 }
 
 function inferStepForJob(job: AppDeliveryJob): WizardStep {
@@ -212,6 +335,7 @@ function inferStepForJob(job: AppDeliveryJob): WizardStep {
     case 'publishing':
     case 'verifying':
     case 'awaiting_page_verification':
+    case 'verification_failed':
     case 'verified':
     case 'unknown':
       return 4
@@ -408,9 +532,6 @@ export function AppsPanel({
   // Step 4 Publish & Verify State
   const [verifyCredentials, setVerifyCredentials] = useState<Record<string, string>>({})
   const [rememberCredentials, setRememberCredentials] = useState(false)
-  const [wizardLogsOpen, setWizardLogsOpen] = useState(false)
-  const [wizardLogsLoading, setWizardLogsLoading] = useState(false)
-  const [wizardLogsData, setWizardLogsData] = useState<{ runtime?: string; build?: string }>({})
 
   // Detail View State
   const [detailApp, setDetailApp] = useState<DeployedApp | null>(null)
@@ -419,6 +540,7 @@ export function AppsPanel({
   const [detailBusy, setDetailBusy] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailNotice, setDetailNotice] = useState<string | null>(null)
+  const [detailHealthCheck, setDetailHealthCheck] = useState<(AppHealthCheck & { slug: string }) | null>(null)
   const [versionsError, setVersionsError] = useState<string | null>(null)
   const [logsError, setLogsError] = useState<string | null>(null)
   const detailLoad = useRef(0)
@@ -435,9 +557,6 @@ export function AppsPanel({
   })
   const [rollbackTarget, setRollbackTarget] = useState<AppVersionItem | null>(null)
   const [rollbackReason, setRollbackReason] = useState('')
-  const [purgeVolumes, setPurgeVolumes] = useState(false)
-  const [deleteConfirmText, setDeleteConfirmText] = useState('')
-  const [deleteBoxOpen, setDeleteBoxOpen] = useState(false)
 
   const copyText = useCallback(async (key: string, value: string) => {
     try {
@@ -613,37 +732,26 @@ export function AppsPanel({
     [api, contextId],
   )
 
-  // Poll Step 4 while building or verifying
-  const fetchWizardLogs = useCallback(
-    async (slug: string) => {
-      setWizardLogsLoading(true)
-      try {
-        const raw = await api.appLogs?.(slug, contextId)
-        const parsed = parseJson<{ runtime_logs?: string; logs?: string; content?: string; build_log?: string }>(raw, {})
-        setWizardLogsData({
-          runtime: parsed.runtime_logs ?? parsed.logs ?? parsed.content ?? '',
-          build: parsed.build_log ?? '',
-        })
-      } catch {
-        // Non-fatal in log panel.
-      } finally {
-        setWizardLogsLoading(false)
-      }
-    },
-    [api, contextId],
-  )
-
   const progressJobId = wizardJob?.id
   const progressStatus = wizardJob?.status
+  const progressSlug = wizardJob?.slug
+  const fetchDeploymentLogs = useCallback(
+    async () => {
+      if (!api.appLogs || !progressSlug) throw new Error('没有可查询的部署日志')
+      return api.appLogs(progressSlug, contextId)
+    },
+    [api, contextId, progressSlug],
+  )
+
   useEffect(() => {
     if (viewMode !== 'wizard' || wizardStep !== 4 || !progressJobId || wizardBusy ||
-        !['building', 'verifying', 'unknown'].includes(progressStatus ?? '')) return
+        !isDeploymentInProgress(progressStatus)) return
     let alive = true
     let timer: number
     const poll = async () => {
       let keepPolling = true
       try {
-        const raw = progressStatus === 'verifying' && api.appJob
+        const raw = (progressStatus === 'verifying' || progressStatus === 'publishing') && api.appJob
           ? await api.appJob(progressJobId, contextId)
           : await (api.appVerifyWithOptions
             ? api.appVerifyWithOptions(progressJobId, JSON.stringify({ automatic: true }), contextId)
@@ -652,11 +760,8 @@ export function AppsPanel({
         const updated = JSON.parse(raw) as AppDeliveryJob
         setWizardError(null)
         setWizardJob(current => current?.id === updated.id ? updated : current)
-        keepPolling = ['building', 'verifying', 'unknown'].includes(updated.status)
-        if (!keepPolling) {
-          void loadWorkspaceData(true)
-          if (updated.status === 'failed') void fetchWizardLogs(updated.slug)
-        }
+        keepPolling = isDeploymentInProgress(updated.status)
+        if (!keepPolling) void loadWorkspaceData(true)
       } catch (error) {
         if (!alive) return
         setWizardError(readErrorMessage(error, '暂时无法核对部署状态，将继续查询'))
@@ -666,7 +771,7 @@ export function AppsPanel({
     }
     void poll()
     return () => { alive = false; window.clearTimeout(timer) }
-  }, [api, contextId, fetchWizardLogs, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep])
+  }, [api, contextId, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep])
 
   // Load Step 3 draft data when entering Step 3
   useEffect(() => {
@@ -681,6 +786,7 @@ export function AppsPanel({
   const openAppDetail = useCallback(
     async (slug: string, initialTab: DetailTab = 'artifacts', preserveFeedback = false) => {
       const request = ++detailLoad.current
+      setDetailHealthCheck(null)
       setViewMode('detail')
       setDetailTab(initialTab)
       setDetailLoading(true)
@@ -692,8 +798,6 @@ export function AppsPanel({
       setVersionsError(null)
       setLogsError(null)
       setRollbackTarget(null)
-      setDeleteBoxOpen(false)
-      setDeleteConfirmText('')
       try {
         const detail = JSON.parse(await api.appDetails(slug, contextId)) as DeployedApp | null
         if (request !== detailLoad.current) return
@@ -774,8 +878,6 @@ export function AppsPanel({
       setConfigSubTab('configs')
       setVerifyCredentials({})
       setRememberCredentials(false)
-      setWizardLogsOpen(false)
-      setWizardLogsData({})
     },
     [opcConfig.defaultPort],
   )
@@ -786,8 +888,6 @@ export function AppsPanel({
       setWizardNotice(null)
       setVerifyCredentials({})
       setRememberCredentials(false)
-      setWizardLogsOpen(false)
-      setWizardLogsData({})
       setReviewInitialFeedback('')
       setConfigSubTab('configs')
       setViewMode('wizard')
@@ -805,11 +905,9 @@ export function AppsPanel({
         setAppDescription(fresh.description ?? '')
       } else if (targetStep === 3) {
         await syncStep3Drafts(fresh)
-      } else if (targetStep === 4 && (fresh.status === 'failed' || fresh.status === 'verification_failed')) {
-        void fetchWizardLogs(fresh.slug)
       }
     },
-    [apps, fetchWizardLogs, opcConfig.defaultPort, refreshWizardJob, syncStep3Drafts],
+    [apps, opcConfig.defaultPort, refreshWizardJob, syncStep3Drafts],
   )
 
   const openLinkedJob = useCallback(async (job: AppDeliveryJob, refresh = true) => {
@@ -1082,9 +1180,6 @@ export function AppsPanel({
       setWizardStep(4)
       void loadWorkspaceData(true)
 
-      if (published && (published.status === 'failed' || published.status === 'verification_failed')) {
-        void fetchWizardLogs(published.slug)
-      }
     } catch (error) {
       setWizardError(readErrorMessage(error, '确认发布应用失败'))
       void refreshWizardJob(wizardJob.id)
@@ -1101,8 +1196,8 @@ export function AppsPanel({
     setWizardNotice(null)
     try {
       if (recheckHealth && api.appRecheck) {
-        const result = JSON.parse(await api.appRecheck(wizardJob.slug, contextId)) as { ok?: boolean; error?: string; detail?: string }
-        if (!result.ok) throw new Error(result.error || result.detail || '健康检查未通过')
+        const result = readAppHealthCheck(await api.appRecheck(wizardJob.slug, contextId))
+        if (!result.ok) throw new Error(result.message)
       }
       const options: Record<string, unknown> = {}
       if (confirmPageVerification) options.confirmPageVerification = true
@@ -1243,35 +1338,34 @@ export function AppsPanel({
   }
 
   const handleRecheckApp = async (slug: string, inDetail = false) => {
+    const request = detailLoad.current
     if (inDetail) {
       setDetailBusy(true)
       setDetailError(null)
       setDetailNotice(null)
+      setDetailHealthCheck(null)
     } else {
       setBannerError(null)
       setBannerNotice(null)
     }
     try {
       if (!api.appRecheck) throw new Error('当前插件版本不支持在线重新检测')
-      const res = parseJson<{ ok?: boolean; status?: string; error?: string; detail?: string }>(
-        await api.appRecheck(slug, contextId),
-        {},
-      )
-      const msg = res.detail || (res.ok ? `健康检测通过（状态：${res.status || 'running'}）` : res.error || '健康检测未通过')
+      const res = readAppHealthCheck(await api.appRecheck(slug, contextId))
       if (inDetail) {
-        if (res.ok) {
-          setDetailNotice(msg)
-          await openAppDetail(slug, detailTab, true)
-        } else setDetailError(msg)
+        if (request !== detailLoad.current) return
+        setDetailHealthCheck({ ...res, slug })
+        setDetailApp(current => current?.slug === slug
+          ? { ...current, status: res.status, error_message: res.ok ? undefined : res.message }
+          : current)
       } else {
-        if (res.ok) setBannerNotice(msg)
-        else setBannerError(msg)
+        if (res.ok) setBannerNotice(res.message)
+        else setBannerError(res.message)
       }
       void loadWorkspaceData(true)
     } catch (error) {
       const msg = readErrorMessage(error, '重新检测应用状态失败')
-      if (inDetail) setDetailError(msg)
-      else setBannerError(msg)
+      if (inDetail && request === detailLoad.current) setDetailError(msg)
+      else if (!inDetail) setBannerError(msg)
     } finally {
       if (inDetail) setDetailBusy(false)
     }
@@ -1363,34 +1457,17 @@ export function AppsPanel({
     }
   }
 
-  const handleDeleteApp = async () => {
-    if (!detailApp || !api.appDelete) return
-    if (deleteConfirmText.trim() !== detailApp.slug) {
-      setDetailError(`请输入完整应用标识「${detailApp.slug}」以确认删除`)
-      return
-    }
-    setDetailBusy(true)
-    setDetailError(null)
-    try {
-      await api.appDelete(detailApp.slug, purgeVolumes, contextId)
-      setBannerNotice(`已下线并删除应用 ${detailApp.name}（${detailApp.slug}）`)
-      setDetailApp(null)
-      setViewMode('list')
-      void loadWorkspaceData(false)
-    } catch (error) {
-      setDetailError(readErrorMessage(error, '下线删除应用失败'))
-    } finally {
-      setDetailBusy(false)
-    }
-  }
+  const linkedListJob = linkedJob && (wizardJob?.id === linkedJob.id
+    ? wizardJob
+    : jobs.find(job => job.id === linkedJob.id) ?? linkedJob)
 
   const resumableJob = useMemo(() => {
-    const candidate = jobs.find(isResumableJob)
+    const candidate = jobs.find(job => showTaskBanner(job, apps, loadingList))
     if (!candidate) return null
     const token = `${candidate.id}:${candidate.status}`
     if (dismissedDraftToken === token) return null
     return candidate
-  }, [dismissedDraftToken, jobs])
+  }, [apps, dismissedDraftToken, jobs, loadingList])
 
   const dismissDraftBanner = (job: AppDeliveryJob) => {
     const token = `${job.id}:${job.status}`
@@ -1410,18 +1487,13 @@ export function AppsPanel({
 
   // Render View 1: App List
   const renderAppListView = () => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div className="oa-app-list">
       <div className="oa-topbar">
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <h2 className="oa-title">企业应用</h2>
-            <span className="oa-pill oa-pill-accent">{apps.length} 个应用</span>
-          </div>
-          <p className="oa-subtitle" style={{ marginTop: 4 }}>
-            将本地项目接入平台运行环境，自动完成分析改造、配置托管与上线发布，同时生成可调用的智能体技能。
-          </p>
+          <h2 className="oa-title">应用中心</h2>
+          <p className="oa-subtitle">企微登录即可部署。应用列表对所有已登录用户开放。</p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className="oa-app-list-toolbar">
           <button type="button" className="oa-btn" disabled={loadingList} onClick={() => void loadWorkspaceData(false)}>
             <AppIcon name="refresh" size={14} className={loadingList ? 'oa-spin' : ''} />
             <span>刷新</span>
@@ -1453,10 +1525,10 @@ export function AppsPanel({
         </div>
       )}
 
-      {linkedJob && (
+      {linkedListJob && showTaskBanner(linkedListJob, apps, loadingList) && (
         <div className="oa-draft-banner">
-          <div><strong>{linkedJob.name}</strong></div>
-          <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void openLinkedJob(linkedJob)}>
+          <div><strong>{linkedListJob.name}</strong></div>
+          <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void openLinkedJob(linkedListJob)}>
             回到当前任务
           </button>
         </div>
@@ -1520,120 +1592,79 @@ export function AppsPanel({
             const isFailed = app.status === 'failed' || app.status === 'unhealthy'
             const matchingJob = jobs.find(j => j.slug === app.slug)
             return (
-              <div key={app.slug} className="oa-app-card">
+              <article key={app.slug} className="oa-app-card">
                 <div className="oa-app-card-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                    <div className="oa-app-icon-box">
-                      <AppIcon name="code" size={18} />
-                    </div>
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontSize: 15,
-                          fontWeight: 650,
-                          color: '#0f172a',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {app.name}
+                  <div className="oa-app-card-identity">
+                    <div className="oa-app-icon-box"><AppIcon name="list" size={18} /></div>
+                    <div className="oa-app-card-heading">
+                      <div className="oa-app-card-name">
+                        <h3 title={app.name}>{app.name}</h3>
+                        {app.current_version && <span className="oa-app-version">v{app.current_version}</span>}
                       </div>
-                      <div className="oa-mono" style={{ fontSize: 11.5, color: '#64748b' }}>
-                        {app.slug}
-                      </div>
+                      <div className="oa-app-card-slug oa-mono" title={app.slug}>{app.slug}</div>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    {app.current_version ? <span className="oa-pill oa-pill-accent">v{app.current_version}</span> : null}
-                    {readOnly && <span className="oa-pill">共享应用（只读）</span>}
-                    <span className={`oa-pill ${tone.pillClass}`}>
-                      {tone.spinning && <span className="oa-dot oa-pulse" />}
-                      {tone.text}
-                    </span>
-                  </div>
+                  <span className={`oa-app-card-status oa-pill ${tone.pillClass}`}>
+                    <span className={`oa-dot${tone.spinning ? ' oa-pulse' : ''}`} />
+                    {tone.text}
+                  </span>
                 </div>
 
-                <p className="oa-app-card-desc">{app.description || '暂无应用描述'}</p>
+                <p className="oa-app-card-desc" title={app.description || undefined}>{app.description || '暂无应用描述'}</p>
 
                 <div className="oa-app-card-meta">
-                  {app.app_url && (
-                    <a
-                      href={app.app_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: '#2563eb', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                    >
-                      <span className="oa-mono" style={{ fontSize: 11.5 }}>
-                        {app.app_url}
-                      </span>
-                      <AppIcon name="external" size={11} />
-                    </a>
-                  )}
-                  {app.container_port && <span>端口 {app.container_port}</span>}
-                  {app.language && (
-                    <span>
-                      {app.language}
-                      {app.runtime_version ? ` ${app.runtime_version}` : ''}
-                    </span>
+                  <div className="oa-app-card-row">
+                    <span><AppIcon name="cloud" size={13} />内网地址</span>
+                    {app.app_url
+                      ? <a className="oa-mono" href={app.app_url} target="_blank" rel="noreferrer" title={app.app_url}>{app.app_url}</a>
+                      : <span>暂无</span>}
+                  </div>
+                  {!readOnly && (
+                    <div className="oa-app-card-row">
+                      <span><AppIcon name="sparkle" size={13} />本地技能</span>
+                      <code className="oa-code" title={app.skill_name || `app-${app.slug}`}>{app.skill_name || `app-${app.slug}`}</code>
+                    </div>
                   )}
                 </div>
 
                 {isFailed && app.error_message && (
-                  <div className="oa-alert oa-alert-danger" style={{ padding: '8px 10px', fontSize: 12 }}>
+                  <div className="oa-alert oa-alert-danger oa-app-card-error" role="status">
                     <AppIcon name="warning" size={14} />
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{app.error_message}</span>
+                    <span>{healthFailureDetail(app.error_message) || '应用健康检查未通过，请查看日志。'}</span>
                   </div>
                 )}
 
                 <div className="oa-app-card-actions">
-                  {isFailed ? (
+                  {readOnly ? <span className="oa-hint">共享应用 · 只读</span> : isFailed ? (
                     <>
-                      {!readOnly && (
-                        <button
-                          type="button"
-                          className="oa-btn oa-btn-sm oa-btn-primary"
-                          onClick={() => {
-                            if (matchingJob && matchingJob.published) {
-                              void resumeWizardJob(matchingJob, 4)
-                            } else {
-                              startWizardNew(app)
-                            }
-                          }}
-                        >
-                          恢复 / 重新部署
-                        </button>
-                      )}
-                      {!readOnly && api.appRecheck && (
-                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => void handleRecheckApp(app.slug, false)}>
-                          <AppIcon name="refresh" size={13} />
-                          <span>重新检测</span>
-                        </button>
-                      )}
-                      <button type="button" className="oa-btn oa-btn-sm" onClick={() => void openAppDetail(app.slug, readOnly ? 'artifacts' : 'logs')}>
-                        {readOnly ? '查看详情' : '查看日志'}
+                      <button type="button" className="oa-btn oa-btn-xs" onClick={() => {
+                        if (matchingJob?.published) void resumeWizardJob(matchingJob, 4)
+                        else startWizardNew(app)
+                      }}>
+                        恢复 / 重新部署
                       </button>
+                      {api.appRecheck && (
+                        <button type="button" className="oa-btn oa-btn-xs" onClick={() => void handleRecheckApp(app.slug, false)}>
+                          <AppIcon name="refresh" size={12} />重新检查
+                        </button>
+                      )}
                     </>
                   ) : (
                     <>
-                      {app.app_url && (
-                        <a href={app.app_url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">
-                          <AppIcon name="external" size={13} />
-                          <span>打开应用</span>
-                        </a>
-                      )}
-                      <button type="button" className="oa-btn oa-btn-sm" onClick={() => void openAppDetail(app.slug, 'artifacts')}>
-                        {readOnly ? '查看详情' : '详情与管理'}
+                      <button type="button" className="oa-btn oa-btn-xs" onClick={() => void openAppDetail(app.slug, 'versions')}>
+                        版本与回退
                       </button>
-                      {!readOnly && (
-                        <button type="button" className="oa-btn oa-btn-sm oa-btn-accent-soft" onClick={() => startWizardNew(app)}>
-                          发布新版本
-                        </button>
-                      )}
+                      <button type="button" className="oa-btn oa-btn-xs oa-btn-accent-soft" onClick={() => startWizardNew(app)}>
+                        升级新版本
+                      </button>
                     </>
                   )}
+                  <button type="button" className="oa-btn oa-btn-xs oa-btn-link oa-app-card-detail"
+                    onClick={() => void openAppDetail(app.slug, isFailed && !readOnly ? 'logs' : 'artifacts')}>
+                    {isFailed && !readOnly ? '失败日志' : '详情'}<AppIcon name="chevronRight" size={12} />
+                  </button>
                 </div>
-              </div>
+              </article>
             )
           })}
         </div>
@@ -2193,76 +2224,45 @@ export function AppsPanel({
 
           {/* STEP 4 */}
           {wizardStep === 4 && wizardJob && (() => {
-            const tone = jobStatusTone(wizardJob.status, wizardJob.userDisabled)
+            const progress = deploymentProgress(wizardJob)
             const needsPageConfirm = wizardJob.status === 'awaiting_page_verification'
             const isFailed = wizardJob.status === 'failed' || wizardJob.status === 'verification_failed'
             const skillDisabled = wizardJob.userDisabled || wizardJob.verification?.skill_enabled === false
             const credFields = wizardJob.proposal?.contract?.verification_credential_fields ?? []
 
             return (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                <div className="oa-form-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' }}>{wizardJob.name}</h3>
-                        <span className="oa-code">{wizardJob.slug}</span>
-                        {wizardJob.version && <span className="oa-pill oa-pill-accent">v{wizardJob.version}</span>}
-                        <span className={`oa-pill ${tone.pillClass}`}>
-                          {tone.spinning && <span className="oa-dot oa-pulse" />}
-                          {tone.text}
-                        </span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                        <a
-                          href={wizardJob.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="oa-mono"
-                          style={{ fontSize: 12.5, color: '#2563eb', textDecoration: 'none' }}
-                        >
-                          {wizardJob.url}
-                        </a>
-                        <button type="button" className="oa-btn oa-btn-xs" onClick={() => void copyText('wizard-url', wizardJob.url)}>
-                          <AppIcon name={copiedKey === 'wizard-url' ? 'check' : 'copy'} size={12} />
-                          <span>{copiedKey === 'wizard-url' ? '已复制' : '复制地址'}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      className="oa-btn oa-btn-sm"
-                      disabled={wizardBusy}
-                      onClick={() => {
-                        if (wizardJob.status === 'verified' || wizardJob.status === 'awaiting_page_verification' || wizardJob.status === 'verifying') {
-                          void refreshWizardJob(wizardJob.id)
-                        } else void handleRunVerification()
-                      }}
-                    >
-                      <AppIcon name="refresh" size={13} />
-                      <span>刷新状态</span>
-                    </button>
-                  </div>
-
-                  {wizardJob.error && (
-                    <div className="oa-alert oa-alert-danger" style={{ marginTop: 12 }}>
-                      <AppIcon name="warning" size={16} />
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{wizardJob.error}</div>
-                    </div>
-                  )}
-
-                  {wizardJob.events?.length > 0 && (
-                    <div className="oa-timeline-list" style={{ marginTop: 12 }}>
-                      {wizardJob.events.map((ev, idx) => (
-                        <div key={idx} className="oa-timeline-item">
-                          <span className="oa-dot" style={{ marginTop: 6, background: '#94a3b8' }} />
-                          <span>{ev}</span>
-                        </div>
-                      ))}
-                    </div>
+              <div className="oa-deploy-progress">
+                <div className="oa-deploy-status" role="status">
+                  <span className={`oa-pill oa-pill-${progress.tone}`}>
+                    <span className={`oa-dot${isDeploymentInProgress(wizardJob.status) ? ' oa-pulse' : ''}`} />
+                    {progress.label}
+                  </span>
+                  <span className="oa-hint">{progress.detail}</span>
+                  {wizardJob.status === 'verified' && (
+                    <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">
+                      <AppIcon name="external" size={13} /> 打开应用
+                    </a>
                   )}
                 </div>
+
+                {wizardJob.error && (
+                  <div className="oa-alert oa-alert-danger">
+                    <AppIcon name="warning" size={16} />
+                    <div style={{ whiteSpace: 'pre-wrap' }}>{wizardJob.error}</div>
+                  </div>
+                )}
+
+                {api.appLogs && (
+                  <DeploymentLogs
+                    key={wizardJob.id + ':' + (wizardJob.version ?? '')}
+                    fetchLogs={fetchDeploymentLogs}
+                    live={isDeploymentInProgress(wizardJob.status)}
+                    buildOnly={isDeploymentInProgress(wizardJob.status)}
+                    failed={isFailed}
+                    onCopy={text => void copyText('wizard-logs', text)}
+                    copied={copiedKey === 'wizard-logs'}
+                  />
+                )}
 
                 {/* Page Verification Card */}
                 {needsPageConfirm && (
@@ -2425,58 +2425,6 @@ export function AppsPanel({
                   </div>
                 )}
 
-                {/* Expandable Server Logs */}
-                <div className="oa-subcard">
-                  <div className="oa-subcard-head" style={{ marginBottom: wizardLogsOpen ? 10 : 0 }}>
-                    <span>服务器构建与运行日志</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {wizardLogsOpen && (
-                        <>
-                          <button
-                            type="button"
-                            className="oa-btn oa-btn-xs"
-                            onClick={() =>
-                              void copyText(
-                                'wizard-logs',
-                                formatLogOutput(wizardLogsData.runtime) || formatLogOutput(wizardLogsData.build) || '',
-                              )
-                            }
-                          >
-                            <AppIcon name={copiedKey === 'wizard-logs' ? 'check' : 'copy'} size={12} />
-                            <span>{copiedKey === 'wizard-logs' ? '已复制' : '复制日志'}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="oa-btn oa-btn-xs"
-                            disabled={wizardLogsLoading}
-                            onClick={() => void fetchWizardLogs(wizardJob.slug)}
-                          >
-                            <AppIcon name="refresh" size={12} className={wizardLogsLoading ? 'oa-spin' : ''} />
-                            <span>刷新</span>
-                          </button>
-                        </>
-                      )}
-                      <button
-                        type="button"
-                        className="oa-btn oa-btn-xs"
-                        onClick={() => {
-                          const next = !wizardLogsOpen
-                          setWizardLogsOpen(next)
-                          if (next) void fetchWizardLogs(wizardJob.slug)
-                        }}
-                      >
-                        {wizardLogsOpen ? '收起日志' : '展开查看日志'}
-                      </button>
-                    </div>
-                  </div>
-                  {wizardLogsOpen && (
-                    <pre className="oa-log-terminal">
-                      {wizardLogsLoading
-                        ? '正在获取服务器日志…'
-                        : formatLogOutput(wizardLogsData.runtime) || formatLogOutput(wizardLogsData.build) || '暂无日志输出'}
-                    </pre>
-                  )}
-                </div>
               </div>
             )
           })()}
@@ -2546,9 +2494,11 @@ export function AppsPanel({
             </>
           )}
 
-          {wizardStep === 4 && (
+          {wizardStep === 4 && (isDeploymentInProgress(wizardJob?.status) ? (
+            <button type="button" className="oa-btn" disabled>部署处理中…</button>
+          ) : (
             <>
-              <span className="oa-hint">发布完成后可在应用列表中随时管理配置、版本回滚与存储备份</span>
+              <span className="oa-hint">发布完成后可在应用列表中管理配置、版本与备份。</span>
               <button
                 type="button"
                 className="oa-btn oa-btn-primary"
@@ -2560,7 +2510,7 @@ export function AppsPanel({
                 返回应用列表
               </button>
             </>
-          )}
+          ))}
         </div>
       </div>
     )
@@ -2588,6 +2538,8 @@ export function AppsPanel({
 
     const tone = jobStatusTone(detailApp.status)
     const readOnly = detailApp.can_manage !== true
+    const lastHealthCheck = detailHealthCheck?.slug === detailApp.slug ? detailHealthCheck : null
+    const unhealthy = detailApp.status === 'failed' || detailApp.status === 'unhealthy'
     const matchingJob = jobs.find(j => j.slug === detailApp.slug && j.version === detailApp.current_version) ?? jobs.find(j => j.slug === detailApp.slug)
     const detailTabs = {
       artifacts: '能力与技能',
@@ -2596,6 +2548,11 @@ export function AppsPanel({
       versions: `版本历史 (${visibleVersions.length})`,
       logs: '日志与 Dockerfile',
     } satisfies Record<DetailTab, string>
+
+    const logView = !readOnly && detailTab === 'logs'
+    const detailLog = formatLogOutput(detailLogsData[detailLogsSubTab])
+    const logSummary = detailLogsSubTab === 'runtime' ? '容器服务输出（最近 500 行）'
+      : detailLogsSubTab === 'build' ? '构建与部署日志' : '已归档 Dockerfile'
 
     return (
       <div className="oa-overlay-view">
@@ -2657,13 +2614,23 @@ export function AppsPanel({
             </div>
           )}
 
-          {(detailApp.status === 'failed' || detailApp.status === 'unhealthy' || detailApp.error_message) && (
+          {lastHealthCheck?.ok && !unhealthy && (
+            <div className="oa-health-result oa-alert oa-alert-ok" role="status">
+              <AppIcon name="check" size={16} />
+              <div>{lastHealthCheck.message}</div>
+              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailHealthCheck(null)}>关闭</button>
+            </div>
+          )}
+
+          {(unhealthy || lastHealthCheck?.ok === false) && (
             <div className="oa-alert oa-alert-danger" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                 <AppIcon name="warning" size={16} />
                 <div>
-                  <strong>应用当前状态异常</strong>
-                  {detailApp.error_message && <div style={{ marginTop: 2 }}>{detailApp.error_message}</div>}
+                  <strong>{lastHealthCheck?.ok === false ? lastHealthCheck.message : '应用当前状态异常'}</strong>
+                  {!lastHealthCheck && (
+                    <div style={{ marginTop: 2 }}>{healthFailureDetail(detailApp.error_message) || '请重新检查状态或查看服务器日志。'}</div>
+                  )}
                 </div>
               </div>
               {!readOnly && <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2765,7 +2732,8 @@ export function AppsPanel({
             </div>
           )}
 
-          {!readOnly && <div id={`${formId}-detail-panel`} role="tabpanel" aria-labelledby={`${formId}-tab-${detailTab}`} tabIndex={0}>
+          {!readOnly && <div id={`${formId}-detail-panel`} role="tabpanel" aria-labelledby={`${formId}-tab-${detailTab}`} tabIndex={0}
+            className={logView ? 'oa-detail-tab-panel oa-detail-log-panel' : 'oa-detail-tab-panel'}>
           {/* Tab 1: Artifacts & Skill */}
           {detailTab === 'artifacts' && (
             <AppDeliveryArtifacts
@@ -3024,8 +2992,8 @@ export function AppsPanel({
 
           {/* Tab 5: Logs & Dockerfile */}
           {detailTab === 'logs' && (
-            <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+            <div className="oa-detail-log-card">
+              <div className="oa-detail-log-toolbar">
                 <div className="oa-segmented">
                   <button
                     type="button"
@@ -3054,18 +3022,8 @@ export function AppsPanel({
                   <button
                     type="button"
                     className="oa-btn oa-btn-xs"
-                    onClick={() =>
-                      void copyText(
-                        `detail-log-${detailLogsSubTab}`,
-                        formatLogOutput(
-                          detailLogsSubTab === 'runtime'
-                            ? detailLogsData.runtime
-                            : detailLogsSubTab === 'build'
-                              ? detailLogsData.build
-                              : detailLogsData.dockerfile,
-                        ),
-                      )
-                    }
+                    disabled={!detailLog}
+                    onClick={() => void copyText(`detail-log-${detailLogsSubTab}`, detailLog)}
                   >
                     <AppIcon name={copiedKey === `detail-log-${detailLogsSubTab}` ? 'check' : 'copy'} size={12} />
                     <span>{copiedKey === `detail-log-${detailLogsSubTab}` ? '已复制' : '复制内容'}</span>
@@ -3077,87 +3035,26 @@ export function AppsPanel({
                 </div>
               </div>
 
+              <div className="oa-detail-log-meta">
+                <span>{logSummary}</span>
+                <span>当前已加载 {detailLog ? detailLog.split('\n').length : 0} 行</span>
+              </div>
               {logsError && <div role="alert" className="oa-alert oa-alert-danger">{logsError}</div>}
-              {!logsError && <pre className="oa-log-terminal">
-                {formatLogOutput(
-                  detailLogsSubTab === 'runtime'
-                    ? detailLogsData.runtime
-                    : detailLogsSubTab === 'build'
-                      ? detailLogsData.build
-                      : detailLogsData.dockerfile,
-                ) || '暂无内容'}
-              </pre>}
+              <pre className="oa-log-terminal" tabIndex={0} aria-label={logSummary}>
+                {detailLog || (logsError ? '日志暂不可用' : '暂无内容')}
+              </pre>
             </div>
           )}
 
           </div>}
 
-          {/* Danger Zone: Delete App */}
-          {!readOnly && api.appDelete && (
-            <div className="oa-subcard" style={{ borderColor: '#fecaca', background: '#fff5f5' }}>
-              <div className="oa-subcard-head" style={{ marginBottom: deleteBoxOpen ? 10 : 0 }}>
-                <div>
-                  <strong style={{ color: '#b91c1c', fontSize: 13.5 }}>危险操作：下线并删除应用</strong>
-                  <div className="oa-hint" style={{ color: '#991b1b' }}>
-                    将停止并移除平台上的应用容器、路由与已发布的同名技能。
-                  </div>
-                </div>
-                {!deleteBoxOpen && (
-                  <button type="button" className="oa-btn oa-btn-sm oa-btn-danger" onClick={() => setDeleteBoxOpen(true)}>
-                    <AppIcon name="trash" size={13} />
-                    <span>下线删除应用…</span>
-                  </button>
-                )}
-              </div>
-
-              {deleteBoxOpen && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#991b1b' }}>
-                    <input type="checkbox" checked={purgeVolumes} onChange={e => setPurgeVolumes(e.target.checked)} />
-                    <span>同时彻底清理持久化数据卷内容（勾选后不可恢复）</span>
-                  </label>
-                  <div className="oa-field" style={{ maxWidth: 360 }}>
-                    <label className="oa-label" htmlFor={`${formId}-delete`}>请输入应用标识「{detailApp.slug}」以确认删除</label>
-                    <input id={`${formId}-delete`}
-                      className="oa-input oa-mono"
-                      value={deleteConfirmText}
-                      placeholder={detailApp.slug}
-                      onChange={e => setDeleteConfirmText(e.target.value)}
-                    />
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      type="button"
-                      className="oa-btn oa-btn-sm oa-btn-danger"
-                      disabled={detailBusy || deleteConfirmText.trim() !== detailApp.slug}
-                      onClick={() => void handleDeleteApp()}
-                    >
-                      {detailBusy ? '正在删除…' : '确认永久删除'}
-                    </button>
-                    <button
-                      type="button"
-                      className="oa-btn oa-btn-sm"
-                      disabled={detailBusy}
-                      onClick={() => {
-                        setDeleteBoxOpen(false)
-                        setDeleteConfirmText('')
-                        setPurgeVolumes(false)
-                      }}
-                    >
-                      取消
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     )
   }
 
   return (
-    <div className="opc-apps-root">
+    <div className={`opc-apps-root${viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs' ? ' oa-apps-log-view' : ''}`}>
       <style>{appsCss}</style>
       {viewMode === 'list' && (loadingLinkedJob || linkedJob && !restoredLinkedJob.current
         ? <p role="status">正在查找当前会话的应用任务…</p>

@@ -233,7 +233,6 @@ export interface OpcApi {
   appStorage?(slug: string, context: string): Promise<string>
   appRecheck?(slug: string, context: string): Promise<string>
   appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>
-  appDelete?(slug: string, purgeVolumes: boolean, context: string): Promise<string>
   appRollback?(slug: string, payloadJson: string, context: string): Promise<string>
   state(): Promise<string>
   watchState(signal: AbortSignal): AsyncIterable<string>

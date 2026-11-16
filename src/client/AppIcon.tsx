@@ -3,6 +3,9 @@ import React from 'react'
 export type AppIconName =
   | 'sparkle'
   | 'code'
+  | 'list'
+  | 'cloud'
+  | 'chevronRight'
   | 'table'
   | 'plug'
   | 'shield'
@@ -61,6 +64,19 @@ export function AppIcon({
           <polyline points="8 6 2 12 8 18" />
         </svg>
       )
+    case 'list':
+      return (
+        <svg {...common}>
+          <rect x="3" y="4" width="4" height="4" rx="1" />
+          <rect x="3" y="10" width="4" height="4" rx="1" />
+          <rect x="3" y="16" width="4" height="4" rx="1" />
+          <path d="M11 6h10M11 12h10M11 18h10" />
+        </svg>
+      )
+    case 'cloud':
+      return <svg {...common}><path d="M6.5 18a3.5 3.5 0 0 1-.4-7 5.7 5.7 0 0 1 11.2-1.2 4.2 4.2 0 0 1-.5 8.2Z" /></svg>
+    case 'chevronRight':
+      return <svg {...common}><path d="m9 6 6 6-6 6" /></svg>
     case 'table':
       return (
         <svg {...common}>
