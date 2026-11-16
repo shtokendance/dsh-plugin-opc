@@ -358,55 +358,85 @@ export const appsCss = `
   flex-shrink: 0;
 }
 
-/* Stepper */
+/* Deployment wizard header */
+.oa-wizard-header {
+  container-type: inline-size;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  padding-block: 14px;
+  background: var(--oa-paper);
+}
+.oa-wizard-heading,
+.oa-wizard-identity,
+.oa-wizard-title-line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 9px;
+}
+.oa-wizard-heading { justify-content: space-between; align-items: flex-start; }
+.oa-wizard-identity { align-items: flex-start; flex: 1; }
+.oa-wizard-title { min-width: 0; }
+.oa-wizard-title-line { flex-wrap: wrap; gap: 4px 8px; }
+.oa-wizard-title-line .oa-code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oa-wizard-title h2 { margin: 0; font-size: 14px; font-weight: 700; color: var(--oa-ink); }
+.oa-wizard-title p { margin: 2px 0 0; font-size: 11.5px; color: var(--oa-muted); }
+.oa-wizard-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--opc-control-radius, 8px);
+  flex-shrink: 0;
+  background: var(--oa-accent-soft);
+  color: var(--oa-accent);
+}
+.oa-wizard-return { flex-shrink: 0; }
 .oa-stepper {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+@container (max-width: 400px) {
+  .oa-stepper { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.oa-step-item {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--oa-line);
-  background: var(--oa-paper);
-  flex-wrap: wrap;
-  flex-shrink: 0;
-}
-.oa-step-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 4px;
+  min-height: 32px;
+  padding: 4px;
+  border: 1px solid var(--oa-line);
+  border-radius: var(--opc-control-radius, 8px);
+  background: #f1f5f9;
+  text-align: center;
+  color: var(--oa-muted);
+  font-size: 11.5px;
   font-weight: 500;
-  color: var(--oa-muted);
 }
-.oa-step-item.active { color: var(--oa-accent); font-weight: 600; }
-.oa-step-item.done { color: var(--oa-ok); }
-.oa-step-num {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  background: var(--oa-panel);
-  border: 1px solid var(--oa-line-strong);
-  color: var(--oa-muted);
+.oa-step-item.active {
+  background: var(--oa-accent-soft);
+  border-color: #93b5fd;
+  color: var(--oa-accent);
+  font-weight: 600;
 }
-.oa-step-item.active .oa-step-num {
-  background: var(--oa-accent);
-  border-color: var(--oa-accent);
-  color: #ffffff;
-}
-.oa-step-item.done .oa-step-num {
+.oa-step-item.done {
   background: var(--oa-ok-soft);
   border-color: var(--oa-ok-line);
   color: var(--oa-ok);
 }
-.oa-step-sep {
-  width: 24px;
+.oa-step-accessible {
+  position: absolute;
+  width: 1px;
   height: 1px;
-  background: var(--oa-line-strong);
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Form Elements */
@@ -430,6 +460,39 @@ export const appsCss = `
   max-width: none;
   margin: 0;
 }
+.oa-source-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.oa-source-form > .oa-form-card { max-width: none; margin: 0; }
+.oa-source-label { margin: 0; font-size: 13px; font-weight: 600; }
+.oa-source-label > span { color: var(--oa-danger); }
+.oa-source-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  background: var(--oa-panel);
+  border: 1px solid var(--oa-line);
+  border-radius: var(--opc-card-radius, 12px);
+  color: var(--oa-muted);
+}
+.oa-source-actions,
+.oa-source-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.oa-source-actions { justify-content: center; margin-top: 6px; }
+.oa-source-choice {
+  padding: 8px 10px;
+  border: 1px solid var(--oa-ok-line);
+  border-radius: 8px;
+  background: var(--oa-ok-soft);
+  color: #065f46;
+  font-size: 12px;
+}
+.oa-source-choice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.oa-source-form .oa-dropzone { padding: 22px 14px; gap: 8px; }
+.oa-source-form .oa-dropzone > .oa-hint { max-width: 460px; }
 .oa-field {
   display: flex;
   flex-direction: column;

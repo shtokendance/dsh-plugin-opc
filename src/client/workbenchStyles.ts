@@ -65,6 +65,8 @@ export const workbenchStyles = faces + `
 }
 .opc-panel .s2-kb-tab:hover { color: var(--opc-ink); }
 .opc-panel .s2-kb-tab.active { color: var(--opc-blue); border-bottom-color: var(--opc-blue); font-weight: 700; }
+.opc-panel .s2-kb-tab-catalog.active { color: #b45309; border-bottom-color: #d97706; font-weight: 600; }
+.opc-panel .s2-input-catalog { border-color: #fde68a; border-radius: var(--opc-card-radius); }
 .opc-panel .s2-pill {
   border-radius: 999px;
   background: #f1f5f9;

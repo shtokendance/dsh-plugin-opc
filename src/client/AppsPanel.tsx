@@ -20,7 +20,6 @@ import { appsCss } from './appsStyles.ts'
 
 type ViewMode = 'list' | 'wizard' | 'detail'
 type WizardStep = 1 | 2 | 3 | 4
-type SourceKind = 'zip' | 'folder'
 type ConfigSubTab = 'configs' | 'skill' | 'artifacts'
 type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
@@ -501,9 +500,8 @@ export function AppsPanel({
   const [slugManual, setSlugManual] = useState(false)
   const [containerPort, setContainerPort] = useState<string>('8080')
   const [appDescription, setAppDescription] = useState('')
-  const [sourceKind, setSourceKind] = useState<SourceKind>('zip')
   const [zipFile, setZipFile] = useState<File | null>(null)
-  const [folderPath, setFolderPath] = useState('')
+  const [sourcePath, setSourcePath] = useState('')
   const [dragActive, setDragActive] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
@@ -513,6 +511,8 @@ export function AppsPanel({
   })
   const isComposingRef = useRef(false)
   const isSlugComposingRef = useRef(false)
+  const sourcePathInputRef = useRef<HTMLInputElement>(null)
+  const sourceSelection = useRef(0)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Step 2 Footer Bridge
@@ -873,9 +873,10 @@ export function AppsPanel({
       setSlugManual(Boolean(upgradeApp || prevJob))
       setContainerPort(String(upgradeApp?.container_port ?? prevJob?.port ?? opcConfig.defaultPort))
       setAppDescription(upgradeApp?.description ?? prevJob?.description ?? '')
-      setSourceKind('zip')
+      sourceSelection.current++
+      setDragActive(false)
       setZipFile(null)
-      setFolderPath('')
+      setSourcePath('')
       setReviewInitialFeedback('')
       setConfigSubTab('configs')
       setVerifyCredentials({})
@@ -949,6 +950,8 @@ export function AppsPanel({
   // Step 1 Submit: Create Job & Trigger Analysis
   const handleStep1Submit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (wizardBusy) return
+    sourceSelection.current++
     setWizardError(null)
     const cleanName = appName.trim()
     const cleanSlug = toAppSlug(appSlug, { allowTrailingDash: false })
@@ -969,16 +972,8 @@ export function AppsPanel({
       setWizardError('容器端口必须为 1 至 65535 之间的整数')
       return
     }
-    if (sourceKind === 'zip' && !zipFile) {
-      setWizardError('请选择要上传的源码 ZIP 压缩包')
-      return
-    }
-    if (sourceKind === 'zip' && zipFile && zipFile.size > MAX_ZIP_BYTES) {
-      setWizardError('ZIP 文件大小不能超过 64 MiB')
-      return
-    }
-    if (sourceKind === 'folder' && !folderPath.trim()) {
-      setWizardError('请选择或填写本机源码目录的完整路径')
+    if (!zipFile && !sourcePath.trim()) {
+      setWizardError('请选择源码文件夹或 ZIP，或者填写完整路径')
       return
     }
 
@@ -1001,10 +996,10 @@ export function AppsPanel({
               }
             : undefined,
       }
-      if (sourceKind === 'zip' && zipFile) {
+      if (zipFile) {
         payload.zip = await readFileAsBase64(zipFile)
       } else {
-        payload.source = folderPath.trim()
+        payload.source = sourcePath.trim()
       }
 
       const rawJob = await api.appCreate(JSON.stringify(payload), sessionId, contextId)
@@ -1042,23 +1037,46 @@ export function AppsPanel({
     }
   }
 
-  const handleBrowseFolder = async () => {
-    if (!api.appPickSourceFolder) return
+  const selectZip = (file: File) => {
+    if (wizardBusy) return
+    sourceSelection.current++
+    if (!/\.zip$/i.test(file.name) || file.size === 0 || file.size > MAX_ZIP_BYTES) {
+      setWizardError('请使用有效的 ZIP 压缩包，大小不能超过 64 MiB')
+      return
+    }
     setWizardError(null)
+    setSourcePath('')
+    setZipFile(file)
+  }
+
+  const selectSourcePath = (path: string) => {
+    sourceSelection.current++
+    setWizardError(null)
+    setZipFile(null)
+    setSourcePath(path)
+  }
+
+  const handleBrowseFolder = async () => {
+    const request = ++sourceSelection.current
+    setWizardError(null)
+    if (!api.appPickSourceFolder) {
+      sourcePathInputRef.current?.focus()
+      return
+    }
     try {
       const res = parseJson<{ path?: string; cancelled?: boolean; unsupported?: boolean }>(
         await api.appPickSourceFolder(contextId),
         {},
       )
+      if (request !== sourceSelection.current) return
       if (res.unsupported) {
-        setWizardError('当前系统不支持原生目录选择框，请手动输入源码目录完整路径或切换为 ZIP 上传')
-        return
-      }
-      if (!res.cancelled && res.path) {
-        setFolderPath(res.path)
+        sourcePathInputRef.current?.focus()
+        setWizardError('此环境不支持原生文件夹选择，请填写完整路径或选择 ZIP 压缩包')
+      } else if (!res.cancelled && res.path) {
+        selectSourcePath(res.path)
       }
     } catch (error) {
-      setWizardError(readErrorMessage(error, '打开目录选择器失败'))
+      if (request === sourceSelection.current) setWizardError(readErrorMessage(error, '打开目录选择器失败'))
     }
   }
 
@@ -1094,6 +1112,7 @@ export function AppsPanel({
 
   const leaveWizard = async () => {
     if (wizardBusy) return
+    sourceSelection.current++
     setWizardBusy(true)
     try {
       await flushDraft()
@@ -1677,11 +1696,12 @@ export function AppsPanel({
   // Render View 2: 4-Step Wizard
   const renderWizardView = () => {
     const steps: Array<{ id: WizardStep; label: string }> = [
-      { id: 1, label: '源码与标识' },
-      { id: 2, label: '方案核对' },
-      { id: 3, label: '配置与检查' },
-      { id: 4, label: '发布与验证' },
+      { id: 1, label: '选择应用' },
+      { id: 2, label: '与 AI 改造应用' },
+      { id: 3, label: '核对部署内容' },
+      { id: 4, label: '部署与使用' },
     ]
+    const upgrading = Boolean(upgradeTarget || wizardJob?.upgrade)
 
     const portNum = Number.parseInt(containerPort, 10)
     const slugValid = SLUG_RE.test(toAppSlug(appSlug, { allowTrailingDash: false }))
@@ -1693,7 +1713,7 @@ export function AppsPanel({
       Number.isInteger(portNum) &&
       portNum >= 1 &&
       portNum <= 65535 &&
-      (sourceKind === 'zip' ? Boolean(zipFile) : folderPath.trim().length > 0)
+      Boolean(zipFile || sourcePath.trim())
 
     const missingConfigAlert = wizardJob
       ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
@@ -1701,40 +1721,41 @@ export function AppsPanel({
 
     return (
       <div className="oa-overlay-view">
-        <div className="oa-overlay-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <header className="oa-overlay-header oa-wizard-header">
+          <div className="oa-wizard-heading">
+            <div className="oa-wizard-identity">
+              <span className="oa-wizard-icon"><AppIcon name={upgrading ? 'refresh' : 'plus'} size={16} /></span>
+              <div className="oa-wizard-title">
+                <div className="oa-wizard-title-line">
+                  <h2>{upgrading ? '升级应用并部署新版本' : '新建并部署应用'}</h2>
+                  {(wizardJob?.slug || appSlug) && <span className="oa-code" title={wizardJob?.slug || appSlug}>{wizardJob?.slug || appSlug}</span>}
+                </div>
+                <p>{upgrading ? '选择新版源码，由 AI 检查改造方案，再核对并部署。' : '选择应用，AI 完成技术准备，你只需处理必要问题并确认部署。'}</p>
+              </div>
+            </div>
             <button
               type="button"
-              className="oa-btn oa-btn-sm"
+              className="oa-btn oa-btn-sm oa-wizard-return"
               disabled={wizardBusy}
               onClick={() => void leaveWizard()}
             >
               <AppIcon name="arrowLeft" size={13} />
               <span>{wizardStep === 3 ? '保存草稿并退出' : '返回列表'}</span>
             </button>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <strong style={{ fontSize: 15, color: '#0f172a' }}>{upgradeTarget ? '升级已有应用' : '新建企业应用'}</strong>
-                {(wizardJob?.slug || appSlug) && <span className="oa-code">{wizardJob?.slug || appSlug}</span>}
-              </div>
-            </div>
           </div>
 
-          <div className="oa-stepper">
-            {steps.map((step, idx) => {
+          <ol className="oa-stepper" aria-label="应用部署步骤">
+            {steps.map(step => {
               const stateClass = wizardStep === step.id ? 'active' : wizardStep > step.id ? 'done' : ''
               return (
-                <React.Fragment key={step.id}>
-                  <div className={`oa-step-item ${stateClass}`}>
-                    <span className="oa-step-num">{wizardStep > step.id ? '✓' : step.id}</span>
-                    <span>{step.label}</span>
-                  </div>
-                  {idx < steps.length - 1 && <span className="oa-step-sep">/</span>}
-                </React.Fragment>
+                <li key={step.id} className={`oa-step-item ${stateClass}`} aria-current={wizardStep === step.id ? 'step' : undefined}>
+                  {stateClass === 'done' ? <><AppIcon name="check" size={13} /><span className="oa-step-accessible">已完成</span></> : <span aria-hidden="true">{step.id}.</span>}
+                  <span>{step.label}</span>
+                </li>
               )
             })}
-          </div>
-        </div>
+          </ol>
+        </header>
 
         <div className="oa-overlay-body">
           {wizardError && (
@@ -1759,7 +1780,7 @@ export function AppsPanel({
 
           {/* STEP 1 */}
           {wizardStep === 1 && (
-            <form id={`${formId}-source-form`} onSubmit={e => void handleStep1Submit(e)} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <form id={`${formId}-source-form`} onSubmit={e => void handleStep1Submit(e)} className="oa-source-form">
               {upgradeTarget && (
                 <div className="oa-alert oa-alert-info">
                   <AppIcon name="sparkle" size={16} />
@@ -1939,103 +1960,56 @@ export function AppsPanel({
                 )}
               </div>
 
-              <div className="oa-form-card">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
-                  <div>
-                    <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a' }}>导入项目源码 *</div>
-                    <div className="oa-hint">导入后会在插件隔离工作区创建副本，不会改动您的原始代码目录。</div>
-                  </div>
-                  <div className="oa-segmented">
-                    <button
-                      type="button"
-                      className={`oa-segmented-btn ${sourceKind === 'zip' ? 'active' : ''}`}
-                      onClick={() => setSourceKind('zip')}
-                    >
-                      上传源码压缩包 (.zip)
+              <section className="oa-form-card" aria-labelledby={`${formId}-source-label`}>
+                <h3 id={`${formId}-source-label`} className="oa-source-label">选择应用源码（文件夹或 ZIP）<span aria-hidden="true"> *</span></h3>
+                <div
+                  className={`oa-dropzone${dragActive ? ' dragging' : ''}`}
+                  onDragOver={event => {
+                    event.preventDefault()
+                    if (!wizardBusy) setDragActive(true)
+                  }}
+                  onDragLeave={event => {
+                    if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragActive(false)
+                  }}
+                  onDrop={event => {
+                    event.preventDefault()
+                    setDragActive(false)
+                    const files = event.dataTransfer.files
+                    if (files.length === 1 && files[0]) selectZip(files[0])
+                    else if (files.length > 1) setWizardError('一次只能选择一个 ZIP 压缩包')
+                  }}
+                >
+                  <span className="oa-source-icon"><AppIcon name="folder" size={22} /></span>
+                  <strong>选择本地应用源码</strong>
+                  <div className="oa-hint">选择源码文件夹，或拖拽上传 ZIP 压缩包（最多 64 MiB）。分析会使用源码副本。</div>
+                  <div className="oa-source-actions">
+                    <button type="button" className="oa-btn oa-btn-primary" disabled={wizardBusy} onClick={() => void handleBrowseFolder()}>
+                      <AppIcon name="folder" size={15} /> 选择源码文件夹
                     </button>
-                    <button
-                      type="button"
-                      className={`oa-segmented-btn ${sourceKind === 'folder' ? 'active' : ''}`}
-                      onClick={() => setSourceKind('folder')}
-                    >
-                      选择本机源码目录
+                    <button type="button" className="oa-btn" disabled={wizardBusy} onClick={() => fileInputRef.current?.click()}>
+                      <AppIcon name="archive" size={15} /> 选择 ZIP 压缩包
                     </button>
+                    <input ref={fileInputRef} type="file" accept=".zip,application/zip" hidden onChange={event => {
+                      const file = event.currentTarget.files?.[0]
+                      event.currentTarget.value = ''
+                      if (file) selectZip(file)
+                    }} />
                   </div>
                 </div>
-
-                {sourceKind === 'zip' ? (
-                  <div
-                    className={`oa-dropzone ${dragActive ? 'active' : ''}`}
-                    onDragOver={e => {
-                      e.preventDefault()
-                      setDragActive(true)
-                    }}
-                    onDragLeave={() => setDragActive(false)}
-                    onDrop={e => {
-                      e.preventDefault()
-                      setDragActive(false)
-                      const file = e.dataTransfer.files?.[0]
-                      if (file) setZipFile(file)
-                    }}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".zip,application/zip"
-                      style={{ display: 'none' }}
-                      onChange={e => {
-                        const file = e.target.files?.[0]
-                        if (file) setZipFile(file)
-                      }}
-                    />
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                      <AppIcon name="archive" size={24} />
-                      {zipFile ? (
-                        <>
-                          <div style={{ fontWeight: 600, color: '#0f172a' }}>
-                            已选择：{zipFile.name}（{formatFileSize(zipFile.size)}）
-                          </div>
-                          <button
-                            type="button"
-                            className="oa-btn oa-btn-xs"
-                            onClick={e => {
-                              e.stopPropagation()
-                              setZipFile(null)
-                              if (fileInputRef.current) fileInputRef.current.value = ''
-                            }}
-                          >
-                            重新选择
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <div style={{ fontWeight: 600, color: '#0f172a' }}>点击或拖拽 .zip 源码压缩包到此区域</div>
-                          <div className="oa-hint">支持最大 64 MiB，自动忽略 node_modules / .git / __pycache__</div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="oa-field">
-                    <label className="oa-label" htmlFor={`${formId}-folder`}>本机源码文件夹路径</label>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <input id={`${formId}-folder`}
-                        className="oa-input oa-mono"
-                        value={folderPath}
-                        placeholder="/Users/.../my-project"
-                        onChange={e => setFolderPath(e.target.value)}
-                      />
-                      {api.appPickSourceFolder && (
-                        <button type="button" className="oa-btn" onClick={() => void handleBrowseFolder()}>
-                          <AppIcon name="folder" size={14} />
-                          <span>选择文件夹…</span>
-                        </button>
-                      )}
-                    </div>
+                {(zipFile || sourcePath.trim()) && (
+                  <div className="oa-source-choice" role="status">
+                    <AppIcon name="check" size={16} />
+                    <span>{zipFile ? `已选择：${zipFile.name}（${formatFileSize(zipFile.size)}）` : '已填写本机源码路径'}</span>
+                    <button type="button" className="oa-btn oa-btn-xs" disabled={wizardBusy} onClick={() => selectSourcePath('')}>清除选择</button>
                   </div>
                 )}
-              </div>
+                <div className="oa-field">
+                  <label className="oa-label" htmlFor={`${formId}-source-path`}>或输入源码文件夹 / ZIP 的完整路径</label>
+                  <input id={`${formId}-source-path`} ref={sourcePathInputRef} className="oa-input oa-mono"
+                    value={sourcePath} placeholder="/路径/my-app 或 /路径/application.zip" disabled={wizardBusy}
+                    onChange={event => selectSourcePath(event.currentTarget.value)} />
+                </div>
+              </section>
             </form>
           )}
 
