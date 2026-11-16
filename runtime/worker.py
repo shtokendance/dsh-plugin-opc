@@ -100,6 +100,28 @@ def compute_change_diffs(source: Path, changes: list[dict]) -> dict[str, str]:
     return diffs
 
 
+def save_draft_files(path: Path, drafts: dict) -> None:
+    # A cancelled worker must leave the previous complete checkpoint readable.
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix="draft-files-", mode="w", encoding="utf-8", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump(drafts, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+            tmp.close()
+            tmp_path.replace(path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+
+def retain_proposal_changes(root: Path, proposal: dict) -> None:
+    draft_path = root / "draft_files.json"
+    drafts = load_json_if_exists(draft_path, {})
+    for change in proposal.get("changes", []):
+        if change.get("id") and change.get("path") and isinstance(change.get("content"), str):
+            drafts[change["id"]] = dict(change)
+    save_draft_files(draft_path, drafts)
+
+
 def resolve_and_enrich_proposal(
     root: Path,
     proposal: dict,
@@ -114,9 +136,11 @@ def resolve_and_enrich_proposal(
     d.require(isinstance(proposal, dict) and isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "提案缺少摘要")
     for field in ("issues", "changes", "unresolved"):
         d.require(isinstance(proposal.get(field, []), list), "提案列表字段无效：" + field)
-    for issue in proposal.get("issues", []):
-        d.require(isinstance(issue, dict) and all(issue.get(key) for key in ("id", "evidence", "impact", "recommendation")),
-                  "每项问题都需要 ID、证据、影响和建议")
+    for index, issue in enumerate(proposal.get("issues", [])):
+        d.require(isinstance(issue, dict), f"issues[{index}] 必须是对象")
+        missing = [key for key in ("id", "evidence", "impact", "recommendation")
+                   if not isinstance(issue.get(key), str) or not issue[key].strip()]
+        d.require(not missing, f"issues[{index}] 缺少有效字段：{', '.join(missing)}")
     d.require(isinstance(proposal.get("contract"), dict), "业务契约必须是对象")
     source = root / "review/source"
     draft_files = load_json_if_exists(root / "draft_files.json", {})
@@ -129,10 +153,12 @@ def resolve_and_enrich_proposal(
                 if change.get("path") and staged.get("path") and change["path"] != staged["path"]:
                     raise ValueError("汇总提案的文件路径与分项提案不一致")
                 change = {**staged, **change}
-            elif change.get("path"):
+            elif not change.get("id") and change.get("path"):
                 by_path = next((v for v in draft_files.values() if isinstance(v, dict) and v.get("path") == change["path"]), None)
                 if by_path:
                     change = {**by_path, **change}
+            if "content" not in change:
+                raise ValueError(f"changes[{idx}] 没有文件内容。请使用已暂存的修改 ID，或先单独暂存该文件")
         if isinstance(change, dict) and not change.get("id"):
             change = {**change, "id": change.get("path") or f"change-{idx + 1}"}
         if isinstance(change, dict) and not change.get("reason"):
@@ -435,7 +461,7 @@ def main(body):
         if cid in drafts and drafts[cid].get("path") != change["path"]:
             raise ValueError("同一修改 ID 不能对应不同文件")
         drafts[cid] = change
-        d.save(draft_path, drafts)
+        save_draft_files(draft_path, drafts)
         return {"staged": cid, "path": change["path"], "message": f"File proposal recorded: {cid}. Source is unchanged."}
     if action == "validate":
         proposal = body["proposal"]
@@ -458,6 +484,7 @@ def main(body):
             )
             diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
             _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
+            retain_proposal_changes(root, proposal)
             return {
                 "valid": True,
                 "proposal": proposal,
@@ -481,13 +508,7 @@ def main(body):
             )
             d.bundle_work(temp_path / "approved", temp_path / "bundle")
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")
-        # Persist staged files for future rounds
-        draft_path = root / "draft_files.json"
-        drafts = load_json_if_exists(draft_path, {})
-        for ch in proposal.get("changes", []):
-            if isinstance(ch, dict) and ch.get("id") and ch.get("path") and isinstance(ch.get("content"), str):
-                drafts[ch["id"]] = dict(ch)
-        d.save(draft_path, drafts)
+        retain_proposal_changes(root, proposal)
         diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
         _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
         return {

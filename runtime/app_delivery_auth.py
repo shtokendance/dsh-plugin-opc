@@ -9,18 +9,25 @@ def resolve_authentication(contract):
     rules = contract.get('auth_rules', [])
     if not isinstance(rules, list):
         raise ValueError('auth_rules 必须是数组')
-    for rule in rules:
-        if not isinstance(rule, dict) or rule.get('target') not in {'api', 'page'} or not rule.get('evidence'):
-            raise ValueError('认证规则必须声明 api/page 范围与源码证据')
-        if not isinstance(rule.get('auth'), dict) or rule['auth'].get('type') not in {'none', 'header', 'bearer'}:
-            raise ValueError('认证规则必须使用已确认的 none/header/bearer 方式')
+    for index, rule in enumerate(rules):
+        field = f'auth_rules[{index}]'
+        if not isinstance(rule, dict):
+            raise ValueError(f'{field} 必须是对象')
+        if rule.get('target') not in ('api', 'page'):
+            raise ValueError(f'{field}.target 必须填写 api 或 page')
+        if not rule.get('evidence'):
+            raise ValueError(f'{field}.evidence 缺少源码证据，请引用读取工具返回的 文件:行号')
+        if not isinstance(rule.get('auth'), dict) or rule['auth'].get('type') not in ('none', 'header', 'bearer'):
+            raise ValueError(f'{field}.auth.type 必须使用已确认的 none/header/bearer 方式')
         if not isinstance(rule.get('evidence'), list) or not all(isinstance(e, str) and e for e in rule['evidence']):
-            raise ValueError('认证规则 evidence 必须是源码位置数组')
-        location = rule.get('path') or rule.get('prefix')
-        if not isinstance(location, str) or not location.startswith('/'):
-            raise ValueError('认证规则路径必须以 / 开头')
+            raise ValueError(f'{field}.evidence 必须是源码位置数组')
+        for key in ('path', 'prefix'):
+            if key in rule and (not isinstance(rule[key], str) or not rule[key].startswith('/')):
+                raise ValueError(f'{field}.{key} 必须是以 / 开头的路径')
         if bool(rule.get('path')) == bool(rule.get('prefix')):
-            raise ValueError('认证规则必须选择精确 path 或路径 prefix')
+            raise ValueError(f'{field} 必须选择精确 path 或路径 prefix')
+        if 'method' in rule and not isinstance(rule['method'], str):
+            raise ValueError(f'{field}.method 必须是字符串')
     for target, key in [('api', 'apis'), ('page', 'pages')]:
         for item in contract.get(key, []):
             matches = [r for r in rules if r['target'] == target
