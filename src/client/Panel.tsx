@@ -156,6 +156,11 @@ const css = `
   overflow-y: auto;
   padding: 16px;
 }
+.opc-panel-main-apps {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 
 /* Common UI Elements */
 .opc-panel button, .opc-panel input, .opc-panel select, .opc-panel textarea {
@@ -964,7 +969,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
         <button onClick={action(() => api.cancelLogin())} style={{ marginTop: 6 }}>取消登录</button>
       </div>}
       {state.loginError && <p role="alert" className="error">{state.loginError.message}</p>}
-    </div> : <main className="opc-panel-main">
+    </div> : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
       {/* Apps View */}
       {kind === 'apps' && context.applicationContextId && (
         <AppsPanel

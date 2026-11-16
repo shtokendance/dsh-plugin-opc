@@ -63,7 +63,6 @@ function registerPanels(ctx: Context): void {
     appStorage: (...args) => unwrap(wire.appStorage!(...args)),
     appRecheck: (...args) => unwrap(wire.appRecheck!(...args)),
     appUpdateConfig: (...args) => unwrap(wire.appUpdateConfig!(...args)),
-    appDelete: (...args) => unwrap(wire.appDelete!(...args)),
     appRollback: (...args) => unwrap(wire.appRollback!(...args)),
     appDownload: (...args) => unwrap(wire.appDownload!(...args)),
     appSaveDownload: (...args) => unwrap(wire.appSaveDownload(...args)),
