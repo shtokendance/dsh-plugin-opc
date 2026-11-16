@@ -1015,21 +1015,23 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           <button
             type="button"
             className={`s2-kb-tab ${kbSearchMode === 'doc' ? 'active' : ''}`}
+            aria-pressed={kbSearchMode === 'doc'}
             onClick={() => {
               setKbSearchMode('doc')
               setTimeout(() => docInputRef.current?.focus(), 50)
             }}
           >
-            <span>📄 文档全文检索模式</span>
+            <AppIcon name="file" size={14} /><span>文档全文检索模式</span>
             <span className="s2-badge-rec">推荐</span>
             {hits.length > 0 && <span className="badge badge-ok" style={{ fontSize: 10, padding: '1px 5px' }}>{hits.length}</span>}
           </button>
           <button
             type="button"
-            className={`s2-kb-tab ${kbSearchMode === 'kb' ? 'active' : ''}`}
+            className={`s2-kb-tab s2-kb-tab-catalog ${kbSearchMode === 'kb' ? 'active' : ''}`}
+            aria-pressed={kbSearchMode === 'kb'}
             onClick={() => setKbSearchMode('kb')}
           >
-            <span>📂 知识库目录筛选模式</span>
+            <AppIcon name="folder" size={14} /><span>知识库目录筛选模式</span>
             {q && <span className="badge badge-warn" style={{ fontSize: 10, padding: '1px 5px' }}>已筛选</span>}
           </button>
         </div>
