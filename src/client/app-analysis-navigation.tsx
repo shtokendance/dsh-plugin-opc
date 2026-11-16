@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { AppDeliveryJob, OpcApi } from './api.ts'
+import { workbenchKind } from './Workbench.tsx'
 
 export type PrepareAnalysisNavigation = (
   origin: string,
@@ -36,7 +37,7 @@ export function registerAnalysisNavigation(ctx: Context, api: OpcApi): PrepareAn
       open: () => {
         if (pending !== sessionId || currentSession() !== sessionId) return
         pending = undefined
-        try { sidebar?.openTab('opc-apps') }
+        try { sidebar?.openTab(workbenchKind, { params: { opcPage: 'apps' } }) }
         catch { /* The task can still be opened manually in this session. */ }
       },
     }),

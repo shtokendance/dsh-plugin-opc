@@ -2,10 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import type { AuthState, OpcApi, Resource } from './api.ts'
 import { AppsPanel } from './AppsPanel.tsx'
+import { AppIcon } from './AppIcon.tsx'
 import type { PrepareAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { OpcSettingsPanel } from './OpcSettingsPanel.tsx'
-export type PanelKind = 'knowledge' | 'skills' | 'mcp' | 'apps'
-import { labels as titles, OpcIcon } from './branding.tsx'
+import { WorkbenchHome, WorkbenchNavigation, type PanelKind } from './Workbench.tsx'
+import { workbenchStyles } from './workbenchStyles.ts'
 
 const css = `
 .opc-panel {
@@ -31,21 +32,15 @@ const css = `
   flex-wrap: wrap;
   flex-shrink: 0;
 }
-.header-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
 .brand-icon-wrap {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 28px;
   height: 28px;
-  background: #edf4fc;
+  background: #eff6ff;
   border-radius: 6px;
-  border: 1px solid #d0e2f9;
+  border: 1px solid #dbeafe;
   flex-shrink: 0;
 }
 .brand-text {
@@ -95,7 +90,7 @@ const css = `
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #245c9f;
+  background: #2563eb;
   color: #ffffff;
   font-size: 10px;
   font-weight: 700;
@@ -166,20 +161,20 @@ const css = `
 .opc-panel button, .opc-panel input, .opc-panel select, .opc-panel textarea {
   font: inherit;
   border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 6px 10px;
   color: inherit;
   background: #ffffff;
 }
 .opc-panel button { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
 .opc-panel button:disabled { opacity: 0.5; cursor: not-allowed; }
-.opc-panel button.primary { background: #245c9f; color: #ffffff; border-color: #245c9f; font-weight: 500; }
-.opc-panel button.primary:hover:not(:disabled) { background: #1d4b82; border-color: #1d4b82; }
+.opc-panel button.primary { background: #2563eb; color: #ffffff; border-color: #2563eb; font-weight: 500; }
+.opc-panel button.primary:hover:not(:disabled) { background: #1d4ed8; border-color: #1d4ed8; }
 .opc-panel .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .opc-panel input { min-width: 0; flex: 1; }
-.opc-panel .notice { background: #edf4fc; border-left: 3px solid #245c9f; padding: 10px 12px; margin: 10px 0; border-radius: 0 6px 6px 0; font-size: 12px; }
+.opc-panel .notice { background: #eff6ff; border-left: 3px solid #2563eb; padding: 10px 12px; margin: 10px 0; border-radius: 0 6px 6px 0; font-size: 12px; }
 .opc-panel .error { background: #fef2f2; border-left: 3px solid #dc2626; padding: 10px 12px; margin: 10px 0; border-radius: 0 6px 6px 0; color: #991b1b; font-size: 12px; overflow-wrap: anywhere; }
-.opc-panel .badge { font-size: 11px; color: #245c9f; background: #edf4fc; border: 1px solid #d0e2f9; padding: 2px 7px; border-radius: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; }
+.opc-panel .badge { font-size: 11px; color: #2563eb; background: #eff6ff; border: 1px solid #dbeafe; padding: 2px 7px; border-radius: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; }
 .opc-panel .badge-ok { color: #059669; background: #ecfdf5; border-color: #a7f3d0; }
 .opc-panel .badge-warn { color: #d97706; background: #fffbeb; border-color: #fde68a; }
 .opc-panel .badge-danger { color: #dc2626; background: #fef2f2; border-color: #fecaca; }
@@ -219,12 +214,12 @@ const css = `
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: #edf4fc;
-  border: 1px solid #d0e2f9;
+  background: #eff6ff;
+  border: 1px solid #dbeafe;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #245c9f;
+  color: #2563eb;
   font-size: 14px;
   flex-shrink: 0;
 }
@@ -613,7 +608,7 @@ const css = `
   display: inline-flex;
   align-items: center;
   text-decoration: none;
-  color: #245c9f;
+  color: #2563eb;
   font-size: 12px;
   padding: 5px 10px;
   border: 1px solid #cbd5e1;
@@ -811,14 +806,25 @@ const css = `
 }
 `
 
-export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
+export function Panel({ api, sessionId, requestedPage, navigationRevision, visible = true, prepareAnalysisNavigation }: {
   api: OpcApi
   sessionId: string
-  kind: PanelKind
+  requestedPage?: PanelKind
+  navigationRevision: number
+  visible?: boolean
   prepareAnalysisNavigation?: PrepareAnalysisNavigation
 }) {
+  const [kind, setKind] = useState<PanelKind>(requestedPage ?? 'home')
+  const [appsOpened, setAppsOpened] = useState(requestedPage === 'apps')
+  const pageChosen = useRef(Boolean(requestedPage))
   const [state, setState] = useState<AuthState>({ signedIn: false, loginInProgress: false, context: null })
-  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [q, setQ] = useState('')
+  const [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const [queries, setQueries] = useState({ knowledge: '', skills: '' })
+  const searchKind = kind === 'knowledge' || kind === 'skills' ? kind : null
+  const q = searchKind ? queries[searchKind] : ''
+  const setQ = (value: string) => {
+    if (searchKind) setQueries(previous => ({ ...previous, [searchKind]: value }))
+  }
   const [items, setItems] = useState<Resource[]>([]), [hits, setHits] = useState<Record<string, unknown>[]>([])
   const [kb, setKb] = useState(''), [doc, setDoc] = useState(''), [filter, setFilter] = useState('all')
   const [services, setServices] = useState<Record<string, unknown>[]>([])
@@ -833,6 +839,17 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
   const topSearchCardRef = useRef<HTMLDivElement>(null)
   const pin = state.pinnedScopes?.[sessionId] ?? ''
   const epoch = useRef(0)
+
+  const selectPage = useCallback((page: PanelKind) => {
+    pageChosen.current = true
+    setShowSettings(false)
+    setKind(page)
+    if (page === 'apps') setAppsOpened(true)
+  }, [])
+
+  useEffect(() => {
+    if (requestedPage) selectPage(requestedPage)
+  }, [requestedPage, navigationRevision, selectPage])
 
   const run = useCallback(async (action: () => Promise<void>) => {
     const version = epoch.current
@@ -850,8 +867,9 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
     return () => controller.abort()
   }, [api])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (query = q) => {
     const version = epoch.current
+    if (kind === 'home') return
     if (kind === 'apps') {
       setAppsRefreshTrigger(prev => prev + 1)
       return
@@ -860,13 +878,13 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
       const body = JSON.parse(await api.listMcpServices())
       if (version === epoch.current) setServices(body.data?.services ?? body.services ?? [])
     } else {
-      const rows = JSON.parse(await (kind === 'skills' ? api.listSkillsCatalog(q) : api.listKnowledgeBases(q)))
+      const rows = JSON.parse(await (kind === 'skills' ? api.listSkillsCatalog(query) : api.listKnowledgeBases(query)))
       if (version === epoch.current) setItems(rows)
     }
   }, [api, kind, q])
 
   useEffect(() => {
-    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setBusy(false); setError('')
+    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setFilter('all'); setBusy(false); setError('')
     if (state.signedIn) void run(load)
   }, [state.context?.contextId, sessionId, kind])
 
@@ -877,28 +895,32 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
   }, [state.signedIn, kind, state.opcConfig?.appDomainRoot, state.opcConfig?.defaultPort, state.opcConfig?.platformBaseUrl])
 
   const context = state.context
+  const appContextId = context?.applicationContextId
+  useEffect(() => {
+    if (pageChosen.current || !visible || !state.signedIn || !appContextId || !api.appJobByAnalysisSession) return
+    let current = true
+    void api.appJobByAnalysisSession(sessionId, appContextId).then(raw => {
+      if (!current || pageChosen.current) return
+      const linked = JSON.parse(raw) as { id?: string; status?: string } | null
+      if (linked?.id && linked.status !== 'verified' && linked.status !== 'cancelled') selectPage('apps')
+    }).catch(() => {})
+    return () => { current = false }
+  }, [api, appContextId, selectPage, sessionId, state.signedIn, visible])
+
   const action = (fn: () => Promise<void>) => () => void run(fn)
 
   return <section className="opc-panel">
-    <style>{css}</style>
+    <style>{css + workbenchStyles}</style>
     {/* Title Bar with Integrated Auth, Space Switcher, Refresh, Settings, and Logout */}
     <header className="opc-header-bar">
-      <div className="header-brand">
-        <div className="brand-icon-wrap">
-          <OpcIcon size={18} />
-        </div>
-        <div className="brand-text">
-          <h2 className="brand-title">{titles[kind]}</h2>
-          <span className="brand-sub" title={state.opcConfig?.platformBaseUrl || 'OPC 工作空间'}>OPC 工作空间</span>
-        </div>
-      </div>
+      <WorkbenchNavigation kind={kind} onSelect={selectPage} />
       <div className="header-actions">
         {state.signedIn && context && <>
           <div className="user-pill" title={context.email ? `${context.displayName || context.subject} (${context.email})` : (context.displayName || context.subject)}>
             <span className="user-avatar">{((context.displayName || context.subject)[0] || 'U').toUpperCase()}</span>
             <span className="user-name">{context.displayName || context.subject}</span>
           </div>
-          {<select
+          {kind !== 'home' && kind !== 'apps' && !showSettings && <select
             aria-label="企业空间"
             className="space-select"
             value={context.tenant}
@@ -909,7 +931,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
               <option key={space.id} value={space.id}>{space.name}</option>
             ))}
           </select>}
-          {!showSettings && <button
+          {!showSettings && kind !== 'home' && <button
             className="btn-header"
             disabled={busy}
             onClick={action(load)}
@@ -949,7 +971,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
       </main>
     ) : !state.signedIn || !context ? <div className="gate">
       <h3>连接 OPC 工作空间</h3>
-      <p>登录后使用 OPC 知识库、技能与企业应用。企业身份与 DSH 个人账号独立。</p>
+      <p>登录后即可使用企业知识库、技能、MCP 和应用。</p>
       {state.opcConfig?.platformBaseUrl && (
         <p style={{ fontSize: 12, color: '#64748b', marginTop: -8, marginBottom: 16, wordBreak: 'break-all' }}>
           当前平台网关：<code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{state.opcConfig.platformBaseUrl}</code>
@@ -970,16 +992,20 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
       </div>}
       {state.loginError && <p role="alert" className="error">{state.loginError.message}</p>}
     </div> : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
+      {kind === 'home' && <WorkbenchHome onSelect={selectPage} />}
       {/* Apps View */}
-      {kind === 'apps' && context.applicationContextId && (
-        <AppsPanel
-          key={context.applicationContextId + sessionId}
-          api={api}
-          sessionId={sessionId}
-          contextId={context.applicationContextId}
-          prepareAnalysisNavigation={prepareAnalysisNavigation}
-          refreshSignal={appsRefreshTrigger}
-        />
+      {appsOpened && appContextId && (
+        <div className="opc-workbench-apps" hidden={kind !== 'apps'}>
+          <AppsPanel
+            key={appContextId + ':' + sessionId}
+            api={api}
+            sessionId={sessionId}
+            contextId={appContextId}
+            active={visible && kind === 'apps'}
+            prepareAnalysisNavigation={prepareAnalysisNavigation}
+            refreshSignal={appsRefreshTrigger}
+          />
+        </div>
       )}
 
       {/* Knowledge Base View - 方案二：双Tab独立微型栏 */}
@@ -1079,7 +1105,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
               <button
                 type="button"
                 className="btn-sm"
-                onClick={() => { setQ(''); void run(load) }}
+                onClick={() => { setQ(''); void run(() => load('')) }}
               >
                 清除
               </button>
@@ -1161,7 +1187,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
           {q ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span className="badge badge-warn">已按“{q}”过滤</span>
-              <button className="btn-sm" onClick={() => { setQ(''); void run(load) }}>清除过滤</button>
+              <button className="btn-sm" onClick={() => { setQ(''); void run(() => load('')) }}>清除过滤</button>
             </div>
           ) : (
             <span style={{ fontSize: 11, color: '#94a3b8' }}>点击卡片「检索此库」可直接定位搜索</span>
@@ -1227,7 +1253,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
             className="s2-command-bar"
             onSubmit={e => { e.preventDefault(); void run(load) }}
           >
-            <span className="s2-command-icon">⚡</span>
+            <span className="s2-command-icon"><AppIcon name="search" size={15} /></span>
             <input
               aria-label="搜索技能"
               className="s2-command-input"
@@ -1239,7 +1265,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
               <button
                 type="button"
                 className="s2-command-clear"
-                onClick={() => { setQ(''); void run(load) }}
+                onClick={() => { setQ(''); void run(() => load('')) }}
                 title="清除"
               >
                 ✕
@@ -1352,7 +1378,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
 
           {/* 指令栏 */}
           <div className="s2-command-bar">
-            <span className="s2-command-icon">🔌</span>
+            <span className="s2-command-icon"><AppIcon name="search" size={15} /></span>
             <input
               aria-label="搜索 MCP 服务"
               className="s2-command-input"
@@ -1455,7 +1481,7 @@ export function Panel({ api, sessionId, kind, prepareAnalysisNavigation }: {
         </>
       })()}
 
-      {kind !== 'apps' && !busy && (kind === 'mcp' ? services.length === 0 : items.length === 0) && (
+      {kind !== 'home' && kind !== 'apps' && !busy && (kind === 'mcp' ? services.length === 0 : items.length === 0) && (
         <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94a3b8' }}>
           <p style={{ fontSize: 14, margin: '0 0 6px' }}>当前没有可见资源</p>
           <p style={{ fontSize: 12 }}>可切换企业空间或点击右上角刷新目录</p>
@@ -1472,7 +1498,7 @@ function McpDebug({ api, serviceId, toolName, contextId }: { api: OpcApi; servic
   const [args, setArgs] = useState('{}'), [result, setResult] = useState(''), [pending, setPending] = useState(false)
   const generation = useRef(0)
   useEffect(() => { generation.current++; setResult(''); setPending(false); return () => { generation.current++ } }, [contextId])
-  return <details style={{ marginTop: 6 }}><summary style={{ fontSize: 12, color: '#245c9f', cursor: 'pointer' }}>在线调试调用</summary><textarea style={{ width: '100%', minHeight: 60, marginTop: 6, fontSize: 12 }} aria-label={`${toolName} JSON 参数`} value={args} onChange={e => setArgs(e.target.value)}/><button style={{ marginTop: 6 }} disabled={pending} onClick={() => {
+  return <details style={{ marginTop: 6 }}><summary style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>在线调试调用</summary><textarea style={{ width: '100%', minHeight: 60, marginTop: 6, fontSize: 12 }} aria-label={`${toolName} JSON 参数`} value={args} onChange={e => setArgs(e.target.value)}/><button style={{ marginTop: 6 }} disabled={pending} onClick={() => {
     const current = generation.current; setPending(true); setResult('')
     void api.invokeMcpTool(serviceId, toolName, args, contextId).then(value => { if (current === generation.current) setResult(value) }, error => { if (current === generation.current) setResult(String(error)) }).finally(() => { if (current === generation.current) setPending(false) })
   }}>{pending ? '执行中…' : '调用'}</button>{result && <pre style={{ marginTop: 6, fontSize: 11, background: '#f1f5f9', padding: 8, borderRadius: 4, overflowX: 'auto' }}>{result}</pre>}</details>

@@ -447,12 +447,14 @@ export function AppsPanel({
   sessionId,
   contextId,
   refreshSignal = 0,
+  active = true,
   prepareAnalysisNavigation,
 }: {
   api: OpcApi
   sessionId: string
   contextId: string
   refreshSignal?: number
+  active?: boolean
   prepareAnalysisNavigation?: PrepareAnalysisNavigation
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>('list')
@@ -461,9 +463,9 @@ export function AppsPanel({
   const restoredLinkedJob = useRef(false)
   const analysisViewActive = useRef(false)
   useEffect(() => {
-    analysisViewActive.current = viewMode === 'wizard'
+    analysisViewActive.current = active && viewMode === 'wizard'
     return () => { analysisViewActive.current = false }
-  }, [viewMode])
+  }, [active, viewMode])
   const beginAnalysisNavigation = () =>
     prepareAnalysisNavigation?.(sessionId, contextId, () => analysisViewActive.current)
   const [loadingList, setLoadingList] = useState(true)

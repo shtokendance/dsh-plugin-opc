@@ -7,8 +7,8 @@ export const appsCss = `
   --oa-muted: #64748b;
   --oa-line: #e2e8f0;
   --oa-line-strong: #cbd5e1;
-  --oa-accent: #245c9f;
-  --oa-accent-soft: #edf4fc;
+  --oa-accent: var(--opc-blue, #2563eb);
+  --oa-accent-soft: var(--opc-blue-soft, #eff6ff);
   --oa-accent-line: #bfdbfe;
   --oa-ok: #059669;
   --oa-ok-soft: #ecfdf5;
@@ -62,7 +62,7 @@ export const appsCss = `
   justify-content: center;
   gap: 6px;
   padding: 7px 14px;
-  border-radius: 10px;
+  border-radius: var(--opc-control-radius, 8px);
   border: 1px solid var(--oa-line-strong);
   background: var(--oa-panel);
   color: var(--oa-ink);
@@ -85,8 +85,8 @@ export const appsCss = `
   border-color: var(--oa-accent);
 }
 .opc-apps-root .oa-btn-primary:hover:not(:disabled) {
-  background: #1d4b82;
-  border-color: #1d4b82;
+  background: #1d4ed8;
+  border-color: #1d4ed8;
 }
 .opc-apps-root .oa-btn-danger {
   color: var(--oa-danger);
@@ -200,7 +200,7 @@ export const appsCss = `
   gap: 12px;
   min-width: 0;
   padding: 18px;
-  border-radius: 14px;
+  border-radius: var(--opc-card-radius, 12px);
   border: 1px solid var(--oa-line);
   background: var(--oa-panel);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
@@ -321,7 +321,7 @@ export const appsCss = `
   flex-direction: column;
   min-height: calc(100vh - 150px);
   border: 1px solid var(--oa-line);
-  border-radius: 14px;
+  border-radius: var(--opc-card-radius, 12px);
   background: var(--oa-panel);
   overflow: hidden;
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
@@ -416,7 +416,7 @@ export const appsCss = `
   margin: 0 auto;
   background: var(--oa-panel);
   border: 1px solid var(--oa-line);
-  border-radius: 14px;
+  border-radius: var(--opc-card-radius, 12px);
   padding: 18px;
   display: flex;
   flex-direction: column;
@@ -563,9 +563,9 @@ export const appsCss = `
   align-items: center;
   gap: 4px;
   padding: 4px;
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--oa-line);
-  background: var(--oa-paper);
+  background: #f1f5f9;
   flex-wrap: wrap;
 }
 .oa-segmented-btn {
@@ -617,7 +617,7 @@ export const appsCss = `
   flex: 1;
   min-height: 460px;
   border: 1px solid var(--oa-line);
-  border-radius: 14px;
+  border-radius: var(--opc-card-radius, 12px);
   background: var(--oa-panel);
   overflow: hidden;
 }

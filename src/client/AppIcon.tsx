@@ -6,6 +6,10 @@ export type AppIconName =
   | 'list'
   | 'cloud'
   | 'chevronRight'
+  | 'chevronDown'
+  | 'book'
+  | 'home'
+  | 'search'
   | 'table'
   | 'plug'
   | 'shield'
@@ -77,6 +81,14 @@ export function AppIcon({
       return <svg {...common}><path d="M6.5 18a3.5 3.5 0 0 1-.4-7 5.7 5.7 0 0 1 11.2-1.2 4.2 4.2 0 0 1-.5 8.2Z" /></svg>
     case 'chevronRight':
       return <svg {...common}><path d="m9 6 6 6-6 6" /></svg>
+    case 'chevronDown':
+      return <svg {...common}><path d="m6 9 6 6 6-6" /></svg>
+    case 'book':
+      return <svg {...common}><path d="M12 21V5m0 0C9 3 6 3 3 4v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Z" /></svg>
+    case 'home':
+      return <svg {...common}><path d="m3 10 9-7 9 7v10h-6v-6H9v6H3Z" /></svg>
+    case 'search':
+      return <svg {...common}><circle cx="10.5" cy="10.5" r="6" /><path d="m15 15 5 5" /></svg>
     case 'table':
       return (
         <svg {...common}>

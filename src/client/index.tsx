@@ -1,14 +1,34 @@
 import { registerMentions } from './mentions.ts'
 import { labels, OpcIcon } from './branding.tsx'
-import React from 'react'
+import React, { useEffect } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { contribution } from '../remote-contract.ts'
-import { Panel, type PanelKind } from './Panel.tsx'
+import { Panel } from './Panel.tsx'
 import type { OpcApi } from './api.ts'
 import { registerAnalysisNavigation } from './app-analysis-navigation.tsx'
+import { modules, readWorkbenchPage, workbenchKind, workbenchTitle, type ModuleKind } from './Workbench.tsx'
+
+type WorkbenchBodyProps = Pick<React.ComponentProps<typeof Panel>, 'api' | 'sessionId' | 'prepareAnalysisNavigation'> &
+  PropsRuntime<'sidebar.right.pane.tab'>
+
+function WorkbenchBody({ useTabInfo, ...props }: WorkbenchBodyProps) {
+  const { tab } = useTabInfo()
+  return <Panel {...props} requestedPage={readWorkbenchPage(tab.navigation.params)} navigationRevision={tab.navigation.revision} visible={tab.visible} />
+}
+
+function LegacyModule({ useTabInfo, legacyPage }: PropsRuntime<'sidebar.right.pane.tab'> & { legacyPage: ModuleKind }) {
+  const { tab } = useTabInfo()
+  useEffect(() => {
+    if (!tab.visible) return
+    tab.actions.openTab(workbenchKind, { replaceTab: true, params: { opcPage: legacyPage } })
+    tab.actions.close()
+  }, [tab.actions, tab.visible, legacyPage])
+  return <p role="status">正在打开 OPC 工作台…</p>
+}
 
 type WireApi = { [K in keyof OpcApi]: NonNullable<OpcApi[K]> extends (...args: infer A) => Promise<infer R> ? (...args: A) => Promise<RemoteResult<R>> : OpcApi[K] }
 declare module '@deepseek-ai/dsh-typert-protocol' { interface TypertRemoteNamespaceMap { opc: WireApi } }
@@ -88,10 +108,25 @@ function registerPanels(ctx: Context): void {
   }
   ctx.inject(['inputTriggers'], child => registerMentions(child, api))
   const prepareAnalysisNavigation = registerAnalysisNavigation(ctx, api)
-  for (const [index, kind] of (['knowledge', 'skills', 'mcp', 'apps'] as const).entries()) {
-    const id = `dsh-plugin-opc/${kind}`
-    ctx.effect(() => ctx.sidebarRightTabs.register({ id, kind: `opc-${kind}`, priority: 'extension', title: () => labels[kind], guide: [{ id: `opc-${kind}`, order: 10 + index, icon: OpcIcon, title: () => labels[kind], description: () => 'OPC 工作空间' }] }))
-    ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {labels[kind]}</>)))
-    ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: id, inject: sessionId => ({ api, sessionId: String(sessionId), kind, prepareAnalysisNavigation }) }, Panel)))
+  const id = 'dsh-plugin-opc/workbench'
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id, kind: workbenchKind, priority: 'extension', title: () => workbenchTitle,
+    guide: [{ id: workbenchKind, order: 10, icon: OpcIcon, title: () => workbenchTitle, description: () => '知识库、技能、MCP 与应用' }],
+  }))
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register(
+    { name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {workbenchTitle}</>,
+  )))
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab', key: id,
+    inject: sessionId => ({ api, sessionId: String(sessionId), prepareAnalysisNavigation }),
+  }, WorkbenchBody)))
+  for (const { kind } of modules) {
+    const legacyId = `dsh-plugin-opc/${kind}`
+    ctx.effect(() => ctx.sidebarRightTabs.register({
+      id: legacyId, kind: `opc-${kind}`, priority: 'extension', title: () => labels[kind],
+    }))
+    ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+      name: 'sidebar.right.pane.tab', key: legacyId, inject: () => ({ legacyPage: kind }),
+    }, LegacyModule)))
   }
 }
