@@ -6,8 +6,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type LlmFailure } from '@deepseek-ai/dsh-llm'
 import { AppDelivery, type AppDocument, fingerprint, verificationCredentialFields, worker } from './app-delivery.ts'
+import { proposalParameters } from './app-proposal-schema.ts'
 
 function loadBundledSkillText(relativePath: string): string {
   const fromSrc = fileURLToPath(new URL(`../../runtime/app_delivery/${relativePath}`, import.meta.url))
@@ -108,7 +109,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       : parent?.model.current() ?? parent?.session.requestHeader()?.config
     const appCtxId = delivery.core.auth.contexts.applicationContextId!
     const isRepair = Boolean(job.failedRevision || job.failedSnapshot || job.failureContext || job.analysisMode === 'repair')
-    const instructions = buildInstructions(isRepair)
+    const port = job.port ?? 8080
+    const instructions = buildInstructions(isRepair) + `\n本任务容器端口已锁定为 ${port}。每次调用 opc_delivery_submit 都要提交完整契约，包括 contract.runtime 的 language、version 和数字 port=${port}。修正单个字段时，合并到完整提案后再提交。issues 每项要有 id、evidence、impact、recommendation；auth_rules 每项要有 target=api/page、path 或 prefix、auth 和源码位置数组 evidence。接口和页面可以用空数组交给后端合并。大文件单独暂存，汇总只引用变更 ID。`
     const prevPlan = compactPreviousPlan(job.proposal)
     const taskInstruction = isRepair
       ? '部署失败专项修复：读取实际失败制品与原始源码，对比旧修改，修复根因。不能把本轮当成配置确认，不能无依据复用错误代码。'
@@ -187,16 +189,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             return JSON.stringify(res)
           } }))
         child.tools.register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
-          parameters: {
-            summary: { type: 'string' },
-            issues: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            unresolved: { type: 'array', items: { type: 'string' } },
-            changes: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            contract: { type: 'object', additionalProperties: true },
-            decisions: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            four_step_report: { type: 'object', additionalProperties: true },
-            proposal: { type: 'string' },
-          }, output,
+          parameters: proposalParameters(port), output,
           async execute(args) {
             if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
             if (repeatedProposal || validationErrors.length >= 6) throw new Error('技术方案连续校验未通过，已停止自动重试')
@@ -206,17 +199,20 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             try {
               const { proposal, ...fields } = args
               candidate = proposal ? JSON.parse(proposal) : { issues: [], unresolved: [], changes: [], decisions: [], ...fields }
+              if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('提案必须是完整的 JSON 对象')
               if (candidate && typeof candidate.contract === 'object' && candidate.contract !== null) {
                 candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
               }
               await delivery.submit(job, root, candidate!, abort)
             } catch (error) {
-              const detail = await worker({ action: 'redact_feedback', root, text: String(error).slice(0, 1000) }, abort)
+              const message = error instanceof Error ? error.message : String(error)
+              const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 1000) }, abort)
               validationErrors.push(detail)
               job.analysisFailure = detail
               if (candidate) {
                 const rej = fingerprint({
                   contract: candidate.contract,
+                  issues: candidate.issues,
                   changes: candidate.changes,
                   unresolved: candidate.unresolved,
                   decisions: candidate.decisions,
@@ -249,6 +245,14 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     }
     const analysis = handle ?? await ctx.agents.create({
       ...options, sessionId: randomUUID() as never, meta: { cwd: root },
+    })
+    const turnOutcome: { failure?: LlmFailure; truncated?: boolean } = {}
+    const getTurnOutcome = () => ({ ...turnOutcome })
+    const stopObserving = ctx.on('session/event', (session, event) => {
+      if (session !== analysis.agent.session || event.type !== 'turn/end') return
+      const reason = event.data.reason
+      turnOutcome.failure = reason.kind === 'error' ? reason.error : undefined
+      turnOutcome.truncated = reason.kind === 'max-tokens'
     })
     const cancel = () => { analysis.agent.cancel({ kind: 'user' }) }
     abort.addEventListener('abort', cancel, { once: true })
@@ -300,7 +304,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         description: job.description ?? '',
         slug: job.slug,
         base_url: job.url,
-        container_port: job.port ?? 8080,
+        container_port: port,
         available_resource_metadata: filteredRes?.resources ?? [],
         user_answers: job.feedbackHistory || feedback,
         feedback,
@@ -313,26 +317,33 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         task: taskInstruction,
       })
       for (let attempt = 0; attempt < 3; attempt++) {
-        let transientError = ''
+        turnOutcome.failure = undefined
+        turnOutcome.truncated = false
+        let errorMessage = ''
         try {
           send(prompt)
           await analysis.agent.whenIdle()
         } catch (err) {
           if (signal.aborted || (abort.aborted && !repeatedProposal)) throw err
-          const msg = err instanceof Error ? err.message : String(err)
-          if (/(?:timed?\s*out|timeout|connection\s*reset|ECONNRESET|ETIMEDOUT|fetch failed|network|terminated)/i.test(msg)) {
-            transientError = msg.slice(0, 1000)
-          } else if (!repeatedProposal) {
-            throw err
-          }
+          errorMessage = err instanceof Error ? err.message : String(err)
         }
         if (job.status === 'review') return
         if (repeatedProposal || validationErrors.length >= 6) {
           throw new Error(validationErrors.at(-1) ?? '技术方案连续校验未通过，已停止自动重试')
         }
         abort.throwIfAborted()
-        const reason = transientError || validationErrors.at(-1) || 'AI 尚未提交完整提案'
+        const { failure, truncated } = getTurnOutcome()
+        const providerMessage = failure?.message ?? errorMessage
+        const badToolJson = /tool input is invalid JSON/i.test(providerMessage)
+        const invalidOutput = badToolJson || truncated
+        const networkError = /(?:timed?\s*out|timeout|connection\s*reset|ECONNRESET|ETIMEDOUT|fetch failed|network|terminated)/i.test(providerMessage)
+        const reason = invalidOutput
+          ? (badToolJson ? '模型返回的工具参数不是合法 JSON' : '模型输出达到长度上限')
+          : providerMessage
+            ? await worker({ action: 'redact_feedback', root, text: providerMessage.slice(0, 1000) }, abort)
+            : validationErrors.at(-1) || 'AI 尚未提交完整提案'
         job.analysisFailure = reason
+        if (providerMessage && !invalidOutput && !networkError) throw new Error(reason)
         if (attempt === 2) {
           if (/(?:timed?\s*out|timeout|AI.*超时)/i.test(reason)) {
             throw new Error('AI 分析超时，原源码和已有回答已保留。请重试分析。')
@@ -342,13 +353,18 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           }
           throw new Error(reason)
         }
-        job.events.push(transientError
-          ? `🔄 AI 服务暂时中断，正在继续准备（${attempt + 1}/2）`
+        job.events.push(invalidOutput
+          ? `🔄 ${reason}，正在缩短提交内容后重试（${attempt + 1}/2）`
+          : networkError ? `🔄 AI 服务暂时中断，正在继续准备（${attempt + 1}/2）`
           : `🔄 正在修正应用准备检查（${attempt + 1}/2）`)
         delivery.core.emit('change')
-        prompt = `继续当前任务，保留原业务和用户选择。待处理的技术反馈：${reason}。复用已暂存的文件修改，只修正未通过的部分，再用 opc_delivery_submit 提交完整结构化结果。`
+        prompt = `继续当前任务，保留原业务和用户选择。待处理的技术反馈：${reason}。只修正未通过的字段，再提交完整契约，必须保留 runtime 并填写数字 port=${port}。大文件先单独暂存，changes 只传 ID、路径和理由；apis/pages 只传定制项，其余让后端合并。用结构化参数调用 opc_delivery_submit，不要在一个字符串中嵌套整份 JSON。`
       }
-    } finally { abort.removeEventListener('abort', cancel); await analysis.dispose() }
+    } finally {
+      stopObserving()
+      abort.removeEventListener('abort', cancel)
+      await analysis.dispose()
+    }
   }
   ctx.effect(() => () => { delivery.analyze = undefined })
 }

@@ -107,7 +107,7 @@ export function worker(input: AppDocument, signal?: AbortSignal): Promise<any> {
     child.on('close', () => {
       if (exceeded) return reject(new Error('分析输出超过限制，请缩小读取范围'))
       try { const result = JSON.parse(stdout); if (!result.ok) throw new Error(result.error); resolve(result.value) }
-      catch (error) { reject(new Error(stdout ? String(error) : `应用准备工具未能启动：${stderr.slice(0, 500)}`)) }
+      catch (error) { reject(new Error(stdout ? (error instanceof Error ? error.message : String(error)) : `应用准备工具未能启动：${stderr.slice(0, 500)}`)) }
     })
     child.stdin.on('error', () => {})
     child.stdin.end(JSON.stringify(input))
@@ -638,11 +638,9 @@ export class AppDelivery {
     const controller = new AbortController()
     const analysisSignal = AbortSignal.any([scope.signal, controller.signal])
     this.analyses.set(id, controller)
-    if (!resume) {
+    if (!resume && job.status !== 'failed') {
       job.analysisFailure = undefined
-      if (!job.proposal) {
-        await rm(join(root, 'draft_files.json'), { force: true }).catch(() => {})
-      }
+      if (!job.proposal) await rm(join(root, 'draft_files.json'), { force: true }).catch(() => {})
     }
     if (!resume && (options?.mode === 'repair' || (job.revision && (job.published || job.status === 'failed')))) {
       job.analysisMode = 'repair'
@@ -835,7 +833,14 @@ export class AppDelivery {
       throw new Error('unresolved 必须为数组')
     }
     const hasQuestions = Boolean(proposal.unresolved.length || proposal.contract.unresolved?.length)
-    if (!hasQuestions && proposal.contract.runtime?.port !== (job.port ?? 8080)) throw new Error('模型不能静默改变用户选择的容器端口')
+    if (!hasQuestions) {
+      const expectedPort = job.port ?? 8080
+      const actualPort = proposal.contract.runtime?.port
+      const field = '交付契约 runtime.port'
+      if (actualPort == null) throw new Error(`${field} 缺失。请补全 runtime 并填写已锁定的数字 ${expectedPort}`)
+      if (!Number.isInteger(actualPort)) throw new Error(`${field} 必须是已锁定的整数 ${expectedPort}，不能提交字符串或其他类型`)
+      if (actualPort !== expectedPort) throw new Error(`${field} 填了 ${actualPort}，与已锁定的容器端口 ${expectedPort} 不一致。模型不能静默改变用户选择的容器端口`)
+    }
     const validated = await worker({
       action: 'validate',
       root,
