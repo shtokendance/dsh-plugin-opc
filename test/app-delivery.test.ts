@@ -703,6 +703,7 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     const expected = contexts.applicationContextId!
 
     let publishedDockerfile = ''
+    let publishedMounts: { container_path: string; resource_id?: string }[] = []
     let publishedAppConfig: { key: string; value: string }[] = []
     let publishVersion = 0
     let deployed: Record<string, any> = {}
@@ -710,9 +711,11 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     delivery.platform = async (path, _expected, options) => {
       contexts.captureApplication(_expected)
       if (path === '/check-slug') return { available: true, app_url: url }
+      if (path === '/resources') return { resources: [{ id: 'swarm-local', type: 'docker-volume' }, { id: 'swarm-other', type: 'docker-volume' }] }
       if (path === '/publish') {
         publishVersion++
         publishedDockerfile = String(options?.form?.get('dockerfile_content') ?? '')
+        publishedMounts = JSON.parse(String(options?.form?.get('storage_mounts') ?? '[]'))
         publishedAppConfig = JSON.parse(String(options?.form?.get('app_config') ?? '[]'))
         return { app_url: url, version: publishVersion, status: 'building' }
       }
@@ -785,15 +788,26 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
       /指向应用容器自己/
     )
 
-    // Confirming local connection and leaving API_SECRET blank auto-fills original secret from source
-    await publishConfirmed(delivery, created.id, {
+    // The exact volume selection is bound to the confirmation and travels with the multipart declaration.
+    const path = ready.proposal.contract.storage_mounts[0].container_path
+    const payload = {
       artifactHash: ready.artifactHash,
       version_note: 'v1 初始发布',
+      storageBindings: { [path]: 'swarm-local' },
       config: [
         { key: 'API_SECRET', value: '' },
         { key: 'DATABASE_URL', value: 'postgres://localhost:5432/app', local_connection_confirmed: true },
       ],
-    }, expected)
+    }
+    const confirmation = await delivery.confirmDeployment(created.id, payload, expected)
+    await assert.rejects(delivery.publish(created.id, {
+      ...payload, confirmationToken: confirmation.confirmationToken, storageBindings: { [path]: 'swarm-other' },
+    }, expected), /最终确认不一致/)
+    await assert.rejects(delivery.confirmDeployment(created.id, {
+      ...payload, storageBindings: { [path]: 'missing-pool' },
+    }, expected), /存储资源不可用/)
+    await delivery.publish(created.id, { ...payload, confirmationToken: confirmation.confirmationToken }, expected)
+    assert.equal(publishedMounts.find(mount => mount.container_path === path)?.resource_id, 'swarm-local')
     assert.ok(publishedDockerfile.includes('FROM python:3.11-alpine'), 'dockerfile_content should be uploaded on publish')
     assert.equal(publishedAppConfig.find(c => c.key === 'API_SECRET')?.value, 'orig-secret-123', 'original secret value should be auto-filled on publish')
 

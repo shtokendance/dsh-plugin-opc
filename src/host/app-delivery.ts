@@ -31,7 +31,7 @@ export interface DeliveryJob {
   modelSelection?: { provider: string; model: string; reasoningEffort?: string }
   confirmationToken?: string
   checks?: AppDocument[]; published?: boolean; failureContext?: string; configFingerprint?: string
-  configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; local_connection_confirmed?: boolean }[]; versionNote: string }
+  configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; local_connection_confirmed?: boolean }[]; versionNote: string; storageBindings?: Record<string, string> }
   configKeys?: string[]; resourceIds?: string[]; failedSnapshot?: AppDocument; pagesVerified?: boolean
 }
 
@@ -786,6 +786,7 @@ export class AppDelivery {
       job.configDraft = {
         artifactHash: input.artifactHash,
         rows: rows.map(row => ({ key: row.key, resource_id: row.resource_id, local_connection_confirmed: row.local_connection_confirmed === true })),
+        storageBindings: readStorageBindings(input.storageBindings),
         versionNote: typeof input.versionNote === 'string' ? input.versionNote.slice(0, 1024) : '',
       }
       job.confirmationToken = undefined
@@ -972,8 +973,32 @@ export class AppDelivery {
       if (!c.resource_id && !c.value && origValues[c.key]) return { ...c, value: origValues[c.key], value_source: 'original' }
       return { ...c, value_source: c.resource_id ? 'resource' : 'manual' }
     })
+    const storageBindings = readStorageBindings(input.storageBindings)
+    const declaredMounts: AppDocument[] = job.proposal!.contract.storage_mounts ?? []
+    if (Object.keys(storageBindings).some(path => !declaredMounts.some(mount => mount.container_path === path))) {
+      throw new Error('存储选择必须对应已确认的持久化目录')
+    }
+    if (input.storageBindings !== undefined && declaredMounts.some(mount => !storageBindings[mount.container_path])) {
+      const existing: AppDocument[] = job.upgrade
+        ? (await this.platform('/' + job.slug, expected)).storage_mounts ?? []
+        : []
+      if (declaredMounts.some(mount => !storageBindings[mount.container_path] &&
+        !existing.some(old => old.container_path === mount.container_path))) {
+        throw new Error('请为新增持久化目录选择 Platform 卷资源')
+      }
+    }
     const ids = [...new Set(configs.flatMap(c => c.resource_id ? [c.resource_id] : []))].sort()
-    const available: AppDocument[] = ids.length ? (await this.platform('/resources', expected)).resources ?? [] : []
+    const available: AppDocument[] = ids.length || Object.keys(storageBindings).length
+      ? (await this.platform('/resources', expected)).resources ?? [] : []
+    for (const [path, id] of Object.entries(storageBindings)) {
+      if (!available.some(resource => resource.id === id && resource.type === 'docker-volume')) {
+        throw new Error(`持久化目录的存储资源不可用：${path}`)
+      }
+    }
+    const storageMounts = declaredMounts.map(mount => {
+      const { resource_id: _resource, storage_node_id: _node, ...declaration } = mount
+      return { ...declaration, resource_id: storageBindings[mount.container_path] }
+    })
     for (const item of configs) {
       if (item.resource_id && (item.value || !available.some(r => r.id === item.resource_id && r.env_keys?.includes(item.key)))) {
         throw new Error(`配置项的资源选择无效：${item.key}`)
@@ -994,8 +1019,8 @@ export class AppDelivery {
       required: declarations.some(item => item.key === c.key && item.required) }))
     const note = input.versionNote ?? input.version_note
     const versionNote = typeof note === 'string' && note.trim() ? note.trim() : job.versionNote ?? ''
-    const digest = fingerprint({ hashes: job.hashes, url: job.url, port: job.port, bindings, ids, versionNote })
-    return { bindings, configs, ids, versionNote, digest }
+    const digest = fingerprint({ hashes: job.hashes, url: job.url, port: job.port, bindings, ids, storageMounts, versionNote })
+    return { bindings, configs, ids, storageMounts, versionNote, digest }
   }
   async confirmDeployment(id: string, input: AppDocument, expected: string) {
     const scope = this.scope(expected)
@@ -1022,7 +1047,7 @@ export class AppDelivery {
       if (job.status !== 'ready' || input.artifactHash !== fingerprint(job.hashes) || !job.proposal || !job.revision) throw new Error('交付包已变化，请重新核对')
       if (job.proposal.contract.runtime?.port !== (job.port ?? 8080)) throw new Error('交付包端口与已确认端口不一致，请重新分析并打包')
       await worker({ action: 'validate_credential_references', root, contract: job.proposal.contract }, scope.signal)
-      const { bindings, configs, ids, versionNote, digest } = await this.deploymentConfiguration(job, input, expected)
+      const { bindings, configs, ids, storageMounts, versionNote, digest } = await this.deploymentConfiguration(job, input, expected)
       if (!job.confirmationToken || input.confirmationToken !== job.confirmationToken || (await this.credentials.read(`confirm-${id}`)).digest !== digest) {
         throw new Error('交付包、配置或资源与最终确认不一致，请重新确认')
       }
@@ -1055,7 +1080,7 @@ export class AppDelivery {
         version_note: versionNote,
         app_config: JSON.stringify(bindings),
         resource_ids: JSON.stringify(ids),
-        storage_mounts: JSON.stringify(contract.storage_mounts ?? []),
+        storage_mounts: JSON.stringify(storageMounts),
       })) form.append(key, String(value))
       scope.assertCurrent()
       await this.credentials.write(`publish-config-${requestId}`, { rows: JSON.stringify(configs) })
@@ -1623,4 +1648,14 @@ export class AppDelivery {
       throw error
     })
   }
+}
+
+function readStorageBindings(input: unknown): Record<string, string> {
+  if (input === undefined) return {}
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('存储配置格式无效')
+  const entries = Object.entries(input)
+  if (entries.some(([path, id]) => !path.startsWith('/') || typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(id))) {
+    throw new Error('存储配置格式无效')
+  }
+  return Object.fromEntries(entries)
 }

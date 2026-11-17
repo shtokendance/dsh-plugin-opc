@@ -95,7 +95,8 @@ export function AppDeliveryConfig({
 
   const renderConfigCard = (item: AppConfigItem, index: number) => {
     const original = originals.find(o => o.key === item.key)
-    const candidates = resources.filter(r => matches(original || item, r))
+    const candidates = resources.filter(r => matches(original || item, r) &&
+      (r.type !== 'minio-app-storage' || configs.some(config => /^(S3_|AWS_ENDPOINT_URL_S3$)/.test(config.key) || config.resource_id === r.id)))
     const selected = resources.find(r => r.id === item.resource_id)
     const changed = !!item.resource_id || (!!original && item.value !== original.value)
     const hasOriginalFileSource = original?.value_source === 'original' || original?.has_original_value
@@ -199,7 +200,15 @@ export function AppDeliveryConfig({
                   aria-label={`使用${resource.name}替换 ${item.key}`}
                   disabled={item.resource_id === resource.id}
                   className={`oa-btn oa-btn-sm ${item.resource_id === resource.id ? 'oa-btn-accent-soft' : ''}`}
-                  onClick={() => update(index, { ...item, value: '', value_source: 'resource', resource_id: resource.id })}
+                  onClick={() => {
+                    if (resource.type === 'minio-app-storage') {
+                      onChange(configs.map(config => resource.env_keys.includes(config.key)
+                        ? { ...config, value: '', value_source: 'resource', resource_id: resource.id }
+                        : config))
+                      return
+                    }
+                    update(index, { ...item, value: '', value_source: 'resource', resource_id: resource.id })
+                  }}
                 >
                   {item.resource_id === resource.id ? '✓ ' : '改用 '}
                   {resource.name}
