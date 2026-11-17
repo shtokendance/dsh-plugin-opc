@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { AppConfigItem, AppDeliveryJob, OpcApi, ResourceSummary } from './api.ts'
-import { AppDeliveryConfig, needsConnectionDecision } from './AppDeliveryConfig.tsx'
+import type { AppDeliveryJob, OpcApi } from './api.ts'
 import { AppIcon, type AppIconName } from './AppIcon.tsx'
 
 type DimensionMeta = {
@@ -181,9 +180,7 @@ export function AppDeliveryReview({
   onNextStep,
   onInvalidate,
   beginAnalysisNavigation,
-  initialFeedback = '',
   repairMode = false,
-  onlineResources = [],
   footerMode = 'external',
   onStepStateChange,
 }: {
@@ -194,26 +191,19 @@ export function AppDeliveryReview({
   onReady: (job: AppDeliveryJob) => void
   onReplaceSource?: () => void
   onNextStep?: () => void
-  onlineResources?: ResourceSummary[]
   onInvalidate?: () => void
   beginAnalysisNavigation?: () => ((job: AppDeliveryJob) => void) | undefined
-  initialFeedback?: string
   repairMode?: boolean
   footerMode?: 'inline' | 'external'
-  onStepStateChange?: (state: { canContinue: boolean; running: boolean; triggerNext: () => void }) => void
+  onStepStateChange?: (state: { jobId: string; canContinue: boolean; triggerNext: () => void } | null) => void
 }) {
   const [job, setJob] = useState<AppDeliveryJob | null>(null)
-  const [feedback, setFeedback] = useState(initialFeedback)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
   const [handoff, setHandoff] = useState<{ prompt: string; source_path?: string } | null>(null)
   const [copied, setCopied] = useState(false)
-  const [configs, setConfigs] = useState<AppConfigItem[]>([])
-  const [configEditing, setConfigEditing] = useState(false)
-  const configurationVersion = useRef('')
-  const preparing = useRef('')
   const inFlight = useRef(false)
-  const inputRef = useRef<HTMLTextAreaElement>(null)
   const currentRef = useRef(job)
   currentRef.current = job
 
@@ -226,30 +216,7 @@ export function AppDeliveryReview({
   }
 
   const accept = (result: AppDeliveryJob | null) => {
-    if (!result) return
-    setJob(result)
-    if (result.status === 'ready' && result.artifactHash && result.artifactHash !== configurationVersion.current) {
-      configurationVersion.current = result.artifactHash
-      const origConfigs = result.runtime_configs || []
-      setConfigs(origConfigs)
-      if (api.appConfigDraft) {
-        void api
-          .appConfigDraft(jobId, contextId)
-          .then(raw => {
-            const draft = JSON.parse(raw)
-            if (draft?.rows?.length && draft.artifactHash === result.artifactHash) {
-              setConfigs(
-                origConfigs.map(c => {
-                  const row = draft.rows.find((r: any) => r.key === c.key)
-                  return row ? { ...c, ...row } : c
-                }),
-              )
-            }
-          })
-          .catch(() => {})
-      }
-      setConfigEditing(false)
-    }
+    if (result) setJob(result)
   }
 
   useEffect(() => {
@@ -258,9 +225,12 @@ export function AppDeliveryReview({
       if (inFlight.current) return
       try {
         const result = await loadJob()
-        if (alive && !inFlight.current) accept(result)
+        if (alive && !inFlight.current) {
+          accept(result)
+          setLoadError('')
+        }
       } catch (e) {
-        if (alive) setError(String(e))
+        if (alive) setLoadError(String(e))
       }
     }
     void poll()
@@ -272,60 +242,26 @@ export function AppDeliveryReview({
   }, [jobId, contextId])
 
   const plan = job?.proposal
-  const ready = job?.status === 'ready'
+  const ready = job?.status === 'ready' && Boolean(job.artifactHash) && !plan?.unresolved?.length
   const running = busy || ['importing', 'analyzing', 'preparing'].includes(job?.status || '')
-  const questions = plan?.unresolved || []
+  const questions = !running && job?.status === 'review' ? plan?.unresolved || [] : []
   const text = (q: unknown) => (typeof q === 'string' ? q : JSON.stringify(q))
-  const hasOrigKeySet = new Set(
-    (job?.runtime_configs || []).filter(c => c.value_source === 'original' || c.has_value).map(c => c.key),
-  )
-  const problemKeys = new Set((job?.configuration_problems || []).map(p => p.key))
-  const configProblems = configs.filter(
-    c =>
-      (c.required && !c.value && !c.resource_id && !hasOrigKeySet.has(c.key)) ||
-      needsConnectionDecision(c) ||
-      (c.key === 'PORT' && c.value && c.value !== String(job?.port || 8080)),
-  )
-  const needsConfig = ready && (configEditing || problemKeys.size > 0 || configProblems.length > 0)
-  const canContinue = ready && !running && !questions.length && !needsConfig && !feedback.trim() && !error
-  const activeError = error || job?.error || ''
+  const activeError = error || loadError || job?.error || ''
+  const canContinue = ready && !running && !activeError
+  const chatActive = Boolean(job?.analysisChatActive && job.analysisSessionId)
 
-  const sendFeedback = async (customText?: string, resume = false) => {
-    const content = (customText ?? feedback).trim()
-    if ((!content && !resume) || running || inFlight.current) return
+  const resumeAnalysis = async () => {
+    if (!api.appAnalyzeWithMode || running || inFlight.current) return
     const navigate = beginAnalysisNavigation?.()
     inFlight.current = true
     setBusy(true)
     setError('')
     try {
-      const mode = resume ? 'resume' : repairMode || job?.analysis_mode === 'repair' || job?.analysisMode === 'repair' ? 'repair' : 'analysis'
-      const raw = api.appAnalyzeWithMode
-        ? await api.appAnalyzeWithMode(jobId, resume ? '' : content, sessionId, mode, contextId)
-        : await api.appAnalyze(jobId, content, sessionId, contextId)
-      if (navigate) {
-        const updated = JSON.parse(raw) as AppDeliveryJob | null
-        if (updated?.id === jobId) navigate(updated)
-      }
+      const raw = await api.appAnalyzeWithMode(jobId, '', sessionId, 'resume', contextId)
+      const result = JSON.parse(raw) as AppDeliveryJob
+      accept(result)
+      navigate?.(result)
       onInvalidate?.()
-      preparing.current = ''
-      configurationVersion.current = ''
-      setJob(j =>
-        j
-          ? {
-              ...j,
-              status: 'analyzing',
-              error: '',
-              discoveryReport: (j.proposal?.discovery_report as any) || j.discoveryReport,
-              proposal: undefined,
-              artifactHash: undefined,
-              preparationChecks: undefined,
-              conversation: resume
-                ? j.conversation
-                : [...(j.conversation || []), { role: 'user', text: content, revision: j.revision_count || j.revisionCount || 1 }],
-            }
-          : j,
-      )
-      if (customText === undefined) setFeedback('')
       setHandoff(null)
       setCopied(false)
     } catch (e) {
@@ -335,8 +271,6 @@ export function AppDeliveryReview({
       setBusy(false)
     }
   }
-
-  const retry = () => void sendFeedback()
 
   const prepare = async () => {
     const pHash = currentRef.current?.proposalHash
@@ -354,8 +288,7 @@ export function AppDeliveryReview({
       const raw = await api.appPrepare(jobId, hash, contextId)
       const result = JSON.parse(raw) as AppDeliveryJob
       accept(result)
-      if (result.status === 'analyzing') preparing.current = ''
-      else if (result.status !== 'ready') setError(result.error || '改造未完成，请让 AI 调整方案')
+      if (result.status !== 'ready') setError(result.error || '交付包生成未完成')
     } catch (e) {
       setError(String(e))
     } finally {
@@ -364,58 +297,17 @@ export function AppDeliveryReview({
     }
   }
 
-  const awaitingDiscoveryConfirm = job?.status === 'review' && !!plan && !questions.length && !activeError && !running
+  const checkingProposal = job?.status === 'review' && !!plan && !questions.length && !activeError && !running
   const discovery = (plan?.discovery_report as any) || job?.discoveryReport
   const transformation = (plan?.transformation_report as any) || job?.transformationReport
-  const autoPreparedHashRef = useRef('')
   const revNum = job?.revision_count ?? job?.revisionCount ?? 1
-
-  useEffect(() => {
-    const hasUserReply = (job?.conversation || []).some(m => m.role === 'user')
-    const pHash = job?.proposalHash || ''
-    if (awaitingDiscoveryConfirm && revNum > 1 && hasUserReply && pHash && autoPreparedHashRef.current !== pHash) {
-      autoPreparedHashRef.current = pHash
-      void prepare()
-    }
-  }, [awaitingDiscoveryConfirm, revNum, job?.proposalHash, job?.conversation])
-
-  const saveConfig = async () => {
-    if (!api.appSaveConfigDraft) return
-    inFlight.current = true
-    setBusy(true)
-    setError('')
-    try {
-      await api.appSaveConfigDraft(
-        jobId,
-        JSON.stringify({
-          artifactHash: job?.artifactHash,
-          rows: configs.map(c => ({
-            key: c.key,
-            value: c.value || '',
-            resource_id: c.resource_id,
-            local_connection_confirmed: Boolean(c.local_connection_confirmed),
-          })),
-          versionNote: job?.versionNote || '',
-        }),
-        contextId,
-      )
-      const result = await loadJob()
-      accept(result)
-      setConfigEditing(false)
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      inFlight.current = false
-      setBusy(false)
-    }
-  }
 
   const next = async () => {
     if (!canContinue) return
     setBusy(true)
     try {
       const result = await loadJob()
-      if (!result || result.status !== 'ready' || result.artifactHash !== job?.artifactHash || result.configuration_problems?.length) {
+      if (!result || result.status !== 'ready' || result.artifactHash !== job?.artifactHash || result.proposal?.unresolved?.length) {
         accept(result)
         throw new Error('应用或配置已变化，请先处理当前问题。')
       }
@@ -430,29 +322,28 @@ export function AppDeliveryReview({
 
   const nextRef = useRef(next)
   nextRef.current = next
+  useEffect(() => () => onStepStateChange?.(null), [onStepStateChange])
   useEffect(() => {
     onStepStateChange?.({
+      jobId,
       canContinue: Boolean(canContinue),
-      running: Boolean(running),
       triggerNext: () => void nextRef.current(),
     })
-  }, [canContinue, running, job?.artifactHash, onStepStateChange])
+  }, [jobId, canContinue, onStepStateChange])
 
   const title = running
-    ? 'AI 正在检查和改造'
+    ? job?.status === 'preparing' ? '正在生成交付包' : 'AI 正在检查和改造'
     : activeError
       ? '应用准备暂停'
       : questions.length
         ? `有 ${questions.length} 件事需要你决定`
-        : awaitingDiscoveryConfirm
-          ? '第一步分析完成，请确认分析结果后执行改造'
-          : needsConfig
-            ? '补齐连接配置，就可以继续'
-            : ready
-              ? '交付包已生成，可以核对部署内容'
-              : '正在读取应用'
+        : checkingProposal
+          ? '改造方案已通过校验'
+          : ready
+            ? '交付包已生成，可以核对部署内容'
+            : '正在读取应用'
 
-  const conversation = job?.conversation || []
+  const summaries = (job?.conversation || []).filter(message => message.role === 'assistant')
   const events = job?.events || []
   const isRejected = (event: string) => event.startsWith('提案校验未通过')
   const isTechnicalEvent = (event: string) => isRejected(event) || event.includes('完整提案尚未通过')
@@ -468,7 +359,7 @@ export function AppDeliveryReview({
     const el = chatScrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
-  }, [events.length, conversation.length, running])
+  }, [events.length, summaries.length, running])
 
   useEffect(() => {
     const el = eventsScrollRef.current
@@ -476,7 +367,6 @@ export function AppDeliveryReview({
     el.scrollTop = el.scrollHeight
   }, [events.length, running])
 
-  const resourcesPool = [...new Map([...onlineResources, ...(job?.resources || [])].map(r => [r.id, r])).values()]
 
   return (
     <section className="oa-review-shell">
@@ -497,7 +387,7 @@ export function AppDeliveryReview({
                 ? 'var(--oa-accent)'
                 : activeError
                   ? 'var(--oa-danger)'
-                  : questions.length || needsConfig
+                  : questions.length
                     ? 'var(--oa-warn)'
                     : ready
                       ? 'var(--oa-ok)'
@@ -510,39 +400,30 @@ export function AppDeliveryReview({
               <span className="oa-pill">第 {revNum} 轮 · {job?.name || '准备应用'}</span>
             </div>
             <p className="oa-hint" style={{ margin: '3px 0 0' }}>
-              {running
-                ? 'AI 会自动处理启动与打包等技术问题；需要你决定时会像聊天一样向你确认。'
-                : ready && !needsConfig
-                  ? '已完成改造和交付包检查。服务器构建、启动与业务访问将在部署时验证。'
-                  : '直接在下方对话框回答或提出想法，无需阅读或审核代码。'}
+              {chatActive
+                ? '在左侧分析会话用文字回复或补充要求。密码和密钥请在部署配置中填写。'
+                : ready
+                  ? '交付包检查已完成。服务器构建、启动与业务访问将在部署时验证。'
+                  : null}
             </p>
           </div>
         </div>
       </header>
 
-      <div ref={chatScrollRef} className="oa-review-stream" aria-label="讨论记录">
-        {conversation.map((m, i) =>
-          m.role === 'user' ? (
-            <article key={i} className="oa-msg-row user">
-              <span className="oa-hint" style={{ marginBottom: 4 }}>你</span>
-              <div className="oa-bubble-user">{m.text}</div>
-            </article>
-          ) : (
-            <article key={i} className="oa-msg-row">
-              <div className="oa-avatar-badge">
-                <AppIcon name="sparkle" size={14} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="oa-hint" style={{ marginBottom: 4 }}>
-                  AI 改造助手 · 第 {m.revision || revNum} 轮{(m.revision || 1) > 1 ? '确认与改造' : '分析'}
-                </div>
-                <div className="oa-bubble">{renderFormattedSummary(m.text)}</div>
-              </div>
-            </article>
-          ),
-        )}
+      <div ref={chatScrollRef} className="oa-review-stream" aria-label="应用改造进度与结果">
+        {summaries.map((m, i) => (
+          <article key={i} className="oa-msg-row">
+            <div className="oa-avatar-badge">
+              <AppIcon name="sparkle" size={14} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="oa-hint" style={{ marginBottom: 4 }}>第 {m.revision || revNum} 轮改造摘要</div>
+              <div className="oa-bubble">{renderFormattedSummary(m.text)}</div>
+            </div>
+          </article>
+        ))}
 
-        {!conversation.length && plan?.summary && (
+        {!summaries.length && plan?.summary && (
           <article className="oa-msg-row">
             <div className="oa-avatar-badge">
               <AppIcon name="sparkle" size={14} />
@@ -791,7 +672,7 @@ export function AppDeliveryReview({
             </div>
             <div className="oa-bubble" aria-label="需要你决定的事项">
               <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--oa-warn)' }}>
-                需要你确认以下问题（可点击选项填入下方对话框，或直接打字回答）：
+                {job?.analysisChatStarting ? '正在恢复左侧分析会话' : '请在左侧分析会话回答以下问题'}
               </div>
               {questions.map((q, i) => {
                 const question = text(q)
@@ -804,66 +685,17 @@ export function AppDeliveryReview({
                     </div>
                     {decision?.impact && <div className="oa-hint">{decision.impact}</div>}
                     {!!decision?.options?.length && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
-                        {decision.options.map(opt => {
-                          const label = decisionOptionText(opt)
-                          return (
-                            <button
-                              key={label}
-                              type="button"
-                              disabled={running}
-                              className="oa-btn oa-btn-sm oa-btn-accent-soft"
-                              onClick={() => {
-                                setFeedback(f => {
-                                  const allOptLabels = decision.options.map(decisionOptionText)
-                                  if (questions.length === 1 && (!f.trim() || allOptLabels.includes(f.trim()))) return label
-                                  const prefix = `问题 ${i + 1}：`
-                                  return [...f.split('\n').filter(line => line.trim() && !line.startsWith(prefix)), prefix + label].join('\n')
-                                })
-                                inputRef.current?.focus()
-                              }}
-                            >
-                              {label}
-                            </button>
-                          )
-                        })}
-                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {decision.options.map(option => <li key={decisionOptionText(option)}>{decisionOptionText(option)}</li>)}
+                      </ul>
                     )}
                   </article>
                 )
               })}
+              {!chatActive && !job?.analysisChatStarting && api.appAnalyzeWithMode && (
+                <button type="button" className="oa-btn oa-btn-sm" onClick={() => void resumeAnalysis()}>恢复左侧分析会话</button>
+              )}
             </div>
-          </div>
-        )}
-
-        {needsConfig && (
-          <div className="oa-msg-row">
-            <div className="oa-avatar-badge warn">
-              <AppIcon name="sliders" size={14} />
-            </div>
-            <section className="oa-bubble">
-              <h4 style={{ margin: 0, fontWeight: 600 }}>需要你填写或选择的配置</h4>
-              <p className="oa-hint" style={{ margin: 0 }}>这些值只在本机处理，不会放入 AI 对话。其他原配置保持不变。</p>
-              {job?.configuration_problems?.map(p => (
-                <p key={p.key} style={{ margin: 0, color: 'var(--oa-warn)' }}>{p.reason}</p>
-              ))}
-              <AppDeliveryConfig
-                compact
-                configs={configs.filter(c => problemKeys.has(c.key) || configProblems.some(p => p.key === c.key))}
-                originals={job?.runtime_configs || []}
-                resources={resourcesPool}
-                onChange={items => {
-                  setConfigs(all => all.map(c => items.find(i => i.key === c.key) || c))
-                  setConfigEditing(true)
-                  onInvalidate?.()
-                }}
-              />
-              <div>
-                <button type="button" className="oa-btn oa-btn-primary oa-btn-sm" disabled={running || !!configProblems.length} onClick={() => void saveConfig()}>
-                  确认配置并检查
-                </button>
-              </div>
-            </section>
           </div>
         )}
 
@@ -889,9 +721,9 @@ export function AppDeliveryReview({
                 {job?.status === 'failed' ? ' 原始源码和你的选择已保留，可以继续准备。' : ' 请重试当前操作。'}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {job?.status === 'failed' && job.failureStage !== 'preparation' && (
-                  <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void sendFeedback('', true)}>
-                    继续准备
+                {job?.status === 'failed' && api.appAnalyzeWithMode && (
+                  <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void resumeAnalysis()}>
+                    {job.failureStage === 'preparation' ? '让 AI 继续修复' : '继续准备'}
                   </button>
                 )}
                 {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
@@ -915,26 +747,14 @@ export function AppDeliveryReview({
           </div>
         )}
 
-        {awaitingDiscoveryConfirm && !needsConfig && (
-          <div className="oa-msg-row">
-            <div className="oa-avatar-badge">
-              <AppIcon name="sparkle" size={14} />
-            </div>
-            <div className="oa-bubble oa-alert-info" style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <div style={{ flex: 1, minWidth: 220 }}>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>第一步深度分析已完成，请确认后进入第二步改造</div>
-                <div className="oa-hint" style={{ marginTop: 2 }}>
-                  核对上方分析结果无误后，点击右侧按钮开始执行改造与生成应用技能；如需调整策略，可在下方对话框直接输入要求。
-                </div>
-              </div>
-              <button type="button" className="oa-btn oa-btn-primary" disabled={running} onClick={() => void prepare()}>
-                确认分析结果，执行第二步改造
-              </button>
-            </div>
+        {checkingProposal && !chatActive && (
+          <div className="oa-bubble oa-alert-info">
+            <div>当前方案已通过校验，可以生成交付包。</div>
+            <button type="button" className="oa-btn oa-btn-sm" onClick={() => void prepare()}>生成交付包</button>
           </div>
         )}
 
-        {ready && !needsConfig && !questions.length && !activeError && !running && (
+        {ready && !questions.length && !activeError && !running && (
           <div className="oa-msg-row">
             <div className="oa-avatar-badge ok">
               <AppIcon name="check" size={14} />
@@ -942,18 +762,13 @@ export function AppDeliveryReview({
             <div className="oa-bubble oa-alert-ok">
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>第二步：改造与第三步应用技能生成已完成</div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>应用改造和交付包检查已完成</div>
                   <div className="oa-hint" style={{ marginTop: 2 }}>
-                    {transformation?.headline ||
-                      (feedback.trim()
-                        ? '请先发送输入框中的补充要求，或清空输入后继续。'
-                        : '可以点击右下角「下一步」按钮进入部署核对，或在下方对话框继续提要求。')}
+                    {transformation?.headline || '可以核对要部署的应用内容和配置。'}
                   </div>
                 </div>
-                {footerMode === 'external' ? (
-                  <span className="oa-pill oa-pill-ok">✓ 已就绪 · 请点击右下角「下一步」</span>
-                ) : (
-                  <button type="button" className="oa-btn oa-btn-primary" disabled={!canContinue} onClick={() => void next()}>
+                {footerMode === 'inline' && canContinue && (
+                  <button type="button" className="oa-btn oa-btn-primary" onClick={() => void next()}>
                     下一步：核对部署内容
                   </button>
                 )}
@@ -1058,39 +873,11 @@ export function AppDeliveryReview({
               </button>
             )}
           </div>
-          <span className="oa-hint">{running ? '正在处理，完成后可以继续发送' : '发出前可修改；原源码始终保留'}</span>
-        </div>
-
-        <div style={{ border: '1px solid var(--oa-line-strong)', borderRadius: 12, padding: 10, background: 'var(--oa-panel)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <textarea
-            ref={inputRef}
-            aria-label="给 AI 的回答或要求"
-            value={feedback}
-            onChange={e => setFeedback(e.target.value)}
-            onKeyDown={e => {
-              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && feedback.trim() && !running) {
-                e.preventDefault()
-                retry()
-              }
-            }}
-            rows={2}
-            style={{ width: '100%', resize: 'vertical', border: 'none', outline: 'none', padding: 0, background: 'transparent', fontSize: 13 }}
-            placeholder={
-              repairMode
-                ? '补充故障现象；将检查失败制品并验证修改。请勿输入密码。'
-                : ready
-                  ? '还有想调整的地方？直接输入告诉 AI（例如：保留原来的数据库）…'
-                  : '告诉 AI 你的选择或想法（例如：保留原来的数据库；请解释这样修改的影响。请勿输入密码）…'
-            }
-          />
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            <span className="oa-hint">
-              {repairMode ? '失败修复模式：检查通过后仍需重新部署验证' : '支持直接输入要求或点选上方快捷按钮 · ⌘/Ctrl + Enter 发送'}
-            </span>
-            <button type="button" className="oa-btn oa-btn-primary oa-btn-sm" disabled={running || !feedback.trim()} onClick={retry}>
-              发送
+          {chatActive && job?.analysisSessionId !== sessionId && (
+            <button type="button" className="oa-btn oa-btn-sm" onClick={() => job && beginAnalysisNavigation?.()?.(job)}>
+              打开左侧分析会话
             </button>
-          </div>
+          )}
         </div>
       </div>
     </section>

@@ -715,10 +715,6 @@ export const appsCss = `
   align-items: flex-start;
   gap: 10px;
 }
-.oa-msg-row.user {
-  flex-direction: column;
-  align-items: flex-end;
-}
 .oa-avatar-badge {
   width: 28px;
   height: 28px;
@@ -746,14 +742,6 @@ export const appsCss = `
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-.oa-bubble-user {
-  max-width: 85%;
-  border-radius: 12px;
-  border: 1px solid var(--oa-accent-line);
-  background: var(--oa-accent-soft);
-  padding: 10px 14px;
-  white-space: pre-wrap;
 }
 .oa-subcard {
   border: 1px solid var(--oa-line);

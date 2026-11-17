@@ -27,6 +27,70 @@ test('host rejects changes to the confirmed container port', async () => {
     status: 'analyzing', events: [] }, tmpdir(), proposal(url), new AbortController().signal), /容器端口/)
 })
 
+test('analysis replies preserve the bound task and only a complete proposal is bundled automatically', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-app-chat-'))
+  const contexts = new ContextStore()
+  contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+  const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+  const delivery = new AppDelivery(core, home, { async read() { return {} }, async write() {} })
+  const expected = contexts.applicationContextId!
+  const url = 'http://127.0.0.1:8080'
+  const analysisSessionId = 'aadc3eaa-feeb-4e52-993d-8c172a95d019'
+  const allowReply = Promise.withResolvers<void>()
+  const question = '保留现在使用的数据源吗？'
+  let id: string | undefined
+  const waitFor = async (condition: (job: Record<string, any>) => boolean) => {
+    const deadline = Date.now() + 5_000
+    for (;;) {
+      const job = await delivery.getJob(id!, expected)
+      if (condition(job) || job.status === 'failed') return job
+      if (Date.now() >= deadline) throw new Error(`未等到期望状态，当前状态 ${job.status}`)
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+  }
+  try {
+    delivery.platform = async path => {
+      assert.equal(path, '/check-slug')
+      return { available: true, app_url: url }
+    }
+    const source = join(home, 'source')
+    await mkdir(source)
+    await writeFile(join(source, 'main.py'), 'print("fixture")\n')
+    const created = await delivery.create({ name: '测试会话', slug: 'test-app', source }, 'origin', expected)
+    id = created.id
+    delivery.analyze = async (job, root, _feedback, signal, onSessionReady) => {
+      await onSessionReady(analysisSessionId)
+      const blocked = proposal(url)
+      await delivery.submit(job, root, { ...blocked, contract: { ...blocked.contract, unresolved: [question] } }, signal)
+      await allowReply.promise
+      await delivery.recordAnalysisReply(job, root, '保留现在使用的数据源。\nPASSWORD="chat-test-secret"', signal)
+      await delivery.submit(job, root, proposal(url), signal)
+    }
+    await delivery.startAnalysis(created.id, '', expected)
+    const waiting = await waitFor(job => job.status === 'review')
+    assert.equal(waiting.analysisChatActive, true)
+    assert.deepEqual(waiting.proposal.unresolved, [question])
+    assert.equal(waiting.artifactHash, undefined)
+    assert.equal((await delivery.getJobByAnalysisSession(analysisSessionId, expected))?.id, created.id)
+
+    allowReply.resolve()
+    const ready = await waitFor(job => job.status === 'ready' && !job.analysisChatActive)
+    assert.equal(ready.status, 'ready', ready.error)
+    assert.equal(ready.analysisSessionId, analysisSessionId)
+    assert.equal(ready.revisionCount, 2)
+    assert.match(ready.feedbackHistory, /保留现在使用的数据源/)
+    assert.doesNotMatch(ready.feedbackHistory, /chat-test-secret/)
+    assert.ok(ready.artifactHash)
+    assert.equal(ready.deploymentReviewPending, true)
+    await delivery.saveConfigDraft(created.id, { artifactHash: ready.artifactHash, rows: [] }, expected)
+    assert.equal((await delivery.getJob(created.id, expected)).deploymentReviewPending, false)
+  } finally {
+    allowReply.resolve()
+    if (id) await delivery.cancelAnalysis(id, expected).catch(() => {})
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('worker retains nested YAML configuration references and existing executable permissions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'opc-app-inputs-'))
   try {

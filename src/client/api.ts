@@ -116,6 +116,9 @@ export interface DeployedApp {
 export interface AppDeliveryJob {
   id: string
   analysisSessionId?: string
+  analysisChatActive?: boolean
+  analysisChatStarting?: boolean
+  deploymentReviewPending?: boolean
   slug: string
   name: string
   description?: string

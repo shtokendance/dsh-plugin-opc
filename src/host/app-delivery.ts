@@ -16,6 +16,7 @@ export interface DeliveryJob {
   id: string; name: string; slug: string; url: string; session: string
   analysisSessionId?: string
   analysisSessions?: string[]
+  autoPrepared?: boolean
   port?: number; description?: string; upgrade?: boolean; versionNote?: string
   status: 'importing' | 'draft' | 'analyzing' | 'review' | 'preparing' | 'ready' | 'publishing' | 'building' | 'verifying' | 'awaiting_page_verification' | 'verified' | 'failed' | 'unknown' | 'cancelled'
   events: string[]; error?: string; proposal?: AppDocument; revision?: string; failedRevision?: string
@@ -32,6 +33,17 @@ export interface DeliveryJob {
   checks?: AppDocument[]; published?: boolean; failureContext?: string; configFingerprint?: string
   configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; local_connection_confirmed?: boolean }[]; versionNote: string }
   configKeys?: string[]; resourceIds?: string[]; failedSnapshot?: AppDocument; pagesVerified?: boolean
+}
+
+export function analysisQuestions(proposal?: AppDocument): string[] {
+  return [...new Set<string>([...(proposal?.unresolved ?? []), ...(proposal?.contract?.unresolved ?? [])])]
+}
+
+function appendAnalysisFeedback(job: DeliveryJob, text: string) {
+  job.conversation = [...(job.conversation ?? []), { role: 'user', text, revision: job.revisionCount }]
+  job.feedbackHistory = job.feedbackHistory
+    ? `${job.feedbackHistory}\n\n本次补充（有冲突时以本次为准）：\n${text}`
+    : text
 }
 type CredentialStore = {
   read(id: string): Promise<Record<string, string>>
@@ -384,7 +396,7 @@ export class AppDelivery {
     }
   }
   public(job: DeliveryJob, root?: string): AppDocument {
-    const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft: _draft, confirmationToken: _token, analysisSessions: _analysisSessions, ...rest } = job
+    const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft, confirmationToken: _token, analysisSessions: _analysisSessions, autoPrepared, ...rest } = job
     const hasOrigSet = new Set(job.hasOriginalKeys ?? [])
     const runtimeConfigs = (proposal?.contract?.configs ?? []).map((c: AppDocument) => {
       const hasOrig = hasOrigSet.has(c.key) || Boolean(c.has_original_value)
@@ -404,15 +416,19 @@ export class AppDelivery {
         .filter(name => name in job.hashes! || name === 'summary.json')
         .map(name => [name, root ? join(root, job.revision!, 'bundle', name) : join(job.revision!, 'bundle', name)]))
       : undefined
+    const artifactHash = job.hashes ? fingerprint(job.hashes) : undefined
     return {
       ...rest,
+      analysisChatStarting: !job.analysisSessionId && this.analyses.has(job.id),
+      analysisChatActive: Boolean(job.analysisSessionId && this.analyses.has(job.id) && ['analyzing', 'review'].includes(job.status)),
       model: job.modelSelection?.model ?? '',
       reasoning_effort: job.modelSelection?.reasoningEffort ?? '',
       revision_count: job.revisionCount,
       analysis_mode: job.analysisMode,
       analysis_failure: job.analysisFailure,
       pages_verified: job.pagesVerified,
-      artifactHash: job.hashes ? fingerprint(job.hashes) : undefined,
+      artifactHash,
+      deploymentReviewPending: Boolean(job.status === 'ready' && autoPrepared && artifactHash && configDraft?.artifactHash !== artifactHash),
       proposalHash: proposal ? fingerprint(proposal) : undefined,
       artifacts: artifactFiles,
       runtime_configs: runtimeConfigs,
@@ -428,7 +444,7 @@ export class AppDelivery {
       proposal: proposal && {
         summary: proposal.summary,
         issues: proposal.issues ?? [],
-        unresolved: [...new Set([...(proposal.unresolved ?? []), ...(proposal.contract.unresolved ?? [])])],
+        unresolved: analysisQuestions(proposal),
         decisions: proposal.decisions ?? [],
         changes: proposal.changes?.map((change: AppDocument) => ({
           id: change.id,
@@ -579,7 +595,7 @@ export class AppDelivery {
       job.status = 'review'
       job.confirmationToken = undefined
       job.error = undefined
-      job.events.push('已返回改造方案核对阶段，可补充说明重新分析或重新打包')
+      job.events.push('已返回改造方案核对阶段')
       await this.save(root, job)
       this.core.emit('skills-changed')
       return this.public(job, root)
@@ -625,7 +641,8 @@ export class AppDelivery {
     if (!this.analyze) throw new Error('此 DSH 版本未提供应用分析所需的 Agent 扩展')
     if (this.busy.has(id) || ['building', 'publishing', 'unknown'].includes(job.status)) throw new Error('请先完成当前部署状态核对')
     const resume = options?.mode === 'resume'
-    if (resume && (job.status !== 'failed' || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
+    const waitingForReply = resume && job.status === 'review' && analysisQuestions(job.proposal).length > 0
+    if (resume && ((!waitingForReply && job.status !== 'failed') || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
     this.busy.add(id)
     if (session && !job.analysisSessions?.includes(session)) job.session = session
     let trimmedFeedback: string
@@ -638,6 +655,7 @@ export class AppDelivery {
     const controller = new AbortController()
     const analysisSignal = AbortSignal.any([scope.signal, controller.signal])
     this.analyses.set(id, controller)
+    if (resume && job.failureStage === 'preparation') job.analysisFailure ??= job.error
     if (!resume && job.status !== 'failed') {
       job.analysisFailure = undefined
       if (!job.proposal) await rm(join(root, 'draft_files.json'), { force: true }).catch(() => {})
@@ -662,24 +680,21 @@ export class AppDelivery {
     job.confirmationToken = undefined
     if (!resume) {
       job.revisionCount = (job.revisionCount ?? 0) + 1
-      if (trimmedFeedback.trim()) {
-        job.conversation = [...(job.conversation ?? []), { role: 'user', text: trimmedFeedback.trim(), revision: job.revisionCount }]
-        job.feedbackHistory = job.feedbackHistory
-          ? `${job.feedbackHistory}\n\n本次补充（有冲突时以本次为准）：\n${trimmedFeedback.trim()}`
-          : trimmedFeedback.trim()
-      }
+      if (trimmedFeedback.trim()) appendAnalysisFeedback(job, trimmedFeedback.trim())
     }
-    job.status = 'analyzing'
+    job.status = waitingForReply ? 'review' : 'analyzing'
     delete job.analysisSessionId
     job.failureStage = undefined
     job.error = undefined
     job.checks = undefined
     job.events.push(
-      resume
-        ? '🔄 正在继续准备应用'
-        : job.analysisMode === 'repair'
-          ? '🔧 AI 正在读取失败制品与日志进行专项修复分析'
-          : '🚀 AI 正在分析源码；尚未执行发布',
+      waitingForReply
+        ? '正在恢复左侧分析会话'
+        : resume
+          ? '🔄 正在继续准备应用'
+          : job.analysisMode === 'repair'
+            ? '🔧 AI 正在读取失败制品与日志进行专项修复分析'
+            : '🚀 AI 正在分析源码；尚未执行发布',
     )
     try {
       await rm(join(root, 'failed_files_read.json'), { force: true })
@@ -703,6 +718,9 @@ export class AppDelivery {
         analysisSignal.throwIfAborted()
         scope.assertCurrent()
         if (!job.proposal || job.status === 'analyzing') throw new Error('AI 未提交有效改造方案，请补充说明后重试')
+        if (job.analysisSessionId && job.status === 'review' && !analysisQuestions(job.proposal).length) {
+          await this.prepareJob(root, job, analysisSignal, scope.assertCurrent, true)
+        }
       } catch (error) {
         const msg = controller.signal.aborted
           ? '用户取消分析'
@@ -719,6 +737,22 @@ export class AppDelivery {
       }
     })().catch(() => {})
     return this.public(job, root)
+  }
+  async recordAnalysisReply(job: DeliveryJob, root: string, text: string, signal: AbortSignal) {
+    if (job.status !== 'analyzing' && job.status !== 'review') throw new Error('当前应用准备阶段无法接收回复')
+    const reply: string = await worker({ action: 'redact_feedback', root, text: text.slice(0, 20_000) }, signal)
+    signal.throwIfAborted()
+    const next: DeliveryJob = {
+      ...job,
+      status: 'analyzing',
+      revisionCount: (job.revisionCount ?? 0) + 1,
+      analysisFailure: undefined,
+      events: [...job.events, '已收到左侧会话的回复，AI 继续改造'],
+    }
+    appendAnalysisFeedback(next, reply.trim())
+    await this.save(root, next)
+    Object.assign(job, next)
+    return reply
   }
   async cancelAnalysis(id: string, expected: string) {
     const scope = this.scope(expected)
@@ -864,8 +898,8 @@ export class AppDelivery {
     }
     job.status = 'review'
     job.analysisFailure = undefined
-    job.events.push(job.proposal!.unresolved.length || job.proposal!.contract.unresolved?.length
-      ? 'AI 分析完成，请回答待确认事项' : '方案校验通过，请核对改造内容并生成部署包')
+    job.events.push(analysisQuestions(job.proposal).length
+      ? '等待你在左侧会话回复' : '改造方案已通过校验')
     await this.save(root, job)
   }
   async prepare(id: string, proposalHash: string, expected: string) {
@@ -873,45 +907,62 @@ export class AppDelivery {
     const { root, job } = await this.open(scope.directory, id)
     return this.exclusive(id, async () => {
       if (job.status !== 'review' || !job.proposal || fingerprint(job.proposal) !== proposalHash) throw new Error('方案已变化，请刷新后核对')
-      job.status = 'preparing'; job.failureStage = undefined; job.error = undefined; await this.save(root, job)
-      try {
-        const revision = randomUUID().replaceAll('-', '')
-        const result = await worker({
-          action: 'bundle',
-          root,
-          revision,
-          proposal: job.proposal,
-          repair: Boolean(job.failedRevision),
-          failed_revision: job.failedRevision ?? '',
-          failure_feedback: job.failureContext ?? '',
-          expected_port: job.port ?? 8080,
-          revision_count: job.revisionCount ?? 1,
-          feedback: job.feedbackHistory ?? '',
-        }, scope.signal)
-        scope.assertCurrent()
-        job.revision = revision
-        job.hashes = result.summary.files
-        job.proposal = result.proposal ?? job.proposal
-        job.discoveryReport = result.discovery_report ?? job.discoveryReport
-        job.transformationReport = result.transformation_report ?? job.transformationReport
-        job.preparationChecks = result.preparation_checks ?? job.preparationChecks
-        job.skillMarkdown = result.skill_markdown || job.skillMarkdown
-        job.dockerfileContent = result.dockerfile_content || job.dockerfileContent
-        job.hasOriginalKeys = result.has_original_keys ?? job.hasOriginalKeys
-        job.diffs = result.diffs ?? job.diffs
-        if (result.original_config_values && typeof result.original_config_values === 'object') {
-          await this.credentials.write(`orig-${job.id}`, result.original_config_values)
-        }
-        job.status = 'ready'
-        job.version = undefined
-        job.published = undefined
-        job.restoredVersion = undefined
-        job.requestId = randomUUID().replaceAll('-', '')
-        job.confirmationToken = undefined
-        job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
-      } catch (error) { job.status = 'failed'; job.failureStage = 'preparation'; job.error = String(error) }
-      await this.save(root, job); return this.public(job, root)
+      if (analysisQuestions(job.proposal).length) throw new Error('请先在左侧会话处理待确认事项')
+      await this.prepareJob(root, job, scope.signal, scope.assertCurrent)
+      return this.public(job, root)
     })
+  }
+
+  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, autoPrepared = false) {
+    job.status = 'preparing'
+    job.failureStage = undefined
+    job.error = undefined
+    job.events.push('正在生成并检查交付包')
+    await this.save(root, job)
+    try {
+      const revision = randomUUID().replaceAll('-', '')
+      const result = await worker({
+        action: 'bundle',
+        root,
+        revision,
+        proposal: job.proposal,
+        repair: Boolean(job.failedRevision),
+        failed_revision: job.failedRevision ?? '',
+        failure_feedback: job.failureContext ?? '',
+        expected_port: job.port ?? 8080,
+        revision_count: job.revisionCount ?? 1,
+        feedback: job.feedbackHistory ?? '',
+      }, signal)
+      signal.throwIfAborted(); assertCurrent()
+      job.revision = revision
+      job.hashes = result.summary.files
+      job.proposal = result.proposal ?? job.proposal
+      job.discoveryReport = result.discovery_report ?? job.discoveryReport
+      job.transformationReport = result.transformation_report ?? job.transformationReport
+      job.preparationChecks = result.preparation_checks ?? job.preparationChecks
+      job.skillMarkdown = result.skill_markdown || job.skillMarkdown
+      job.dockerfileContent = result.dockerfile_content || job.dockerfileContent
+      job.hasOriginalKeys = result.has_original_keys ?? job.hasOriginalKeys
+      job.diffs = result.diffs ?? job.diffs
+      if (result.original_config_values && typeof result.original_config_values === 'object') {
+        await this.credentials.write(`orig-${job.id}`, result.original_config_values)
+      }
+      signal.throwIfAborted(); assertCurrent()
+      job.autoPrepared = autoPrepared
+      job.status = 'ready'
+      job.version = undefined
+      job.published = undefined
+      job.restoredVersion = undefined
+      job.requestId = randomUUID().replaceAll('-', '')
+      job.confirmationToken = undefined
+      job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
+    } catch (error) {
+      signal.throwIfAborted()
+      job.status = 'failed'
+      job.failureStage = 'preparation'
+      job.error = String(error)
+    }
+    await this.save(root, job)
   }
   private async deploymentConfiguration(job: DeliveryJob, input: AppDocument, expected: string) {
     const rawConfigs = input.config as { key: string; value: string; resource_id?: string; local_connection_confirmed?: boolean }[]

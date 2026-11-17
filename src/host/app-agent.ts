@@ -6,9 +6,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { ReasoningEffortId, type LlmFailure } from '@deepseek-ai/dsh-llm'
-import { AppDelivery, type AppDocument, fingerprint, verificationCredentialFields, worker } from './app-delivery.ts'
+import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
+import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, verificationCredentialFields, worker } from './app-delivery.ts'
 import { proposalParameters } from './app-proposal-schema.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'opc-app-delivery': { kind: 'opc-app-delivery' } & ContextFormed
+  }
+}
+
+const ANALYSIS_TIMEOUT_MS = 15 * 60_000
+const REPLY_TIMEOUT_MS = 30 * 60_000
 
 function loadBundledSkillText(relativePath: string): string {
   const fromSrc = fileURLToPath(new URL(`../../runtime/app_delivery/${relativePath}`, import.meta.url))
@@ -92,7 +101,8 @@ function buildInstructions(isRepair: boolean): string {
 7. 对于要新增或修改的文件，优先使用 opc_delivery_propose_file 逐个暂存完整文件内容，然后在 opc_delivery_submit 的结构化 changes 中按 {id, path, reason, group} 引用。小改动可直接在 changes 中提供完整 content。
 8. scan_routes_and_pages 已在后端自动缓存全部扫描到的 API 与页面，并在 opc_delivery_submit 时自动合并进 contract.apis 与 contract.pages；严禁把“接口数量多/扫描截断/添加 healthz/创建 Dockerfile”等内部技术动作放进 unresolved。
 9. verification.cases 为真实只读业务探针（每种受保护认证身份均需覆盖），不能编造业务记录或以健康探针代替。
-10. 有需要用户决定的真实阻塞（如外部连接替换、缺失外部授权）时提交 unresolved，并可在 decisions 中提供 [{id, question, impact, options}]（最多 4 个简短选项）；没有阻塞时 unresolved 设为空数组 [] 并提交完整可校验提案。summary 请按多段【应用定位】、【运行环境】、【接口与页面】、【登录与鉴权】、【数据与存储】、【改造与技能】清晰换行排版。工具校验失败应修正后重提，提交成功后结束本轮。`
+10. 有需要用户决定的真实阻塞（如外部连接替换、缺失外部授权）时提交 unresolved，并可在 decisions 中提供 [{id, question, impact, options}]（最多 4 个简短选项）；没有阻塞时 unresolved 设为空数组 [] 并提交完整可校验提案。summary 请按多段【应用定位】、【运行环境】、【接口与页面】、【登录与鉴权】、【数据与存储】、【改造与技能】清晰换行排版。工具校验失败应修正后重提，提交成功后结束本轮。
+11. 工具确认有待答问题时，用普通对话逐项向用户提问，写清楚选项和后果，再结束本轮等待用户从当前会话回复。请勿索要密码、密钥或令牌。收到补充或答案后，沿用当前任务、已有暂存文件与已扫描接口，只修订有影响的部分并重新提交完整方案。用户只询问说明时，提交时保留未解决的问题，并用普通对话回答说明。`
 
   if (isRepair) {
     text += `\nDEPLOYMENT REPAIR（部署/验证失败专项修复）：必须先调用 opc_delivery_inspect 的 read_failed 读取上次实际部署包中的出错文件，并与 read 原源码对比。旧修改可能是错误的，不能无依据复用旧提案；针对语法错误、缺模块或启动失败必须修改对应文件并提交完整替换内容。`
@@ -118,7 +128,17 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         ? '这是基于上一轮分析结果（previous_plan）的用户确认/补充轮次。上一轮暂存的文件修改（changes）已预载入暂存区（未改动的文件可直接按原 id 引用，无需重复读取源码或重新调用 propose_file），扫描的全部接口与页面也已由后端缓存并自动合并。请仅针对 user_answers 进行必要的增量调整并直接调用 opc_delivery_submit（unresolved 仅保留真正阻塞改造的事项）。本轮 summary 只需简明说明已按用户确认完成了哪些调整，严禁重复输出全量摸底内容！'
         : '分析应用并提交完整修改提案和业务契约。先调用 scan_routes_and_pages 与读取源码工具全面摸清应用，完整收录所有页面与所有接口，按四步规范分段清晰输出分析与改造方案。'
 
-    const abort = AbortSignal.any([signal, AbortSignal.timeout(15 * 60_000)])
+    const timeout = new AbortController()
+    const abort = AbortSignal.any([signal, timeout.signal])
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    const setDeadline = (ms: number) => {
+      clearTimeout(deadline)
+      deadline = setTimeout(() => timeout.abort(new Error('AI 分析超时，原源码和已有回答已保留。请继续准备。')), ms)
+      deadline.unref()
+    }
+    let wakeReply: (() => void) | undefined
+    let replyCount = 0
+    const sessionReady = Promise.withResolvers<boolean>()
     const validationErrors: string[] = []
     const rejectedProposals = new Set<string>()
     let repeatedProposal = false
@@ -138,6 +158,27 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       setup(child) {
         child.tools.restrict({ allow: [] })
         child.systemPrompt.section({ name: 'opc-delivery', order: 1, text: instructions, complete: true, interpolate: false })
+        child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
+          const decision = await next()
+          if (decision.kind !== 'enter' || !decision.messages.length) return decision
+          const messages = []
+          for (const message of decision.messages) {
+            if (message.source.kind !== 'user' || !('rpcId' in message.source)) {
+              messages.push(message)
+              continue
+            }
+            const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').trim()
+            if (!text || !await sessionReady.promise) continue
+            const safeText = await delivery.recordAnalysisReply(job, root, text, AbortSignal.any([abort, turnSignal]))
+            validationErrors.length = 0
+            rejectedProposals.clear()
+            repeatedProposal = false
+            replyCount++
+            messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
+            wakeReply?.()
+          }
+          return messages.length ? { ...decision, messages } : { kind: 'reject' }
+        })
         const output = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
         child.tools.register(defineTool({ name: 'opc_delivery_inspect', description: '只读分析应用：action 支持 inventory / scan_routes_and_pages / read / read_failed / reference / template / inspect_local_storage / read_go_dependency。read_failed 读取上次实际部署包；template 传 language 和 version；read 传 path（可选 proposed=true 读取已暂存修改版本）；reference 传 name（contract.md/framework-checks.md/preparation-checks.md/integration.md）。',
           parameters: {
@@ -229,7 +270,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               if (validationErrors.length === 6) cancel()
               throw new Error(detail)
             }
-            return '方案已提交。请结束本轮，等待用户核对。'
+            const questions = analysisQuestions(job.proposal)
+            return questions.length
+              ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
+              : '完整方案已通过校验。请简要说明结果并结束本轮，OPC 将自动生成交付包。'
           } }))
       },
     }
@@ -246,16 +290,22 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const analysis = handle ?? await ctx.agents.create({
       ...options, sessionId: randomUUID() as never, meta: { cwd: root },
     })
-    const turnOutcome: { failure?: LlmFailure; truncated?: boolean } = {}
+    const turnOutcome: { failure?: LlmFailure; truncated?: boolean; stopped?: boolean } = {}
     const getTurnOutcome = () => ({ ...turnOutcome })
     const stopObserving = ctx.on('session/event', (session, event) => {
       if (session !== analysis.agent.session || event.type !== 'turn/end') return
       const reason = event.data.reason
       turnOutcome.failure = reason.kind === 'error' ? reason.error : undefined
       turnOutcome.truncated = reason.kind === 'max-tokens'
+      turnOutcome.stopped = reason.kind === 'aborted' && reason.reason.kind === 'user'
     })
     const cancel = () => { analysis.agent.cancel({ kind: 'user' }) }
-    abort.addEventListener('abort', cancel, { once: true })
+    const onAbort = () => {
+      sessionReady.resolve(false)
+      cancel()
+      wakeReply?.()
+    }
+    abort.addEventListener('abort', onAbort, { once: true })
     const send = (text: string) => {
       analysis.agent.followup({
         id: randomUUID() as never,
@@ -269,8 +319,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     }
     try {
       abort.throwIfAborted()
-      await onSessionReady(String(analysis.agent.session.id))
-      abort.throwIfAborted()
+      setDeadline(ANALYSIS_TIMEOUT_MS)
       const previous = job.published
         ? await delivery.platform('/' + job.slug, appCtxId).catch(() => undefined)
         : undefined
@@ -284,7 +333,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         resources: rawResources?.resources ?? [],
         slug: job.slug,
         default_only: true,
-      }, signal).catch(() => ({ resources: [] }))
+      }, abort).catch(() => ({ resources: [] }))
 
       if (isRepair || previous?.error_message || previous?.build_log || runtimeLogs?.runtime_logs) {
         const mergedFailure = [
@@ -294,12 +343,13 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           runtimeLogs?.runtime_logs?.slice(-4000),
         ].filter(Boolean).join('\n')
         if (mergedFailure) {
-          job.failureContext = await worker({ action: 'redact_feedback', root, text: mergedFailure.slice(-24_000) }, signal)
+          job.failureContext = await worker({ action: 'redact_feedback', root, text: mergedFailure.slice(-24_000) }, abort)
         }
       }
 
       abort.throwIfAborted()
-      let prompt = JSON.stringify({
+      const waitingForReply = job.status === 'review' && analysisQuestions(job.proposal).length > 0
+      const taskContext = JSON.stringify({
         name: job.name,
         description: job.description ?? '',
         slug: job.slug,
@@ -314,25 +364,54 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         previous_plan: prevPlan,
         failed_snapshot: job.failedSnapshot,
         failure_log: job.failureContext ?? '',
-        task: taskInstruction,
+        task: waitingForReply ? '请结合 previous_plan 中的待确认事项处理接下来收到的用户回复。' : taskInstruction,
       })
-      for (let attempt = 0; attempt < 3; attempt++) {
+      analysis.agent.inject({
+        id: randomUUID() as never,
+        role: 'user',
+        source: { kind: 'opc-app-delivery', form: 'notice', summary: 'OPC 应用改造任务已载入' },
+        content: [{ type: 'text', text: taskContext }],
+      })
+      await onSessionReady(String(analysis.agent.session.id))
+      sessionReady.resolve(true)
+      let prompt = '请开始准备应用。'
+      for (let attempt = 0; ; attempt++) {
         turnOutcome.failure = undefined
         turnOutcome.truncated = false
+        turnOutcome.stopped = false
+        const repliesBeforeTurn = replyCount
         let errorMessage = ''
         try {
-          send(prompt)
+          if (job.status === 'review') {
+            if (!analysisQuestions(job.proposal).length) return
+            setDeadline(REPLY_TIMEOUT_MS)
+            if (!abort.aborted) await new Promise<void>(resolve => { wakeReply = resolve })
+            wakeReply = undefined
+            signal.throwIfAborted()
+            if (abort.aborted && replyCount === repliesBeforeTurn) return
+            abort.throwIfAborted()
+            setDeadline(ANALYSIS_TIMEOUT_MS)
+          } else {
+            abort.throwIfAborted()
+            send(prompt)
+          }
           await analysis.agent.whenIdle()
         } catch (err) {
           if (signal.aborted || (abort.aborted && !repeatedProposal)) throw err
           errorMessage = err instanceof Error ? err.message : String(err)
         }
-        if (job.status === 'review') return
+        if (job.status === 'review') {
+          if (!analysisQuestions(job.proposal).length) return
+          attempt = -1
+          continue
+        }
         if (repeatedProposal || validationErrors.length >= 6) {
           throw new Error(validationErrors.at(-1) ?? '技术方案连续校验未通过，已停止自动重试')
         }
         abort.throwIfAborted()
-        const { failure, truncated } = getTurnOutcome()
+        const { failure, truncated, stopped } = getTurnOutcome()
+        if (stopped) throw new Error('已停止 AI 分析，原源码和已有回答已保留。')
+        if (replyCount !== repliesBeforeTurn) attempt = 0
         const providerMessage = failure?.message ?? errorMessage
         const badToolJson = /tool input is invalid JSON/i.test(providerMessage)
         const invalidOutput = badToolJson || truncated
@@ -361,8 +440,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         prompt = `继续当前任务，保留原业务和用户选择。待处理的技术反馈：${reason}。只修正未通过的字段，再提交完整契约，必须保留 runtime 并填写数字 port=${port}。大文件先单独暂存，changes 只传 ID、路径和理由；apis/pages 只传定制项，其余让后端合并。用结构化参数调用 opc_delivery_submit，不要在一个字符串中嵌套整份 JSON。`
       }
     } finally {
+      sessionReady.resolve(false)
+      clearTimeout(deadline)
       stopObserving()
-      abort.removeEventListener('abort', cancel)
+      abort.removeEventListener('abort', onAbort)
       await analysis.dispose()
     }
   }
