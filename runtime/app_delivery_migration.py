@@ -569,18 +569,57 @@ def _humanize_identifier(name: str, method: str = "GET", path: str = "") -> str:
     return f"{n or '接口'} ({method.upper()} {path})"
 
 
-def scan_app_routes_and_pages(source: Path) -> dict:
-    """Deterministically scan the entire application source tree for:
+_NON_RUNTIME_SOURCE_DIRS = {
+    "__tests__", "testdata", "__fixtures__", "__mocks__", ".storybook",
+}
+_NON_RUNTIME_DIRS_OUTSIDE_ROUTES = {"test", "tests", "fixtures", "examples", "samples"}
+_ROUTER_DIRS = {"app", "pages", "routes", "routers", "views", "controllers"}
+_TEST_SOURCE_NAME = re.compile(
+    r"^(?:test_.*\.py|tests\.py|conftest\.py)$|_test\.(?:py|go)$|\.(?:spec|test)\.[cm]?[jt]sx?$",
+    re.I,
+)
+_DEMO_ONLY_TEXT = re.compile(
+    r"\bdemo[- ]only\b|\b(?:not|never) (?:for|use in) production\b|仅供演示|(?:不得|不可|不能)用于生产|不是生产",
+    re.I,
+)
+_DEMO_START_GUARD = re.compile(
+    r"""if\s*\(\s*!\s*process\.argv\.includes\(\s*['"]--(?:demo|fixture)['"]\s*\)\s*\)\s*(?:\{\s*)?(?:throw\b|process\.exit\s*\()"""
+    r"""|if\s+not\s+[\w.]+\.(?:demo|fixture)\s*:\s*(?:raise\b|[\w.]+\.(?:error|exit)\s*\()"""
+)
+
+
+def _is_non_runtime_source(path: Path, rel_parts: tuple[str, ...]) -> bool:
+    folders = [part.casefold() for part in rel_parts[:-1]]
+    if any(part in _NON_RUNTIME_SOURCE_DIRS or part.endswith(("测试夹具", "验收夹具", "演示夹具")) for part in folders):
+        return True
+    if _TEST_SOURCE_NAME.search(path.name) or any(
+        part in _NON_RUNTIME_DIRS_OUTSIDE_ROUTES and (i == 0 or folders[i - 1] not in _ROUTER_DIRS)
+        for i, part in enumerate(folders)
+    ):
+        return True
+    if path.suffix in {".py", ".js", ".mjs", ".cjs", ".ts"} and path.stat().st_size <= 500_000:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        # A demo flag alone is also used by real servers in optional development mode.
+        if _DEMO_START_GUARD.search(text) and _DEMO_ONLY_TEXT.search(text):
+            return True
+    return False
+
+
+def scan_app_routes_and_pages(source: Path, *, build_context: list[str] | None = None) -> dict:
+    """Deterministically scan application sources for:
     - All backend API endpoints (FastAPI, Flask, Express/Node, Go, etc.) with method, full path, parameters, request_body, auth, effect, and source line evidence.
     - All frontend pages AND SPA sub-views/panels with path, purpose, and source line evidence.
     - Runtime language, minimum version, syntax requirements (e.g. Python >=3.11 for StrEnum), and existing Dockerfile info.
     """
+    build_inputs = {delivery.relative(source, entry) for entry in (build_context or [])}
     source_files: list[Path] = []
     for p in sorted(source.rglob("*")):
         if not p.is_file() or p.is_symlink():
             continue
+        if build_inputs and p not in build_inputs and not build_inputs.intersection(p.parents):
+            continue
         rel_parts = p.relative_to(source).parts
-        if any(part in delivery.EXCLUDED for part in rel_parts):
+        if any(part in delivery.EXCLUDED for part in rel_parts) or _is_non_runtime_source(p, rel_parts):
             continue
         source_files.append(p)
 
@@ -780,9 +819,20 @@ def _scan_openapi_specs(source: Path, files: list[Path]) -> list[dict]:
                 api_id = op_id if op_id and op_id[0].isalpha() else (raw_id if raw_id and raw_id[0].isalpha() else f"op-{raw_id or 'root'}")
 
                 params: list[dict] = []
+                request_body = None
                 for param in op.get("parameters") or []:
                     if isinstance(param, dict) and param.get("name"):
                         p_in = param.get("in", "query")
+                        if p_in == "body":
+                            consumes = op.get("consumes") or doc.get("consumes")
+                            media = consumes[0] if isinstance(consumes, list) and consumes and isinstance(consumes[0], str) else "application/json"
+                            request_body = {
+                                "required": bool(param.get("required")),
+                                "description": param.get("description") or "请求体",
+                                "content_type": media,
+                                "schema": param.get("schema") or {"type": "object"},
+                            }
+                            continue
                         params.append({
                             "name": param["name"],
                             "in": p_in,
@@ -791,6 +841,18 @@ def _scan_openapi_specs(source: Path, files: list[Path]) -> list[dict]:
                             "description": param.get("description") or f"参数 {param['name']}",
                             "schema": param.get("schema") or {"type": param.get("type", "string")},
                         })
+
+                declared_body = op.get("requestBody")
+                content = declared_body.get("content") if isinstance(declared_body, dict) else None
+                if isinstance(content, dict) and content:
+                    media = "application/json" if "application/json" in content else next(iter(content))
+                    schema = content[media].get("schema") if isinstance(content[media], dict) else None
+                    request_body = {
+                        "required": bool(declared_body.get("required")),
+                        "description": declared_body.get("description") or "请求体",
+                        "content_type": media,
+                        "schema": schema or {"type": "object"},
+                    }
 
                 # Route discovery is not authentication analysis.
                 auth_obj = {"type": "unknown"}
@@ -803,7 +865,7 @@ def _scan_openapi_specs(source: Path, files: list[Path]) -> list[dict]:
                     "purpose": purpose,
                     "evidence": [f"{rel}:1"],
                     "parameters": params,
-                    "request_body": None,
+                    "request_body": request_body,
                     "responses": {"200": {"type": "object", "required": [], "properties": {"ok": {"type": "boolean"}}}},
                     "auth": auth_obj,
                     "effect": effect,
@@ -1208,6 +1270,16 @@ def _scan_js_ts_routes(source: Path, files: list[Path]) -> list[dict]:
     # NestJS Controller decorators
     nest_controller_re = re.compile(r"""@Controller\(\s*['"]?([^'"]*?)['"]?\s*\)[\s\S]*?class\s+([A-Za-z0-9_]+)""")
     nest_method_re = re.compile(r"""@(Get|Post|Put|Patch|Delete)\(\s*['"]?([^'"]*?)['"]?\s*\)[\s\S]*?(?:async\s+)?([a-zA-Z0-9_]+)\s*\(""")
+    nest_global_prefix_re = re.compile(r"""(?m)^\s*\w+\.setGlobalPrefix\(\s*(['"])([\w/-]+)\1\s*\)""")
+    nest_prefixes: dict[Path, set[str]] = {}
+    package_roots = {p.parent for p in files if p.name == "package.json"}
+    for entry in files:
+        if entry.name not in {"main.ts", "main.js"} or entry.stat().st_size > 500_000:
+            continue
+        content = entry.read_text(encoding="utf-8", errors="ignore")
+        prefixes = {match.group(2).strip("/") for match in nest_global_prefix_re.finditer(content)}
+        if "NestFactory" in content and prefixes:
+            nest_prefixes.setdefault(entry.parent, set()).update(prefixes)
 
     for p in files:
         if p.suffix not in {".js", ".ts", ".mjs", ".cjs"} or p.stat().st_size > 500_000:
@@ -1257,10 +1329,19 @@ def _scan_js_ts_routes(source: Path, files: list[Path]) -> list[dict]:
         if "@Controller" in content:
             m_ctrl = nest_controller_re.search(content)
             ctrl_prefix = m_ctrl.group(1).strip("/") if m_ctrl else ""
+            global_prefix = ""
+            for parent in p.parents:
+                prefixes = nest_prefixes.get(parent)
+                if prefixes:
+                    if len(prefixes) == 1:
+                        global_prefix = next(iter(prefixes))
+                    break
+                if parent in package_roots or parent == source:
+                    break
             for m in nest_method_re.finditer(content):
-                mth, sub, handler = m.group(1).upper(), m.group(2).strip("/"), m.group(3)
-                full = "/" + "/".join(p for p in (ctrl_prefix, sub) if p)
-                routes.append(_make_js_route(mth, full, rel, 1))
+                mth, sub = m.group(1).upper(), m.group(2).strip("/")
+                full = "/" + "/".join(part for part in (global_prefix, ctrl_prefix, sub) if part)
+                routes.append(_make_js_route(mth, full, rel, content.count("\n", 0, m.start()) + 1))
 
     # Next.js App Router API routes (app/api/**/route.ts)
     for p in files:
@@ -2048,9 +2129,15 @@ def _auto_adapt_persistent_file_storage(source: Path, slug: str, data: dict, pro
         except Exception:
             pass
     workdir = "/app"
-    m_wd = re.search(r"(?im)^\s*WORKDIR\s+([^\s#]+)", df_text)
-    if m_wd and m_wd.group(1).startswith("/"):
-        workdir = m_wd.group(1).rstrip("/") or "/app"
+    lines = df_text.splitlines()
+    final_stage_start = next(
+        (index for index in range(len(lines) - 1, -1, -1) if re.match(r"\s*FROM\s+", lines[index], re.I)),
+        0,
+    )
+    final_stage = "\n".join(lines[final_stage_start:])
+    workdirs = re.findall(r"(?im)^\s*WORKDIR\s+(/[A-Za-z0-9_./-]*)\s*(?:#.*)?$", final_stage)
+    if workdirs:
+        workdir = workdirs[-1].rstrip("/") or "/app"
 
     # 2. Deterministically inspect local file storage & merge with any AI-declared mounts
     scanned_storage = inspect_local_file_storage(source, slug=slug, workdir=workdir, has_migrations=False)
@@ -2100,37 +2187,35 @@ def _auto_adapt_persistent_file_storage(source: Path, slug: str, data: dict, pro
                 if (source / top_dir).exists() and top_dir not in build_ctx:
                     build_ctx.append(top_dir)
 
-    # 4. Inject .opc-seed build-time snapshot & /opc-storage-init.sh non-destructive startup seed hydration into Dockerfile
-    if df_text and ".opc-seed" not in df_text and "opc-storage-init.sh" not in df_text:
-        rel_dirs_sh = " ".join(
-            f'"{m["relative_path"]}"' for m in mounts if re.fullmatch(r"[A-Za-z0-9_./-]+", str(m.get("relative_path", "")))
-        )
+    # 4. Seed the actual volume destinations without replacing a custom startup.
+    has_entrypoint = bool(re.search(r"(?im)^\s*ENTRYPOINT\s+", final_stage))
+    if df_text and not has_entrypoint and ".opc-seed" not in final_stage and "opc-storage-init.sh" not in final_stage:
+        seed_dir = f"{workdir}/.opc-seed"
         cpaths_sh = " ".join(
-            f'"{m["container_path"]}"' for m in mounts if re.fullmatch(r"[A-Za-z0-9_./-]+", str(m.get("container_path", "")))
+            f'"{path}"' for path in (m["container_path"] for m in mounts)
+            if re.fullmatch(r"/[A-Za-z0-9_./-]+", path) and ".." not in Path(path).parts
+            and not (seed_dir == path.rstrip("/") or seed_dir.startswith(path.rstrip("/") + "/") or path.startswith(seed_dir + "/"))
         )
-        if rel_dirs_sh and cpaths_sh:
-            has_entrypoint = bool(re.search(r"(?im)^\s*ENTRYPOINT\s+", df_text))
+        if cpaths_sh:
+            init_script = f"{workdir}/.opc-seed/opc-storage-init.sh"
             seed_snippet_lines = [
                 "# [OPC Persistent Storage] Backup initial seed data & hydrate external volume on startup",
-                f"RUN mkdir -p {workdir}/.opc-seed {cpaths_sh} \\",
-                f"    && for d in {rel_dirs_sh}; do \\",
-                f'         if [ -d "{workdir}/$d" ] && [ -n "$(ls -A "{workdir}/$d" 2>/dev/null)" ]; then \\',
-                f'           mkdir -p "{workdir}/.opc-seed/$d" && cp -a "{workdir}/$d/." "{workdir}/.opc-seed/$d/"; \\',
+                f'RUN mkdir -p "{seed_dir}" {cpaths_sh} \\',
+                f"    && i=0 && for d in {cpaths_sh}; do \\",
+                "         i=$((i+1)); \\",
+                '         if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then \\',
+                f'           mkdir -p "{seed_dir}/$i" && cp -a "$d/." "{seed_dir}/$i/" || exit 1; \\',
                 "         fi; \\",
                 "       done \\",
-                f"    && printf '#!/bin/sh\\nset -e\\nfor d in {rel_dirs_sh}; do\\n  mkdir -p \"{workdir}/$d\"\\n  if [ -d \"{workdir}/.opc-seed/$d\" ]; then\\n    for f in \"{workdir}/.opc-seed/$d\"/* \"{workdir}/.opc-seed/$d\"/.[!.]*; do\\n      [ -e \"$f\" ] || continue\\n      bn=\"$(basename \"$f\")\"\\n      [ -e \"{workdir}/$d/$bn\" ] || cp -a \"$f\" \"{workdir}/$d/$bn\"\\n    done\\n  fi\\ndone\\nexec \"$@\"\\n' > /opc-storage-init.sh \\",
-                "    && chmod +x /opc-storage-init.sh",
+                f"    && printf '#!/bin/sh\\nset -e\\ni=0\\nfor d in {cpaths_sh}; do\\n  i=$((i+1))\\n  mkdir -p \"$d\"\\n  if [ -d \"{seed_dir}/$i\" ]; then\\n    for f in \"{seed_dir}/$i\"/* \"{seed_dir}/$i\"/.[!.]*; do\\n      [ -e \"$f\" ] || continue\\n      bn=\"$(basename \"$f\")\"\\n      [ -e \"$d/$bn\" ] || cp -a \"$f\" \"$d/$bn\"\\n    done\\n  fi\\ndone\\nexec \"$@\"\\n' > \"{init_script}\" \\",
+                f'    && chmod +x "{init_script}"',
+                "ENTRYPOINT " + json.dumps([init_script]),
             ]
-            if not has_entrypoint:
-                seed_snippet_lines.append('ENTRYPOINT ["/opc-storage-init.sh"]')
             seed_block = "\n".join(seed_snippet_lines)
-
-            lines = df_text.splitlines()
-            insert_idx = len(lines)
-            for idx in range(len(lines) - 1, -1, -1):
-                stripped = lines[idx].strip().upper()
-                if stripped.startswith("CMD ") or stripped.startswith("CMD[") or stripped.startswith("EXPOSE "):
-                    insert_idx = idx
+            insert_idx = next(
+                (index for index in range(len(lines) - 1, final_stage_start, -1) if re.match(r"\s*CMD(?:\s+|\[)", lines[index], re.I)),
+                len(lines),
+            )
             updated_df = "\n".join(lines[:insert_idx] + [seed_block] + lines[insert_idx:]) + "\n"
             mount_summary = "、".join(m["container_path"] for m in mounts)
             if "Dockerfile" in changes_by_path:
@@ -2161,7 +2246,10 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
     Step 2 Transformation Report (proposal['transformation_report']).
     """
     contract = proposal.setdefault("contract", {})
-    scan = scan_app_routes_and_pages(source)
+    build_context = contract.get("build_context")
+    if not isinstance(build_context, list):
+        build_context = None
+    scan = scan_app_routes_and_pages(source, build_context=build_context)
     sqlite_info = inspect_local_sqlite_files(source)
 
     # 1. Merge any missing scanned APIs into contract['apis'] so 0 routes are omitted

@@ -2,10 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, stat, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { zipSync, strToU8 } from 'fflate'
 import { AppDelivery, AppRequestError, fingerprint, worker } from '../src/host/app-delivery.ts'
 import { AppSkillProvider } from '../src/host/app-skills.ts'
 import { ContextStore, identityHash } from '../src/host/context.ts'
@@ -25,6 +26,119 @@ test('host rejects changes to the confirmed container port', async () => {
   const url = 'http://127.0.0.1:8080'
   await assert.rejects(delivery.submit({ id: 'port', name: 'App', slug: 'test-app', url, session: '', port: 9000,
     status: 'analyzing', events: [] }, tmpdir(), proposal(url), new AbortController().signal), /容器端口/)
+})
+
+test('imports UTF-8 ZIP paths even when both headers omit the UTF-8 flag', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-app-zip-'))
+  try {
+    const path = '私池与AI后端/bff/src/main.ts'
+    const content = 'console.log("ready")\n'
+    const archive = Buffer.from(zipSync({ [`project/${path}`]: strToU8(content) }))
+    const central = archive.readUInt32LE(archive.length - 22 + 16)
+    const local = archive.readUInt32LE(central + 42)
+    archive.writeUInt16LE(archive.readUInt16LE(central + 8) & ~0x800, central + 8)
+    archive.writeUInt16LE(archive.readUInt16LE(local + 6) & ~0x800, local + 6)
+    const source = join(home, 'source.zip')
+    const root = join(home, 'job')
+    await writeFile(source, archive)
+    await worker({ root, action: 'prepare', source, slug: 'test-app', url: 'http://127.0.0.1:8080' })
+    assert.equal(await readFile(join(root, 'review/source', path), 'utf8'), content)
+    const original = await worker({ root, action: 'read', path, proposed: true })
+    assert.equal(original.path, path)
+    assert.equal(original.view, 'original')
+    assert.match(original.text, /暂无暂存修改/)
+    await assert.rejects(
+      worker({ root, action: 'read', path: 'bff/src/main.ts' }),
+      error => error instanceof Error && error.message.includes(path),
+    )
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('route scan keeps runtime endpoints and excludes test and demo service routes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-app-route-scan-'))
+  const source = join(root, 'review/source')
+  try {
+    const files = {
+      'src/routes/test/server.cjs': "app.get('/live', handler)\n",
+      'tests/gateway-rbac-permission.test.ts': "const mock = { path: '/p' }\n",
+      '.claude/worktrees/local-copy/server.cjs': "app.get('/archived-working-copy', handler)\n",
+      'handoff/run-correction-demo.cjs': "if (!process.argv.includes('--fixture')) throw Error('This script is demo-only')\napp.get('/', handler)\n",
+      'tools/correction_server.py': '"""仅供演示。"""\nparser.add_argument("--demo")\nif not args.demo: parser.error("demo required")\nif self.path == "/action":\n    pass\n',
+      'services/main.cjs': "// The extra options in --demo mode are demo-only.\nconst demo = process.argv.includes('--demo')\napp.get('/business', handler)\n",
+      'nest/src/main.ts': "import { NestFactory } from '@nestjs/core'\napp.setGlobalPrefix('api')\n",
+      'nest/src/health.controller.ts': '@Controller()\nexport class HealthController {\n  @Get("health")\n  health() {}\n}\n',
+      'swagger.json': JSON.stringify({
+        swagger: '2.0',
+        paths: { '/search': { post: { parameters: [
+          { in: 'query', name: 'limit', type: 'integer', description: '最大条数' },
+          { in: 'body', name: 'filter', required: true, schema: { type: 'object' } },
+        ] } } },
+      }),
+    }
+    for (const [path, content] of Object.entries(files)) {
+      const file = join(source, path)
+      await mkdir(dirname(file), { recursive: true })
+      await writeFile(file, content)
+    }
+    const scanned = await worker({ root, action: 'scan_routes_and_pages' })
+    assert.deepEqual(scanned.apis.map((api: { path: string }) => api.path), ['/api/health', '/business', '/live', '/search'])
+    assert.deepEqual(scanned.apis[0].evidence, ['nest/src/health.controller.ts:3'])
+    assert.equal(scanned.apis[3].request_body.required, true)
+    assert.deepEqual(scanned.apis[3].parameters.map((p: { in: string }) => p.in), ['query'])
+    assert.ok(scanned.apis.every((api: { auth: { type: string } }) => api.auth.type === 'unknown'))
+    assert.deepEqual(scanned.pages, [])
+
+    const plan = proposal('http://127.0.0.1:8080')
+    plan.changes = []
+    plan.contract.apis = []
+    plan.contract.build_context = ['src/routes/test']
+    plan.contract.verification = { cases: [] }
+    Object.assign(plan.contract, {
+      auth_rules: [{ target: 'api', path: '/live', auth: { type: 'none' }, evidence: ['src/routes/test/server.cjs:1'] }],
+    })
+    const validated = await worker({ root, action: 'validate', allow_unresolved: true, proposal: plan })
+    assert.deepEqual(validated.proposal.contract.apis.map((api: { path: string }) => api.path), ['/live'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('direct API and page auth evidence is checked against the proposed source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-app-auth-evidence-'))
+  const source = join(root, 'review/source')
+  const path = 'services/安全/guard.go'
+  try {
+    const file = join(source, path)
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, 'package guards\n')
+
+    const plan = proposal('http://127.0.0.1:8080')
+    plan.changes = [{
+      path: `./${path}`,
+      reason: '保留服务的认证处理',
+      content: 'package guards\n\nfunc checkSession(session string) bool {\n    return session != ""\n}\n',
+    }]
+    const api = plan.contract.apis[0]
+    api.evidence = [`${path}:1`]
+    const apiAuth = { type: 'bearer', env: 'SERVICE_TOKEN', evidence: [`${path}:3-5`] }
+    api.auth = apiAuth
+    const pageAuth = { type: 'header', header: 'Cookie', env: 'WEB_SESSION', evidence: [`${path}:3`] }
+    Object.assign(plan.contract, {
+      pages: [{ path: '/dashboard', purpose: '看板', actions: ['查看看板'], evidence: [`${path}:1`], auth: pageAuth }],
+    })
+    const validate = () => worker({ root, action: 'validate', allow_unresolved: true, proposal: plan })
+    assert.equal((await validate()).valid, true)
+
+    pageAuth.evidence = [`${path}:6`]
+    await assert.rejects(validate(), /拟提交文件 .*共 5 行/)
+    pageAuth.evidence = [`${path}:3`]
+    apiAuth.evidence = ['services/错误目录/guard.go:3']
+    await assert.rejects(validate(), error => error instanceof Error && error.message.includes(path))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('worker retains nested YAML configuration references and existing executable permissions', async () => {
@@ -55,6 +169,29 @@ test('worker retains nested YAML configuration references and existing executabl
     assert.equal(result.original_config_values.DATABASE_DSN, 'postgres://db.example.invalid/app')
     assert.equal(result.original_config_values.SERVICE_ENDPOINT, 'https://test.invalid')
     assert.ok((await stat(join(job, 'audit/approved/source/start.sh'))).mode & 0o111)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('volume initialization targets the final image and the declared mount path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-volume-mapping-'))
+  try {
+    await mkdir(join(root, 'review/source'), { recursive: true })
+    await writeFile(join(root, 'review/source/main.py'), 'print("hello")\n')
+    const plan = proposal('http://127.0.0.1:8080')
+    const dockerfile = 'FROM python:3.11-alpine AS build\nWORKDIR /compile\nEXPOSE 9000\n'
+      + 'FROM python:3.11-alpine\nWORKDIR /srv/runtime\nCOPY main.py .\nCMD ["python", "main.py"]\n'
+    plan.changes[0].content = dockerfile
+    Object.assign(plan.contract, {
+      storage_mounts: [{ name: 'records', relative_path: 'initial-records', container_path: '/var/lib/app-records' }],
+    })
+    const validate = () => worker({ root, action: 'validate', allow_unresolved: true, proposal: plan })
+    const patched = (await validate()).proposal.changes[0].content
+    assert.match(patched, /EXPOSE 9000\nFROM python:3\.11-alpine\nWORKDIR \/srv\/runtime/)
+    assert.match(patched, /for d in "\/var\/lib\/app-records"; do/)
+    assert.match(patched, /ENTRYPOINT \["\/srv\/runtime\/\.opc-seed\/opc-storage-init\.sh"\]/)
+    const custom = dockerfile.replace('CMD', 'ENTRYPOINT ["python"]\nCMD')
+    plan.changes[0].content = custom
+    assert.equal((await validate()).proposal.changes[0].content, custom)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -398,6 +535,8 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
         { target: 'api', path: '/items', auth: { type: 'none' }, evidence: ['main.py:3300'] },
       ] })
       await assert.rejects(delivery.submit(job, directory, p, signal), /共 5 行/)
+      ;(p.contract as any).auth_rules[0].evidence = ['missing/main.py:3']
+      await assert.rejects(delivery.submit(job, directory, p, signal), /同名文件：main\.py/)
       ;(p.contract as any).auth_rules[0].evidence = ['main.py:3']
       Object.assign(p.contract, { auth_profile: { default_password: 'fixture' } })
       await assert.rejects(delivery.submit(job, directory, p, signal), /embedded credentials/)
@@ -406,7 +545,8 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     }
 
     await delivery.startAnalysis(created.id, '', expected)
-    for (let i = 0; i < 100; i++) {
+    const analysisDeadline = Date.now() + 8_000
+    while (Date.now() < analysisDeadline) {
       const state = (await delivery.list(expected))[0]
       if (state.status !== 'analyzing') break
       await new Promise(r => setTimeout(r, 20))
@@ -560,6 +700,8 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     assert.ok(reviewed.discoveryReport, 'discoveryReport should be unconditionally populated')
     assert.ok(reviewed.transformationReport, 'transformationReport should be unconditionally populated')
     assert.ok(Array.isArray(reviewed.proposal.contract.storage_mounts) && reviewed.proposal.contract.storage_mounts.length > 0, 'storage_mounts should be auto-detected from data/seed.db')
+    const dockerfileChange = reviewed.proposal.changes.find((file: { path: string }) => file.path === 'Dockerfile')
+    assert.match(dockerfileChange.diff, /ENTRYPOINT \["\/app\/\.opc-seed\/opc-storage-init\.sh"\]/)
     assert.ok(reviewed.proposal.changes.some((c: any) => c.diff?.includes('--- main.py (原始)')), 'unified diff should be computed for modified files')
 
     const ready = await delivery.prepare(created.id, reviewed.proposalHash, expected)

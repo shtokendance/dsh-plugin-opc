@@ -6,6 +6,9 @@ const bool = { type: 'boolean' } as const
 const strings = { type: 'array', items: str } as const
 const object = { type: 'object', additionalProperties: true } as const
 const objects = { type: 'array', items: object } as const
+const routeAuth = { ...object, properties: {
+  evidence: { ...strings, description: '该路由的认证源码位置，使用源码读取工具返回的文件路径和行号' },
+} } as const
 
 export function proposalParameters(port: number) {
   // Keep fields optional at the top level for the legacy proposal string.
@@ -53,11 +56,12 @@ export function proposalParameters(port: number) {
         id: text, method: text, path: text, purpose: text,
         evidence: { ...strings, required: true }, parameters: { ...objects, required: true },
         request_body: { oneOf: [{ type: 'null' }, object], required: true },
-        responses: { ...object, required: true }, auth: { ...object, required: true },
+        responses: { ...object, required: true }, auth: { ...routeAuth, required: true },
         effect: { ...text, enum: ['read', 'write', 'destructive', 'external'] },
         confirmation_required: { ...bool, required: true },
       } } },
-      pages: { ...objects, description: '扫描结果由插件合并，可以传 [] 或只补充需要定制的页面' },
+      pages: { ...objects, description: '扫描结果由插件合并，可以传 [] 或只补充需要定制的页面',
+        items: { ...object, properties: { auth: routeAuth } } },
       verification: object,
       unresolved: strings,
     } },

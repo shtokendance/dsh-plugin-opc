@@ -52,6 +52,7 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
 - apis/pages 均显式填写数组并完整收录应用内全部后端接口与全部前端页面/业务视图（不得遗漏任何路由或子面板）；至少一个非空。纯页面应用无需伪造 API，但必须提供浏览器验证计划。
 - 每个 API 必须含 purpose、源码 evidence、实际 parameters/request_body/responses、auth、effect。request_body 为 null 或包含 required、description、schema 的对象；完整 schema 与错误说明应保留，工具不声称完整实现 JSON Schema 验证。API 错误可能包含 HTTP 200 下的业务错误码，业务流程必须明确成功判断，不把 HTTP 成功等同业务成功。
 - auth.type 为 none、bearer 或 header；非 none 必须声明 env 环境变量名或引用 auth_profiles 中的 profile，header 还要提供 header。只允许运行时凭据环境变量引用；禁止将明文密码或固定令牌放进契约、技能或模型输出。
+- 直接在 API 或页面上声明认证时，用 `auth.evidence` 引用登录、会话或权限代码。共用中间件的证据写在 `auth_rules[].evidence`。每条证据使用读取工具返回的相对路径与实际行号，修改过的文件以拟交付版本为准。
 - 账号密码换会话可用 `auth_profiles.account = {"login_url":"/api/session","username_env":"APP_USER","password_env":"APP_PASSWORD"}`，受保护 API 使用 `{"type":"header","header":"Cookie","profile":"account"}`。这两个环境变量是业务验证输入，无需加入容器配置。读取真实会话与权限检查后引用 `文件:行号`，不能沿用其他源码版本的行号。
 - 非只读 effect 必须 confirmation_required:true。不能仅按 HTTP 方法判断，POST 搜索也可以明确标为 read；GET 也可能需要确认。
 - pages 每项含 path、purpose、evidence、actions；无页面就填空数组，浏览器操作需要调用方提供浏览器工具。

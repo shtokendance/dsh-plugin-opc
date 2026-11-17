@@ -2,6 +2,7 @@
 """Deterministic application delivery helpers; analysis and source edits belong to the Agent."""
 
 import argparse
+from glob import escape as escape_glob
 import hashlib
 import io
 import json
@@ -15,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,7 +31,7 @@ OWNER = "opc-app-adapter"
 LABEL = "com.opc.app-adapter.run"
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SLUG = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-EXCLUDED = {".git", ".svn", ".hg", "node_modules", ".venv", "venv", "__pycache__", ".idea", "__MACOSX", ".DS_Store"}
+EXCLUDED = {".git", ".svn", ".hg", ".claude", "node_modules", ".venv", "venv", "__pycache__", ".idea", "__MACOSX", ".DS_Store"}
 # SQLite engine automatically generates transient WAL/SHM files during readonly inspections
 TRANSIENT_FILE_SUFFIXES = {".sqlite-shm", ".sqlite-wal", ".sqlite3-shm", ".sqlite3-wal", ".db-shm", ".db-wal"}
 SECRET_KEY = r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key(?:id|secret)?|client[_-]?secret|token|dsn|connectionstring)"
@@ -67,6 +69,20 @@ def relative(root, name):
         cursor = cursor / part
         require(not cursor.is_symlink(), "symlinks are not allowed")
     return result
+
+
+def source_path_hint(root, name):
+    basename = PurePosixPath(name).name
+    if not basename:
+        return "。请先用 inventory 查询并复制实际路径"
+    matches = []
+    for path in root.rglob(escape_glob(basename)):
+        if path.is_file() and path.name == basename and not path.is_symlink():
+            matches.append(path.relative_to(root).as_posix())
+    if not matches:
+        return "。请先用 inventory 查询并复制实际路径"
+    shown = "、".join(sorted(matches)[:3])
+    return f"。源码中的同名文件：{shown}。请核对并复制实际路径"
 
 
 def valid_url(value):
@@ -147,6 +163,20 @@ def inspect_source(source):
     return files, findings
 
 
+def zip_member_path(member):
+    name = member.orig_filename
+    require("\0" not in name, "ZIP entry name contains a null byte")
+    if not (member.flag_bits & 0x800) and not name.isascii():
+        # Some writers store UTF-8 names without setting the UTF-8 flag.
+        # zipfile has already decoded unflagged names as CP437. Keep that
+        # decoding when the original bytes do not form valid UTF-8.
+        try:
+            return name.encode("cp437").decode("utf-8")
+        except UnicodeError:
+            pass
+    return name
+
+
 def prepare(args):
     work = Path(args.work_dir).resolve()
     require(not work.exists(), "work directory already exists; choose a fresh directory")
@@ -195,19 +225,21 @@ def prepare(args):
         source = work / "source"
         # Validate the entire archive before creating files.
         names = set()
-        for member in members:
-            relative(source, member.filename)
+        entries = [(member, zip_member_path(member)) for member in members]
+        for member, name in entries:
+            relative(source, name)
             mode = member.external_attr >> 16
             require(not stat.S_ISLNK(mode), "archive symlinks are not allowed")
-            require(member.filename not in names, "duplicate ZIP entry")
-            names.add(member.filename)
+            canonical = unicodedata.normalize("NFC", PurePosixPath(name).as_posix())
+            require(canonical not in names, "duplicate ZIP entry")
+            names.add(canonical)
         work.mkdir(parents=True, mode=0o700)
         source.mkdir()
         try:
-            for member in members:
-                if any(p in EXCLUDED for p in PurePosixPath(member.filename).parts):
+            for member, name in entries:
+                if any(p in EXCLUDED for p in PurePosixPath(name).parts):
                     continue
-                target = relative(source, member.filename)
+                target = relative(source, name)
                 if member.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                 else:

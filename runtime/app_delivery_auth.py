@@ -43,32 +43,49 @@ def resolve_authentication(contract):
                 item['auth'] = {**copy.deepcopy(best.get('auth', {})), 'evidence': best['evidence']}
             auth = item.get('auth', {'type': 'unknown'})
             if auth.get('type') == 'unknown':
-                raise ValueError('认证尚未分析：' + item['path'] + '。请读取登录入口、统一中间件和权限检查，填写有证据的 auth 或 auth_rules；不要向用户索要猜测的令牌。')
+                evidence = item.get('evidence')
+                location = evidence[0] if isinstance(evidence, list) and evidence else ''
+                origin = f"。源码位置：{location}" if isinstance(location, str) and location else ""
+                label = item.get('method') if target == 'api' else '页面'
+                raise ValueError(f"认证尚未分析：{label or '接口'} {item['path']}{origin}。请读取该条目的实际登录、会话或权限代码，补齐对应的 auth 或 auth_rules。")
     return contract
 
 
 def validate_auth_evidence(source, proposal):
     """Check citations in the exact source snapshot the proposal describes."""
     contract = proposal["contract"]
-    changes = {change["path"]: change["content"] for change in proposal.get("changes", [])}
+    changes = {
+        delivery.relative(source, change["path"]): change["content"]
+        for change in proposal.get("changes", [])
+    }
+    entries = [entry.get("evidence") if isinstance(entry, dict) else None
+               for entry in [*contract.get("auth_rules", []), *contract.get("auth_blockers", [])]]
+    # Older contracts put source citations on the route itself. When an
+    # explicit authentication citation is supplied, check that citation.
+    for collection in ("apis", "pages"):
+        for item in contract.get(collection, []):
+            entries.append(item.get("auth", {}).get("evidence", item.get("evidence")))
+
     line_counts = {}
-    for entry in [*contract.get("auth_rules", []), *contract.get("auth_blockers", [])]:
-        if not isinstance(entry, dict) or not isinstance(entry.get("evidence"), list) or not entry["evidence"]:
+    for citations in entries:
+        if not isinstance(citations, list) or not citations:
             raise ValueError("认证证据必须是非空的 文件:行号 数组")
-        for evidence in entry["evidence"]:
+        for evidence in citations:
             match = re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", evidence) if isinstance(evidence, str) else None
             if not match:
                 raise ValueError("认证证据必须引用源码读取工具返回的 文件:行号")
             path, start, end = match.groups()
-            if path not in line_counts:
-                source_path = delivery.relative(source, path)
-                content = changes.get(path)
-                if content is None and source_path.is_file():
+            source_path = delivery.relative(source, path)
+            if source_path not in line_counts:
+                content = changes.get(source_path)
+                if content is None:
+                    if not source_path.is_file():
+                        raise ValueError(f"认证证据位置不存在：{evidence}。找不到文件 {path}" + delivery.source_path_hint(source, path))
                     content = delivery.text_of(source_path)
-                line_counts[path] = len(content.splitlines()) if content is not None else 0
-            count = line_counts[path]
+                line_counts[source_path] = len(content.splitlines()) if content is not None else 0
+            count = line_counts[source_path]
             if not 1 <= int(start) <= int(end or start) <= count:
-                location = "拟提交文件" if path in changes else "当前导入源码"
+                location = "拟提交文件" if source_path in changes else "当前导入源码"
                 raise ValueError(
                     f"认证证据位置不存在：{evidence}。{location} {path} 共 {count} 行。"
                     "请只重读该文件的登录处理、会话读取或权限检查，用实际行号修正证据后重新提交。"
