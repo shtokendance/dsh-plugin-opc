@@ -4,6 +4,7 @@ import type {
   AppDeliveryJob,
   AppModelGroup,
   AppStorageOverview,
+  AppStorageMountDetail,
   AppVersionItem,
   DeployedApp,
   OpcApi,
@@ -41,6 +42,7 @@ interface ConfigDraftSnapshot {
   artifactHash: string
   rows: ConfigDraftRow[]
   versionNote: string
+  storageBindings?: Record<string, string>
 }
 
 const SLUG_RE = /^[a-z][a-z0-9-]{2,39}$/
@@ -521,6 +523,15 @@ export function AppsPanel({
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
+  const [storageBindings, setStorageBindings] = useState<Record<string, string>>({})
+  const [existingStorage, setExistingStorage] = useState<AppStorageMountDetail[]>([])
+  const volumeResources = resources.filter(resource => resource.type === 'docker-volume')
+  const defaultVolumeResource = volumeResources.find(resource => resource.is_default) ?? volumeResources[0]
+  const volumeMounts = wizardJob?.proposal?.contract?.storage_mounts ?? []
+  const storageSelections = Object.fromEntries(volumeMounts
+    .filter(mount => !existingStorage.some(old => old.container_path === mount.container_path))
+    .map(mount => [mount.container_path, storageBindings[mount.container_path] ?? defaultVolumeResource?.id ?? '']))
+
   const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
   const [versionNote, setVersionNote] = useState('')
   const draftSaveTimerRef = useRef<number | null>(null)
@@ -716,17 +727,30 @@ export function AppsPanel({
         const draftRaw = api.appConfigDraft ? await api.appConfigDraft(job.id, contextId).catch(() => 'null') : 'null'
         const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw, null)
         const { configs, originals } = mergeJobConfigs(job, draft)
-        setConfigDrafts(configs)
+        const detail = job.upgrade ? parseJson<DeployedApp | null>(await api.appDetails(job.slug, contextId), null) : null
+        const objectRequired = configs.some(config => /^(S3_|AWS_ENDPOINT_URL_S3$)/.test(config.key))
+        const objectResources = resources.filter(resource => resource.type === 'minio-app-storage' && (job.upgrade || objectRequired))
+        const objectStorage = job.upgrade
+          ? objectResources.find(resource => detail?.resource_ids?.includes(resource.id))
+          : objectResources.find(resource => resource.is_default)
+        setConfigDrafts(draft || !objectStorage ? configs : configs.map(config =>
+          objectStorage.env_keys.includes(config.key)
+            ? { ...config, value: '', value_source: 'resource', resource_id: objectStorage.id }
+            : config))
         setOriginalConfigs(originals)
         setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
+        setStorageBindings(draft?.storageBindings ?? {})
+        setExistingStorage(detail?.storage_mounts ?? [])
       } catch {
         const { configs, originals } = mergeJobConfigs(job, null)
         setConfigDrafts(configs)
         setOriginalConfigs(originals)
         setVersionNote(job.versionNote ?? '')
+        setStorageBindings({})
+        setExistingStorage([])
       }
     },
-    [api, contextId],
+    [api, contextId, resources],
   )
 
   const progressJobId = wizardJob?.id
@@ -1073,21 +1097,21 @@ export function AppsPanel({
     }
   }
 
-  const saveDraft = useCallback((job: AppDeliveryJob, rows: AppConfigItem[], note: string) => {
+  const saveDraft = useCallback((job: AppDeliveryJob, rows: AppConfigItem[], note: string, storage: Record<string, string>) => {
     if (!api.appSaveConfigDraft || !job.artifactHash) return Promise.resolve()
-    const body = JSON.stringify({ artifactHash: job.artifactHash, rows: sanitizeConfigRowsForApi(rows), versionNote: note })
+    const body = JSON.stringify({ artifactHash: job.artifactHash, rows: sanitizeConfigRowsForApi(rows), versionNote: note, storageBindings: storage })
     const request = draftSaveRequest.current.catch(() => {}).then(() => api.appSaveConfigDraft!(job.id, body, contextId))
     draftSaveRequest.current = request
     return request
   }, [api, contextId])
 
   const scheduleDraftSave = useCallback(
-    (job: AppDeliveryJob, nextConfigs: AppConfigItem[], nextNote: string) => {
+    (job: AppDeliveryJob, nextConfigs: AppConfigItem[], nextNote: string, storage: Record<string, string>) => {
       if (!api.appSaveConfigDraft || !job.artifactHash) return
       if (draftSaveTimerRef.current) window.clearTimeout(draftSaveTimerRef.current)
       draftSaveTimerRef.current = window.setTimeout(() => {
         draftSaveTimerRef.current = null
-        void saveDraft(job, nextConfigs, nextNote).catch(error => {
+        void saveDraft(job, nextConfigs, nextNote, storage).catch(error => {
           setWizardError(readErrorMessage(error, '配置草稿保存失败，请重试'))
         })
       }, 450)
@@ -1100,7 +1124,7 @@ export function AppsPanel({
       window.clearTimeout(draftSaveTimerRef.current)
       draftSaveTimerRef.current = null
     }
-    if (wizardJob?.status === 'ready' && wizardStep === 3) await saveDraft(wizardJob, configDrafts, versionNote)
+    if (wizardJob?.status === 'ready' && wizardStep === 3) await saveDraft(wizardJob, configDrafts, versionNote, storageBindings)
   }
 
   const leaveWizard = async () => {
@@ -1118,12 +1142,12 @@ export function AppsPanel({
 
   const handleStep3ConfigsChange = (nextConfigs: AppConfigItem[]) => {
     setConfigDrafts(nextConfigs)
-    if (wizardJob) scheduleDraftSave(wizardJob, nextConfigs, versionNote)
+    if (wizardJob) scheduleDraftSave(wizardJob, nextConfigs, versionNote, storageBindings)
   }
 
   const handleStep3NoteChange = (nextNote: string) => {
     setVersionNote(nextNote)
-    if (wizardJob) scheduleDraftSave(wizardJob, configDrafts, nextNote)
+    if (wizardJob) scheduleDraftSave(wizardJob, configDrafts, nextNote, storageBindings)
   }
 
   const handleReturnToReview = async () => {
@@ -1154,6 +1178,11 @@ export function AppsPanel({
       setConfigSubTab('configs')
       return
     }
+    if (Object.values(storageSelections).some(id => !volumeResources.some(resource => resource.id === id))) {
+      setWizardError('请为新增持久化目录选择已启用的 Platform 卷资源')
+      setConfigSubTab('configs')
+      return
+    }
     if (!wizardJob.artifactHash) {
       setWizardError('交付包尚未准备完成，请返回方案核对重新生成交付包')
       return
@@ -1168,6 +1197,7 @@ export function AppsPanel({
         JSON.stringify({
           artifactHash: wizardJob.artifactHash,
           config: cleanConfigs,
+          storageBindings: storageSelections,
           versionNote: versionNote.trim(),
         }),
         contextId,
@@ -1181,6 +1211,7 @@ export function AppsPanel({
           artifactHash: wizardJob.artifactHash,
           confirmationToken,
           config: cleanConfigs,
+          storageBindings: storageSelections,
           versionNote: versionNote.trim(),
         }),
         contextId,
@@ -1708,7 +1739,9 @@ export function AppsPanel({
       Boolean(zipFile || sourcePath.trim())
 
     const missingConfigAlert = wizardJob
-      ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
+      ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
+        (Object.values(storageSelections).some(id => !volumeResources.some(resource => resource.id === id))
+          ? '新增持久化目录需要已启用的 Platform 卷资源' : null)
       : null
 
     return (
@@ -2106,6 +2139,34 @@ export function AppsPanel({
 
               {configSubTab === 'configs' && (
                 <div className="oa-form-card">
+                  {volumeMounts.length > 0 && (
+                    <div className="oa-subcard">
+                      <div className="oa-subcard-head">持久化目录与存储资源</div>
+                      {volumeMounts.map(mount => {
+                        const existing = existingStorage.find(old => old.container_path === mount.container_path)
+                        return (
+                          <div key={mount.container_path} className="oa-hint">
+                            <label>
+                              <code>{mount.container_path}</code> {mount.purpose || ''}
+                              {existing ? <span> · 复用 {existing.volume_name || existing.host_path || '现有挂载'}</span> : (
+                                <select aria-label={`存储资源 ${mount.container_path}`}
+                                  value={storageSelections[mount.container_path]}
+                                  disabled={wizardBusy || volumeResources.length === 0}
+                                  onChange={event => {
+                                    const next = { ...storageBindings, [mount.container_path]: event.target.value }
+                                    setStorageBindings(next)
+                                    scheduleDraftSave(wizardJob, configDrafts, versionNote, next)
+                                  }}>
+                                  {volumeResources.length === 0 && <option value="">等待 Platform 管理员配置存储</option>}
+                                  {volumeResources.map(resource => <option key={resource.id} value={resource.id}>{resource.name}</option>)}
+                                </select>
+                              )}
+                            </label>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                   <AppDeliveryConfig
                     configs={configDrafts}
                     originals={originalConfigs}
@@ -2756,7 +2817,7 @@ export function AppsPanel({
                   <strong style={{ fontSize: 14, color: '#0f172a' }}>持久化数据卷与文件备份</strong>
                   <div className="oa-hint">应用数据库、上传附件及业务持久化目录将在版本升级与重启时保留。</div>
                 </div>
-                {storageOverview && storageOverview.mounts_count > 0 && (
+                {storageOverview && storageOverview.source !== 'swarm' && storageOverview.mounts_count > 0 && (
                   <button
                     type="button"
                     className="oa-btn oa-btn-sm"
@@ -2772,6 +2833,12 @@ export function AppsPanel({
                 <div className="oa-alert oa-alert-info">暂无持久化存储统计信息。</div>
               ) : (
                 <>
+                  {storageOverview.object_storage && (
+                    <div className="oa-subcard">
+                      <strong>对象存储</strong>
+                      <div className="oa-hint">资源 {storageOverview.object_storage.resource_id} · Bucket <code>{storageOverview.object_storage.bucket}</code></div>
+                    </div>
+                  )}
                   <div className="oa-grid-3">
                     <div className="oa-subcard">
                       <div className="oa-hint">挂载卷数量</div>
@@ -2779,7 +2846,7 @@ export function AppsPanel({
                     </div>
                     <div className="oa-subcard">
                       <div className="oa-hint">存储文件总数</div>
-                      <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview.total_files}</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview.source === 'swarm' ? '—' : storageOverview.total_files}</div>
                     </div>
                     <div className="oa-subcard">
                       <div className="oa-hint">已占用空间</div>
@@ -2788,7 +2855,7 @@ export function AppsPanel({
                   </div>
 
                   {storageOverview.mounts.length === 0 ? (
-                    <div className="oa-hint">此应用未声明任何持久化存储挂载点。</div>
+                    <div className="oa-hint">此应用没有目录挂载。</div>
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                       {storageOverview.mounts.map(m => (
@@ -2800,16 +2867,21 @@ export function AppsPanel({
                               {m.seed_protected && <span className="oa-pill oa-pill-ok">初始种子受保护</span>}
                               {m.status && <span className="oa-pill">{m.status}</span>}
                             </div>
-                            <button
-                              type="button"
-                              className="oa-btn oa-btn-xs"
-                              onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, `卷 ${m.name} 备份`)}
-                            >
-                              下载此卷备份
-                            </button>
+                            {storageOverview.source !== 'swarm' && (
+                              <button
+                                type="button"
+                                className="oa-btn oa-btn-xs"
+                                onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, `卷 ${m.name} 备份`)}
+                              >
+                                下载此卷备份
+                              </button>
+                            )}
                           </div>
                           <div className="oa-hint">
-                            大小：{m.size_human ?? formatFileSize(m.size_bytes)} · 文件数：{m.file_count ?? 0}
+                            大小：{m.size_human ?? formatFileSize(m.size_bytes)}
+                            {storageOverview.source === 'swarm' ? '' : ` · 文件数：${m.file_count ?? 0}`}
+                            {m.resource_id ? ` · 资源：${m.resource_id}` : ''}
+                            {m.volume_name ? ` · 卷：${m.volume_name}` : ''}
                             {m.purpose ? ` · 用途：${m.purpose}` : ''}
                           </div>
                           {m.sample_files && m.sample_files.length > 0 && (

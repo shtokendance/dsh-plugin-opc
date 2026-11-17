@@ -23,6 +23,7 @@ export interface ResourceSummary {
   name: string
   type: string
   description: string
+  is_default?: boolean
   env_keys: string[]
   env_preview?: Record<string, string>
 }
@@ -36,6 +37,7 @@ export interface AppStorageMountDetail {
   volume_name?: string
   host_path?: string
   storage_backend?: string
+  resource_id?: string
   seed_files_count?: number
   size_bytes?: number
   size_human?: string
@@ -46,6 +48,8 @@ export interface AppStorageMountDetail {
 }
 
 export interface AppStorageOverview {
+  source?: 'local' | 'swarm'
+  object_storage?: { resource_id: string; bucket: string }
   app_slug: string
   app_name: string
   app_status: string
