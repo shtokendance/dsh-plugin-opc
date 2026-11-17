@@ -329,7 +329,7 @@ function DeploymentLogs({ fetchLogs, live, buildOnly, failed, onCopy, copied }: 
 function inferStepForJob(job: AppDeliveryJob): WizardStep {
   switch (job.status) {
     case 'ready':
-      return 3
+      return job.deploymentReviewPending ? 2 : 3
     case 'building':
     case 'publishing':
     case 'verifying':
@@ -516,12 +516,7 @@ export function AppsPanel({
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Step 2 Footer Bridge
-  const [step2State, setStep2State] = useState<{ canContinue: boolean; running: boolean; triggerNext: () => void }>({
-    canContinue: false,
-    running: false,
-    triggerNext: () => {},
-  })
-  const [reviewInitialFeedback, setReviewInitialFeedback] = useState('')
+  const [step2State, setStep2State] = useState<{ jobId: string; canContinue: boolean; triggerNext: () => void } | null>(null)
 
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
@@ -877,7 +872,6 @@ export function AppsPanel({
       setDragActive(false)
       setZipFile(null)
       setSourcePath('')
-      setReviewInitialFeedback('')
       setConfigSubTab('configs')
       setVerifyCredentials({})
       setRememberCredentials(false)
@@ -891,7 +885,6 @@ export function AppsPanel({
       setWizardNotice(null)
       setVerifyCredentials({})
       setRememberCredentials(false)
-      setReviewInitialFeedback('')
       setConfigSubTab('configs')
       setViewMode('wizard')
       const fresh = useSnapshot ? job : (await refreshWizardJob(job.id)) ?? job
@@ -1272,7 +1265,6 @@ export function AppsPanel({
       if (api.appReopenReview) {
         await api.appReopenReview(wizardJob.id, contextId).catch(() => {})
       }
-      setReviewInitialFeedback(feedback)
       const analyzePromise = api.appAnalyzeWithMode
         ? api.appAnalyzeWithMode(wizardJob.id, feedback, sessionId, 'repair', contextId)
         : api.appAnalyze(wizardJob.id, feedback, sessionId, contextId)
@@ -2016,15 +2008,14 @@ export function AppsPanel({
           {/* STEP 2 */}
           {wizardStep === 2 && wizardJob && (
             <AppDeliveryReview
+              key={wizardJob.id}
               api={api}
               sessionId={sessionId}
               contextId={contextId}
               jobId={wizardJob.id}
               beginAnalysisNavigation={beginAnalysisNavigation}
               footerMode="external"
-              onlineResources={resources}
               repairMode={wizardJob.analysis_mode === 'repair' || wizardJob.analysisMode === 'repair'}
-              initialFeedback={reviewInitialFeedback}
               onReady={updated => {
                 setWizardJob(updated)
                 void syncStep3Drafts(updated)
@@ -2443,14 +2434,11 @@ export function AppsPanel({
               >
                 返回重选源码
               </button>
-              <button
-                type="button"
-                className="oa-btn oa-btn-primary"
-                disabled={!step2State.canContinue || step2State.running}
-                onClick={() => step2State.triggerNext()}
-              >
-                {step2State.running ? '正在准备交付包…' : '确认改造方案，进入配置检查'}
-              </button>
+              {step2State?.jobId === wizardJob.id && step2State.canContinue && (
+                <button type="button" className="oa-btn oa-btn-primary" onClick={() => step2State.triggerNext()}>
+                  下一步：核对部署内容
+                </button>
+              )}
             </>
           )}
 

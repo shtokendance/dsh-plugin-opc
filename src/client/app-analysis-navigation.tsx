@@ -61,7 +61,7 @@ export function registerAnalysisNavigation(ctx: Context, api: OpcApi): PrepareAn
             }
             return
           }
-          if (current.status !== 'analyzing' || !api.appJob) return
+          if ((current.status !== 'analyzing' && !current.analysisChatStarting) || !api.appJob) return
           await new Promise(resolve => setTimeout(resolve, 500))
           if (!canNavigate()) return
           current = JSON.parse(await api.appJob(job.id, contextId)) as AppDeliveryJob
