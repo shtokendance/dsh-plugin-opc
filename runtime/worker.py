@@ -151,7 +151,7 @@ def resolve_and_enrich_proposal(
             if cid and cid in draft_files:
                 staged = draft_files[cid]
                 if change.get("path") and staged.get("path") and change["path"] != staged["path"]:
-                    raise ValueError("汇总提案的文件路径与分项提案不一致")
+                    raise ValueError(f"汇总提案的文件路径与分项提案不一致：{cid} 已对应 {staged['path']}，本次提交 {change['path']}。请核对路径")
                 change = {**staged, **change}
             elif not change.get("id") and change.get("path"):
                 by_path = next((v for v in draft_files.values() if isinstance(v, dict) and v.get("path") == change["path"]), None)
@@ -374,18 +374,20 @@ def main(body):
     if action == "read":
         source_dir = root / "review/source"
         path = body["path"]
-        proposed = bool(body.get("proposed"))
-        if proposed:
+        p = d.relative(source_dir, path)
+        change = None
+        if body.get("proposed"):
             drafts = load_json_if_exists(root / "draft_files.json", {})
             change = next((c for c in reversed(list(drafts.values())) if isinstance(c, dict) and c.get("path") == path), None)
-            if change is None or not isinstance(change.get("content"), str):
-                raise ValueError("该文件尚无暂存修改，请读取原始源码")
+        proposed = change is not None and isinstance(change.get("content"), str)
+        if proposed:
             content = change["content"]
         else:
-            p = d.relative(source_dir, path)
+            if not p.is_file():
+                raise ValueError(f"找不到源码或该路径的暂存稿：{path}" + d.source_path_hint(source_dir, path))
             content = d.text_of(p)
         if content is None:
-            return {"text": "Binary file"}
+            return {"path": path, "view": "proposed" if proposed else "original", "text": "Binary file"}
         start = max(0, int(body.get("start", 1)) - 1)
         lines = redact(content, path).splitlines()
         excerpt = "\n".join(f"{i + start + 1}: {s[:400]}" for i, s in enumerate(lines[start:start+200]))
@@ -393,11 +395,13 @@ def main(body):
         range_info = f"返回第 {start + 1}–{start + returned} 行" if returned else "所请求范围无内容"
         location = "拟交付文件" if proposed else "原始源码"
         excerpt = f"{location} {path} 共 {len(lines)} 行，{range_info}。\n{excerpt}"
+        if body.get("proposed") and not proposed:
+            excerpt = "该路径暂无暂存修改，以下为原始源码。\n" + excerpt
         if not proposed:
             fields = original_fields(source_dir, path)
             if fields:
                 excerpt += "\nOriginal configuration references (metadata only; values stay local):\n" + json.dumps(fields, ensure_ascii=False)
-        return {"text": excerpt, "total_lines": len(lines)}
+        return {"path": path, "view": "proposed" if proposed else "original", "text": excerpt, "total_lines": len(lines)}
     if action == "read_failed":
         revision = body.get("revision", "")
         d.require(isinstance(revision, str) and revision.isalnum(), "Invalid revision")
@@ -422,10 +426,9 @@ def main(body):
         res = scan_app_routes_and_pages(root / "review/source")
         d.save(root / "routes_scanned.json", {"scanned": True})
         res["_auto_contract_enrichment"] = (
-            "系统已在后端自动缓存全部扫描到的 API 接口与页面视图。你在调用 opc_delivery_submit 时，"
-            "后端会自动将全部扫描到的接口与页面 100% 合并注入 contract.apis 与 contract.pages 中。"
-            "你无需重复手写几十个接口对象（传空数组 [] 或仅传需定制覆盖的接口即可），"
-            "也严禁把接口数量多或扫描问题写入 unresolved！"
+            "提交方案时，系统会按同一规则复核 build_context 内的接口与页面并合并进契约。"
+            "只提交需覆盖或补充的正式路由，不要把测试路径、演示入口和样例重新加进契约。"
+            "认证方式必须根据正式入口及中间件确认，扫描待核对项不用向用户提问。"
         )
         return res
     if action == "inspect_local_storage":
@@ -459,7 +462,7 @@ def main(body):
         drafts = load_json_if_exists(draft_path, {})
         cid = change["id"]
         if cid in drafts and drafts[cid].get("path") != change["path"]:
-            raise ValueError("同一修改 ID 不能对应不同文件")
+            raise ValueError(f"同一修改 ID 不能对应不同文件：{cid} 已对应 {drafts[cid]['path']}，本次提交 {change['path']}。请核对路径")
         drafts[cid] = change
         save_draft_files(draft_path, drafts)
         return {"staged": cid, "path": change["path"], "message": f"File proposal recorded: {cid}. Source is unchanged."}
