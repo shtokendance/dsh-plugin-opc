@@ -96,7 +96,7 @@ export function AppDeliveryConfig({
   const renderConfigCard = (item: AppConfigItem, index: number) => {
     const original = originals.find(o => o.key === item.key)
     const candidates = resources.filter(r => matches(original || item, r) &&
-      (r.type !== 'minio-app-storage' || configs.some(config => /^(S3_|AWS_ENDPOINT_URL_S3$)/.test(config.key) || config.resource_id === r.id)))
+      (r.type !== 'minio-app-storage' || configs.some(config => config.resource_id === r.id)))
     const selected = resources.find(r => r.id === item.resource_id)
     const changed = !!item.resource_id || (!!original && item.value !== original.value)
     const hasOriginalFileSource = original?.value_source === 'original' || original?.has_original_value
