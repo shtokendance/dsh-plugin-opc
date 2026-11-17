@@ -37,6 +37,7 @@ export interface AppStorageMountDetail {
   volume_name?: string
   host_path?: string
   storage_backend?: string
+  storage_location?: string
   resource_id?: string
   seed_files_count?: number
   size_bytes?: number

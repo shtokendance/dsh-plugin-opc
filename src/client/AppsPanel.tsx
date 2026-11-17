@@ -525,12 +525,17 @@ export function AppsPanel({
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
   const [storageBindings, setStorageBindings] = useState<Record<string, string>>({})
   const [existingStorage, setExistingStorage] = useState<AppStorageMountDetail[]>([])
-  const volumeResources = resources.filter(resource => resource.type === 'docker-volume')
-  const defaultVolumeResource = volumeResources.find(resource => resource.is_default) ?? volumeResources[0]
+  const volumeResources = resources.filter(resource => resource.type === 'local-directory' || resource.type === 'aliyun-oss-volume')
   const volumeMounts = wizardJob?.proposal?.contract?.storage_mounts ?? []
+  const volumeOptions = (mount: AppStorageMountDetail) =>
+    volumeResources.filter(resource => mount.kind !== 'sqlite' || resource.type === 'local-directory')
   const storageSelections = Object.fromEntries(volumeMounts
     .filter(mount => !existingStorage.some(old => old.container_path === mount.container_path))
-    .map(mount => [mount.container_path, storageBindings[mount.container_path] ?? defaultVolumeResource?.id ?? '']))
+    .map(mount => {
+      const options = volumeOptions(mount)
+      const selected = options.find(resource => resource.id === storageBindings[mount.container_path])
+      return [mount.container_path, (selected ?? options.find(resource => resource.is_default) ?? options[0])?.id ?? '']
+    }))
 
   const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
   const [versionNote, setVersionNote] = useState('')
@@ -728,11 +733,8 @@ export function AppsPanel({
         const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw, null)
         const { configs, originals } = mergeJobConfigs(job, draft)
         const detail = job.upgrade ? parseJson<DeployedApp | null>(await api.appDetails(job.slug, contextId), null) : null
-        const objectRequired = configs.some(config => /^(S3_|AWS_ENDPOINT_URL_S3$)/.test(config.key))
-        const objectResources = resources.filter(resource => resource.type === 'minio-app-storage' && (job.upgrade || objectRequired))
-        const objectStorage = job.upgrade
-          ? objectResources.find(resource => detail?.resource_ids?.includes(resource.id))
-          : objectResources.find(resource => resource.is_default)
+        const objectStorage = resources.find(resource =>
+          resource.type === 'minio-app-storage' && detail?.resource_ids?.includes(resource.id))
         setConfigDrafts(draft || !objectStorage ? configs : configs.map(config =>
           objectStorage.env_keys.includes(config.key)
             ? { ...config, value: '', value_source: 'resource', resource_id: objectStorage.id }
@@ -1178,7 +1180,7 @@ export function AppsPanel({
       setConfigSubTab('configs')
       return
     }
-    if (Object.values(storageSelections).some(id => !volumeResources.some(resource => resource.id === id))) {
+    if (Object.values(storageSelections).some(id => !id)) {
       setWizardError('请为新增持久化目录选择已启用的 Platform 卷资源')
       setConfigSubTab('configs')
       return
@@ -1740,7 +1742,7 @@ export function AppsPanel({
 
     const missingConfigAlert = wizardJob
       ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
-        (Object.values(storageSelections).some(id => !volumeResources.some(resource => resource.id === id))
+        (Object.values(storageSelections).some(id => !id)
           ? '新增持久化目录需要已启用的 Platform 卷资源' : null)
       : null
 
@@ -2144,21 +2146,26 @@ export function AppsPanel({
                       <div className="oa-subcard-head">持久化目录与存储资源</div>
                       {volumeMounts.map(mount => {
                         const existing = existingStorage.find(old => old.container_path === mount.container_path)
+                        const options = volumeOptions(mount)
                         return (
                           <div key={mount.container_path} className="oa-hint">
                             <label>
                               <code>{mount.container_path}</code> {mount.purpose || ''}
-                              {existing ? <span> · 复用 {existing.volume_name || existing.host_path || '现有挂载'}</span> : (
+                              {existing ? <span> · 复用 {existing.storage_location || existing.host_path || existing.volume_name || '现有挂载'}</span> : (
                                 <select aria-label={`存储资源 ${mount.container_path}`}
                                   value={storageSelections[mount.container_path]}
-                                  disabled={wizardBusy || volumeResources.length === 0}
+                                  disabled={wizardBusy || options.length === 0}
                                   onChange={event => {
                                     const next = { ...storageBindings, [mount.container_path]: event.target.value }
                                     setStorageBindings(next)
                                     scheduleDraftSave(wizardJob, configDrafts, versionNote, next)
                                   }}>
-                                  {volumeResources.length === 0 && <option value="">等待 Platform 管理员配置存储</option>}
-                                  {volumeResources.map(resource => <option key={resource.id} value={resource.id}>{resource.name}</option>)}
+                                  {options.length === 0 && <option value="">{mount.kind === 'sqlite' ? '等待管理员配置本地磁盘卷' : '等待管理员配置存储'}</option>}
+                                  {options.map(resource => (
+                                    <option key={resource.id} value={resource.id}>
+                                      {resource.name} · {resource.type === 'aliyun-oss-volume' ? '阿里云 OSS' : '本地磁盘'}
+                                    </option>
+                                  ))}
                                 </select>
                               )}
                             </label>
@@ -2881,7 +2888,8 @@ export function AppsPanel({
                             大小：{m.size_human ?? formatFileSize(m.size_bytes)}
                             {storageOverview.source === 'swarm' ? '' : ` · 文件数：${m.file_count ?? 0}`}
                             {m.resource_id ? ` · 资源：${m.resource_id}` : ''}
-                            {m.volume_name ? ` · 卷：${m.volume_name}` : ''}
+                            {m.storage_location ? ` · OSS：${m.storage_location}`
+                              : m.host_path ? ` · 路径：${m.host_path}` : m.volume_name ? ` · 卷：${m.volume_name}` : ''}
                             {m.purpose ? ` · 用途：${m.purpose}` : ''}
                           </div>
                           {m.sample_files && m.sample_files.length > 0 && (

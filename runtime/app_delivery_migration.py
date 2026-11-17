@@ -123,6 +123,7 @@ def inspect_local_file_storage(
     dir_seed_files: dict[str, list[str]] = {}
     dir_has_code: set[str] = set()
     code_referenced_dirs: set[str] = set()
+    sqlite_dirs: set[str] = set()
 
     for p in sorted(source.rglob("*")):
         if p.is_symlink():
@@ -189,6 +190,7 @@ def inspect_local_file_storage(
         if any(p.suffix.lower() in _SOURCE_CODE_EXTENSIONS for p in parent.rglob("*") if p.is_file()):
             continue
         rel_dir = parent.relative_to(source).as_posix()
+        sqlite_dirs.add(rel_dir)
         dir_seed_files.setdefault(rel_dir, []).extend(p.relative_to(source).as_posix() for p in parent.rglob("*") if p.is_file() and not p.is_symlink())
 
     for d in sorted(code_referenced_dirs):
@@ -223,7 +225,7 @@ def inspect_local_file_storage(
             "relative_path": rel_dir,
             "container_path": container_path,
             "purpose": purpose,
-            "kind": meta["kind"],
+            "kind": "sqlite" if any(d == rel_dir or d.startswith(rel_dir + "/") for d in sqlite_dirs) else meta["kind"],
             "volume_name": f"opc-vol-{clean_slug}-{vol_suffix}",
             "storage_backend": "docker_volume",
             "seed_files_count": len(seeds),

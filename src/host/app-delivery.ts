@@ -991,8 +991,11 @@ export class AppDelivery {
     const available: AppDocument[] = ids.length || Object.keys(storageBindings).length
       ? (await this.platform('/resources', expected)).resources ?? [] : []
     for (const [path, id] of Object.entries(storageBindings)) {
-      if (!available.some(resource => resource.id === id && resource.type === 'docker-volume')) {
-        throw new Error(`持久化目录的存储资源不可用：${path}`)
+      const resource = available.find(resource => resource.id === id &&
+        ['local-directory', 'aliyun-oss-volume', 'docker-volume'].includes(resource.type))
+      if (!resource) throw new Error(`持久化目录的存储资源不可用：${path}`)
+      if (resource.type === 'aliyun-oss-volume' && declaredMounts.find(mount => mount.container_path === path)?.kind === 'sqlite') {
+        throw new Error(`SQLite 目录必须使用本地磁盘卷：${path}`)
       }
     }
     const storageMounts = declaredMounts.map(mount => {
