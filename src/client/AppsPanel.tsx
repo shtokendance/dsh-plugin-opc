@@ -515,7 +515,6 @@ export function AppsPanel({
   const [appName, setAppName] = useState('')
   const [appSlug, setAppSlug] = useState('')
   const [slugManual, setSlugManual] = useState(false)
-  const [containerPort, setContainerPort] = useState<string>('8080')
   const [appDescription, setAppDescription] = useState('')
   const [zipFile, setZipFile] = useState<File | null>(null)
   const [sourcePath, setSourcePath] = useState('')
@@ -637,12 +636,6 @@ export function AppsPanel({
   useEffect(() => {
     void loadWorkspaceData(false)
   }, [loadWorkspaceData, refreshSignal])
-
-  useEffect(() => {
-    if (viewMode === 'wizard' && wizardStep === 1 && !wizardJob && !upgradeTarget) {
-      setContainerPort(String(opcConfig.defaultPort))
-    }
-  }, [opcConfig.defaultPort, upgradeTarget, viewMode, wizardJob, wizardStep])
 
   // Initialize default provider / model / effort whenever modelGroups changes
   useEffect(() => {
@@ -955,7 +948,6 @@ export function AppsPanel({
       setAppName(upgradeApp?.name ?? prevJob?.name ?? '')
       setAppSlug(upgradeApp?.slug ?? prevJob?.slug ?? '')
       setSlugManual(Boolean(upgradeApp || prevJob))
-      setContainerPort(String(upgradeApp?.container_port ?? prevJob?.port ?? opcConfig.defaultPort))
       setAppDescription(upgradeApp?.description ?? prevJob?.description ?? '')
       sourceSelection.current++
       setDragActive(false)
@@ -965,7 +957,7 @@ export function AppsPanel({
       setVerifyCredentials({})
       setRememberCredentials(false)
     },
-    [opcConfig.defaultPort],
+    [],
   )
 
   const resumeWizardJob = useCallback(
@@ -986,13 +978,12 @@ export function AppsPanel({
         setAppName(fresh.name)
         setAppSlug(fresh.slug)
         setSlugManual(true)
-        setContainerPort(String(fresh.port ?? opcConfig.defaultPort))
         setAppDescription(fresh.description ?? '')
       } else if (targetStep === 3) {
         await syncStep3Drafts(fresh)
       }
     },
-    [apps, opcConfig.defaultPort, refreshWizardJob, syncStep3Drafts],
+    [apps, refreshWizardJob, syncStep3Drafts],
   )
 
   const openLinkedJob = useCallback(async (job: AppDeliveryJob, refresh = true) => {
@@ -1049,11 +1040,6 @@ export function AppsPanel({
       setWizardError('该应用标识已被占用，请更换其他标识')
       return
     }
-    const parsedPort = Number.parseInt(containerPort, 10)
-    if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
-      setWizardError('容器端口必须为 1 至 65535 之间的整数')
-      return
-    }
     if (!zipFile && !sourcePath.trim()) {
       setWizardError('请选择源码文件夹或 ZIP，或者填写完整路径')
       return
@@ -1065,7 +1051,6 @@ export function AppsPanel({
       const payload: Record<string, unknown> = {
         name: cleanName,
         slug: cleanSlug,
-        container_port: parsedPort,
         description: appDescription.trim(),
         upgrade: upgradingStep1,
         previousJobId: previousJobId || undefined,
@@ -1816,17 +1801,14 @@ export function AppsPanel({
       { id: 4, label: '部署与使用' },
     ]
     const upgrading = Boolean(upgradeTarget || wizardJob?.upgrade || wizardJob?.published)
+    const effectiveStep1Port = upgradeTarget?.container_port ?? wizardJob?.port ?? opcConfig.defaultPort
 
-    const portNum = Number.parseInt(containerPort, 10)
     const slugValid = SLUG_RE.test(toAppSlug(appSlug, { allowTrailingDash: false }))
     const canSubmitStep1 =
       !wizardBusy &&
       appName.trim().length > 0 &&
       slugValid &&
       (upgradingStep1 || slugCheck.available !== false) &&
-      Number.isInteger(portNum) &&
-      portNum >= 1 &&
-      portNum <= 65535 &&
       Boolean(zipFile || sourcePath.trim())
 
     const missingConfigAlert = wizardJob
@@ -1997,7 +1979,7 @@ export function AppsPanel({
                       )}
                     </div>
                     <span style={{ fontSize: 11.5, color: '#64748b', flexShrink: 0 }}>
-                      (容器端口: {containerPort || opcConfig.defaultPort})
+                      (容器端口: {effectiveStep1Port})
                     </span>
                   </div>
                   {!upgradingStep1 && slugCheck.error && (
@@ -2005,21 +1987,6 @@ export function AppsPanel({
                       {slugCheck.error}
                     </div>
                   )}
-                </div>
-
-                <div className="oa-field" style={{ maxWidth: 260 }}>
-                  <label className="oa-label" htmlFor={`${formId}-container-port`}>容器监听端口 *</label>
-                  <input
-                    id={`${formId}-container-port`}
-                    className="oa-input oa-mono"
-                    type="number"
-                    min={1}
-                    max={65535}
-                    value={containerPort}
-                    placeholder={String(opcConfig.defaultPort)}
-                    onChange={e => setContainerPort(e.target.value)}
-                  />
-                  <div className="oa-hint">默认 {opcConfig.defaultPort}；若源码或 Dockerfile 监听其他端口可在此调整。</div>
                 </div>
 
                 <div className="oa-field">
@@ -2164,7 +2131,6 @@ export function AppsPanel({
                 setAppName(wizardJob.name)
                 setAppSlug(wizardJob.slug)
                 setSlugManual(true)
-                setContainerPort(String(wizardJob.port ?? opcConfig.defaultPort))
                 setAppDescription(wizardJob.description ?? '')
                 if (wizardJob.upgrade || wizardJob.published) {
                   const target = apps.find(a => a.slug === wizardJob.slug && a.can_manage === true)
@@ -2604,7 +2570,6 @@ export function AppsPanel({
                   setAppName(wizardJob.name)
                   setAppSlug(wizardJob.slug)
                   setSlugManual(true)
-                  setContainerPort(String(wizardJob.port ?? opcConfig.defaultPort))
                   setAppDescription(wizardJob.description ?? '')
                   if (wizardJob.upgrade || wizardJob.published) {
                     const target = apps.find(a => a.slug === wizardJob.slug && a.can_manage === true)
