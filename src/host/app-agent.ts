@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
 import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, verificationCredentialFields, worker } from './app-delivery.ts'
@@ -153,7 +153,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const agentOptions = selection
       ? { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
       : { ...parent?.options }
-    const options: Omit<ResumeAgentOptions, 'resumeSessionId'> = {
+    const options: Omit<CreateAgentOptions, 'sessionId' | 'meta'> = {
       agentOptions,
       signal: abort,
       setup(child) {
@@ -278,17 +278,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           } }))
       },
     }
-    const previousSessionId = job.analysisSessions?.at(-1)
-    let handle: AgentHandle | undefined
-    if (previousSessionId && !ctx.agents.get(previousSessionId as never)) {
-      try {
-        handle = await ctx.agents.resume({ ...options, resumeSessionId: previousSessionId as never })
-      } catch {
-        abort.throwIfAborted()
-        // A missing or occupied transcript can be replaced; task history is stored separately.
-      }
-    }
-    const analysis = handle ?? await ctx.agents.create({
+    // Always bind analysis turns to a fresh Session ID instead of resuming a disposed one:
+    // DSH client marks disposed sessions as removed ("会话不可用") permanently.
+    // taskContext already carries previous_plan, draft_file_changes, and user_answers.
+    const analysis = await ctx.agents.create({
       ...options, sessionId: randomUUID() as never, meta: { cwd: root },
     })
     const turnOutcome: { failure?: LlmFailure; truncated?: boolean; stopped?: boolean } = {}
@@ -400,6 +393,15 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         source: { kind: 'opc-app-delivery', form: 'notice', summary: 'OPC 应用改造任务已载入' },
         content: [{ type: 'text', text: taskContext }],
       })
+      const pendingQuestions = waitingForReply ? analysisQuestions(job.proposal) : []
+      if (pendingQuestions.length > 0) {
+        analysis.agent.inject({
+          id: randomUUID() as never,
+          role: 'user',
+          source: { kind: 'opc-app-delivery', form: 'notice', summary: `等待确认的问题：${pendingQuestions.join('；')}` },
+          content: [{ type: 'text', text: pendingQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n') }],
+        })
+      }
       await onSessionReady(String(analysis.agent.session.id))
       sessionReady.resolve(true)
       let prompt = '请开始准备应用。'
