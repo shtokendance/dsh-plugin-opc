@@ -6,6 +6,9 @@ import { dirname, join } from 'node:path'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { zipSync, strToU8 } from 'fflate'
 import { AppDelivery, AppRequestError, fingerprint, worker } from '../src/host/app-delivery.ts'
 import { AppSkillProvider } from '../src/host/app-skills.ts'
@@ -1074,4 +1077,256 @@ test('a healthy old version does not end polling for a newer build', async () =>
     assert.equal(failed.failureStage, 'deployment')
     assert.equal(failed.error, 'build failed')
   } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('python runtime keeps sqlite on persistent volumes, refreshes .opc-seed cleanly, and scans proposal changes', async () => {
+  const workDir = await mkdtemp(join(tmpdir(), 'opc-py-upgrade-'))
+  try {
+    const runtimeDir = fileURLToPath(new URL('../runtime', import.meta.url))
+    const srcDir = join(workDir, 'src')
+    await mkdir(join(srcDir, 'data'), { recursive: true })
+    await mkdir(join(srcDir, 'uploads'), { recursive: true })
+    await writeFile(join(srcDir, 'uploads', 'welcome.txt'), 'seed')
+    await writeFile(
+      join(srcDir, 'main.py'),
+      [
+        'import sqlite3',
+        'import psycopg2',
+        'from flask import Flask, jsonify',
+        'app = Flask(__name__)',
+        'conn = sqlite3.connect("data/app.db")',
+        '@app.get("/healthz")',
+        'def health(): return jsonify({"service": "demo-app"})',
+        '@app.get("/items")',
+        'def items(): return jsonify({"items": []})',
+      ].join('\n'),
+    )
+    const oldDf = [
+      'FROM python:3.11-slim',
+      'WORKDIR /app',
+      'COPY requirements.txt ./',
+      'COPY . .',
+      '# OPC-PERSISTENT-STORAGE-START',
+      'RUN mkdir -p /app/.opc-seed/data && cp -r /app/data/. /app/.opc-seed/data/ 2>/dev/null || true',
+      '# OPC-PERSISTENT-STORAGE-END',
+      'COPY extra/config.json /app/extra/config.json',
+      'CMD ["python", "main.py"]',
+    ].join('\n')
+    await writeFile(join(srcDir, 'Dockerfile'), oldDf)
+
+    const pyScript = `
+import json, sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(runtimeDir)})
+import app_delivery_migration as m
+
+src = Path(${JSON.stringify(srcDir)})
+with sqlite3.connect(src / "data" / "app.db") as conn:
+    conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO items (name) VALUES ('seed-item')")
+    conn.commit()
+
+updated_main = (src / "main.py").read_text() + "\\n@app.get('/v2/ping')\\ndef v2_ping(): return jsonify({'pong': True})\\n"
+proposal = {
+    "summary": "upgrade to v2",
+    "issues": [],
+    "unresolved": [],
+    "decisions": [],
+    "changes": [
+        {"path": "main.py", "reason": "add v2 ping route", "content": updated_main},
+    ],
+    "contract": {
+        "schema_version": 1,
+        "slug": "demo-app",
+        "name": "Demo",
+        "description": "Demo",
+        "base_url": "http://demo-app.example.test",
+        "runtime": {"language": "python", "version": "3.11", "port": 8080},
+        "build_context": ["Dockerfile", "main.py", "data/app.db", "uploads/welcome.txt"],
+        "health": {"path": "/healthz", "status": 200, "json_contains": {"service": "demo-app"}},
+        "configs": [],
+        "resources": [],
+        "pages": [],
+        "apis": [],
+        "storage_mounts": [
+            {"name": "uploads", "relative_path": "uploads", "container_path": "/app/uploads", "kind": "uploads", "purpose": "uploads"}
+        ],
+        "verification": {"cases": []},
+        "unresolved": [],
+    },
+}
+report = m.enrich_contract_and_discovery_report(src, {"slug": "demo-app"}, proposal)
+print(json.dumps({"report": report, "proposal": proposal}, ensure_ascii=False))
+`
+    const { stdout } = await promisify(execFile)('python3', ['-c', pyScript])
+    const parsed = JSON.parse(stdout)
+    const storageDiscovery = parsed.report?.discovery_report?.storage_and_database ?? {}
+    assert.equal('can_migrate_to_platform_pg' in storageDiscovery, false)
+    assert.equal('platform_pg_resource' in storageDiscovery, false)
+
+    const mounts = parsed.proposal.contract.storage_mounts as Array<Record<string, any>>
+    assert.ok(mounts.some(m => m.container_path === '/app/data' && m.kind === 'sqlite'))
+    assert.ok(mounts.some(m => m.container_path === '/app/uploads'))
+
+    const apis = parsed.proposal.contract.apis as Array<Record<string, any>>
+    assert.ok(apis.some(a => a.path === '/v2/ping'), 'route scan should inspect proposal.changes overlay')
+
+    const dfChange = (parsed.proposal.changes as Array<Record<string, any>>).find(c => c.path === 'Dockerfile')
+    assert.ok(dfChange && typeof dfChange.content === 'string')
+    assert.equal((dfChange.content.match(/# \[OPC Persistent Storage\]/g) ?? []).length, 1)
+    assert.equal(dfChange.content.includes('# OPC-PERSISTENT-STORAGE-START'), false)
+    assert.ok(dfChange.content.includes('/app/uploads') && dfChange.content.includes('/app/data'))
+    assert.ok(dfChange.content.includes('.build-id'))
+    assert.ok(dfChange.content.includes('sync_sqlite.py'))
+    const initMatch = dfChange.content.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| \(base64 -d[^)]+\) > "\/app\/\.opc-seed\/opc-storage-init\.sh"/)
+    assert.ok(initMatch, 'Dockerfile should embed base64 opc-storage-init.sh')
+    const initScript = Buffer.from(initMatch[1], 'base64').toString('utf8')
+    assert.ok(initScript.includes('.opc-backups'))
+    assert.ok(initScript.includes('sync_sqlite.py'))
+    assert.ok(initScript.includes('_opc_copy_seed_dir'))
+    const lastCopy = dfChange.content.lastIndexOf('COPY extra/config.json')
+    const seedStart = dfChange.content.indexOf('# [OPC Persistent Storage]')
+    assert.ok(seedStart > lastCopy, 'seed protection block must be placed after final COPY')
+  } finally {
+    await rm(workDir, { recursive: true, force: true })
+  }
+})
+
+test('upgrade list failure detection, previousJobId inheritance, updateConfig credentials, and AppSkillProvider safety', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-upgrade-host-'))
+  try {
+    const server = createServer((req, res) => {
+      if (req.url === '/healthz') {
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{"service":"up-app"}')
+        return
+      }
+      if (req.url === '/lookup') {
+        const hdr = req.headers['x-api-key']
+        res.writeHead(hdr === 'new-secret' ? 200 : 401, { 'content-type': 'application/json' })
+          .end(hdr === 'new-secret' ? '{"ok":true}' : '{"ok":false}')
+        return
+      }
+      res.writeHead(404).end()
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    try {
+      const addr = server.address() as { port: number }
+      const url = `http://127.0.0.1:${addr.port}`
+      const contexts = new ContextStore()
+      contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+      const expected = contexts.applicationContextId!
+      const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+      const storeMap = new Map<string, Record<string, string>>()
+      const credentials = {
+        async read(id: string) { return { ...(storeMap.get(id) ?? {}) } },
+        async write(id: string, values: Record<string, string>) { storeMap.set(id, { ...values }) },
+      }
+      const delivery = new AppDelivery(core, home, credentials)
+      const scopeDir = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context))
+
+      // 1. Seed verified v1 job and building v2 job where platform auto-rolled back to v1
+      const v1Id = '11111111-1111-4111-8111-111111111111'
+      const v2Id = '22222222-2222-4222-8222-222222222222'
+      const v3Id = '33333333-3333-4333-8333-333333333333'
+      const baseProposal = proposal(url)
+      baseProposal.contract.slug = 'up-app'
+      baseProposal.contract.health.json_contains = { service: 'up-app' }
+      baseProposal.contract.auth_profile = { type: 'header', header: 'X-Api-Key', token_env: 'APP_SECRET', evidence: ['main.py:1'] }
+      baseProposal.contract.configs = [{ key: 'APP_SECRET', secret: true, required: true }]
+      baseProposal.contract.apis = [{
+        id: 'lookup', method: 'GET', path: '/lookup', purpose: 'lookup',
+        evidence: ['main.py:1'], parameters: [], request_body: null,
+        responses: { '200': { description: 'ok' } }, auth: { type: 'header', header: 'X-Api-Key', env: 'APP_SECRET' }, effect: 'read', confirmation_required: false,
+      }]
+
+      const hashesV1 = { 'app.tar': 'a'.repeat(64), 'skill.zip': 'b'.repeat(64) }
+      const hashesV2 = { 'app.tar': 'c'.repeat(64), 'skill.zip': 'd'.repeat(64) }
+      await mkdir(join(scopeDir, v1Id), { recursive: true })
+      await mkdir(join(scopeDir, v2Id), { recursive: true })
+      await mkdir(join(scopeDir, v3Id), { recursive: true })
+      await writeFile(join(scopeDir, v1Id, 'job.json'), JSON.stringify({
+        id: v1Id, name: 'Up App', slug: 'up-app', url, session: 's1', status: 'verified', published: true,
+        version: 1, requestId: 'reqv1', configFingerprint: 'fp-old', createdAt: 1000,
+        checks: [{ operation: 'lookup', status: 200 }], events: [], proposal: baseProposal, hashes: hashesV1,
+      }))
+      await credentials.write('publish-config-reqv1', {
+        rows: JSON.stringify([{ key: 'APP_SECRET', value: 'old-secret' }]),
+      })
+      await writeFile(join(scopeDir, v2Id, 'job.json'), JSON.stringify({
+        id: v2Id, name: 'Up App', slug: 'up-app', url, session: 's1', status: 'building', published: true,
+        upgrade: true, version: 2, requestId: 'reqv2', createdAt: 2000, events: [], proposal: baseProposal, hashes: hashesV2,
+      }))
+      await writeFile(join(scopeDir, v3Id, 'job.json'), JSON.stringify({
+        id: v3Id, name: 'Up App', slug: 'up-app', url, session: 's1', status: 'verified', published: true,
+        version: 3, requestId: 'reqv3', configFingerprint: 'fp-v3', createdAt: 3000,
+        checks: [{ operation: 'lookup', status: 200 }], events: [], proposal: baseProposal, hashes: hashesV1,
+      }))
+
+      let remoteFp = 'fp-old'
+      let remoteVersion = 1
+      let checkSlugCalled = false
+      delivery.platform = async (path, _ctx, opts) => {
+        if (path === '/check-slug') { checkSlugCalled = true; return { available: false } }
+        if (path === '/up-app/config' && opts?.method === 'PUT') {
+          remoteFp = 'fp-new'
+          return { current_version: 1, config_fingerprint: remoteFp }
+        }
+        if (path === '/up-app/versions') {
+          return { versions: [{ version: 2, status: 'failed', app_tar_sha256: hashesV2['app.tar'], skill_zip_sha256: hashesV2['skill.zip'], error_message: 'v2 auto-rolled back' }] }
+        }
+        if (path === '/up-app') {
+          return {
+            status: 'running',
+            current_version: remoteVersion,
+            app_url: url,
+            can_manage: true,
+            config_fingerprint: remoteFp,
+            build_log: `[Artifact] app.tar:${hashesV1['app.tar']}\n[Artifact] skill.zip:${hashesV1['skill.zip']}\n`,
+          }
+        }
+        return {}
+      }
+
+      // A. list() detects failed auto-rolled-back v2 build and sorts newest first
+      const listed = await delivery.list(expected)
+      assert.deepEqual(listed.map(j => j.id), [v3Id, v2Id, v1Id])
+      assert.equal(listed[1].status, 'failed')
+      assert.equal(listed[1].error, 'v2 auto-rolled back')
+
+      // B. AppSkillProvider.get() returns undefined cleanly if remote version doesn't match locator
+      const provider = new AppSkillProvider(delivery, { invalidate() {}, signal: new AbortController().signal })
+      const skillRes = await provider.get(
+        { name: 'app-up-app', description: '', source: 'opc-apps', provider: 'opc-apps', rank: 350,
+          invocation: { modelInvocable: true, userInvocable: true }, locator: { id: v3Id, context: expected, version: 3 } },
+        { signal: new AbortController().signal } as any,
+      )
+      assert.equal(skillRes, undefined)
+
+      // C. Remove v3, updateConfig updates publish-config-reqv1 credentials and verify succeeds with new secret
+      await rm(join(scopeDir, v3Id), { recursive: true, force: true })
+      await delivery.updateConfig('up-app', {
+        container_port: 8080,
+        app_config: [{ key: 'APP_SECRET', value: 'new-secret' }],
+        resource_ids: [],
+      }, expected)
+      const verifiedV1 = await delivery.verify(v1Id, expected)
+      assert.equal(verifiedV1.status, 'verified')
+
+      // D. create({ previousJobId }) inherits upgrade: true when previous had published/upgrade without calling /check-slug
+      const srcFolder = join(home, 'dummy-src')
+      await mkdir(srcFolder, { recursive: true })
+      await writeFile(join(srcFolder, 'main.py'), 'print("ok")')
+      const cloned = await delivery.create(
+        { name: 'Up App', slug: 'up-app', previousJobId: v2Id, source: srcFolder },
+        's1',
+        expected,
+      )
+      assert.equal(checkSlugCalled, false)
+      assert.equal(cloned.upgrade, true)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 })

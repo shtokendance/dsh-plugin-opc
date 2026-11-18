@@ -19,7 +19,7 @@ metadata:
 
 ## 数据与容器
 
-SQLite/JSON/上传文件使用持久化目录，保留原始引擎；SQLite 由工具生成一致性快照，禁止手工删 WAL。挂载覆盖数据库及其 WAL/SHM 所在目录。升级复用已有卷，不借改名更换数据卷。localhost 数据库服务不是文件数据库，必须明确真实依赖地址。远端连接默认保持原值，不能假定可达。
+SQLite/JSON/上传文件使用持久化目录，保留原始引擎，严禁改写为 PostgreSQL；SQLite 由工具生成一致性快照，禁止手工删 WAL。挂载覆盖数据库及其 WAL/SHM 所在目录。升级复用已有卷，不借改名更换数据卷。用户自建的远端 PostgreSQL 实例（非 localhost/127.0.0.1）默认保持原连接配置继续使用；只有应用连接用户本机（localhost/127.0.0.1）的 PostgreSQL 时，才引导用户在部署配置中选择迁移到 platform-opc 提供的 PostgreSQL 资源。升级涉及数据库表结构变更时，必须遵守只增不删（Expand-Only：`CREATE TABLE IF NOT EXISTS`、新增列允许 NULL 或带默认值），并在存在 `DROP`/`RENAME` 等破坏性 DDL 时通过 `unresolved` 显式提醒用户风险。
 
 Dockerfile 保持真实入口、运行时版本、依赖和资产，服务监听 0.0.0.0，/healthz 返回真实 service 标识。构建、健康、业务、页面验证分别记录；不支持的镜像初始化方式明确阻断并提出兼容方案。
 

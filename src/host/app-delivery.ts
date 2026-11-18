@@ -32,7 +32,7 @@ export interface DeliveryJob {
   confirmationToken?: string
   checks?: AppDocument[]; published?: boolean; failureContext?: string; configFingerprint?: string
   configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; local_connection_confirmed?: boolean }[]; versionNote: string; storageBindings?: Record<string, string> }
-  configKeys?: string[]; resourceIds?: string[]; failedSnapshot?: AppDocument; pagesVerified?: boolean
+  configKeys?: string[]; resourceIds?: string[]; failedSnapshot?: AppDocument; pagesVerified?: boolean; superseded?: boolean; createdAt?: number
 }
 
 export function analysisQuestions(proposal?: AppDocument): string[] {
@@ -254,6 +254,7 @@ export class AppDelivery {
         const opened = await this.open(scopeDir, id).catch(() => undefined)
         if (opened && opened.job.slug === slug && ['verified', 'awaiting_page_verification'].includes(opened.job.status)) {
           opened.job.status = 'ready'
+          opened.job.superseded = true
           opened.job.events.push('同应用已切换至其他生效版本，此历史任务技能已停用')
           await this.save(opened.root, opened.job)
         }
@@ -322,6 +323,18 @@ export class AppDelivery {
                   this.recordFailureState(job, remote.error_message || '部署失败', remote.build_log?.slice(-8000), remote.current_version)
                   await this.save(root, job)
                 })
+              } else if (remote.status === 'running' && remote.current_version !== job.version && !this.busy.has(id)) {
+                const history = await this.platform('/' + job.slug + '/versions', expected).catch(() => undefined)
+                const attempted = history?.versions?.find((version: AppDocument) => version.version === job.version)
+                if (attempted?.status === 'failed' && attempted.app_tar_sha256 === job.hashes?.['app.tar'] &&
+                    attempted.skill_zip_sha256 === job.hashes?.['skill.zip']) {
+                  await this.exclusive(id, async () => {
+                    job = (await this.open(scope.directory, id)).job
+                    if (job.status !== 'building' || job.version !== attempted.version) return
+                    this.recordFailureState(job, attempted.error_message || '本次发布失败，旧版本仍在运行', attempted.build_log?.slice(-8000), job.version)
+                    await this.save(root, job)
+                  })
+                }
               }
             }
           } catch { /* An inconclusive response leaves the current task available for status checks. */ }
@@ -329,9 +342,21 @@ export class AppDelivery {
       }
       const view = this.public(job, root)
       if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
-      return view
+      const sortAt = typeof job.createdAt === 'number'
+        ? job.createdAt
+        : await stat(join(root, 'job.json')).then(info => info.mtimeMs, () => 0)
+      return { view, sortAt }
     }))
-    scope.assertCurrent(); return jobs.filter((job): job is AppDocument => job !== undefined).reverse()
+    scope.assertCurrent()
+    return jobs
+      .filter((entry): entry is { view: AppDocument; sortAt: number } => entry !== undefined)
+      .sort((a, b) => {
+        if (b.sortAt !== a.sortAt) return b.sortAt - a.sortAt
+        const supDiff = Number(Boolean(a.view.superseded)) - Number(Boolean(b.view.superseded))
+        if (supDiff !== 0) return supDiff
+        return (Number(b.view.version ?? 0)) - (Number(a.view.version ?? 0))
+      })
+      .map(entry => entry.view)
   }
   async getJob(id: string, expected: string) {
     const scope = this.scope(expected)
@@ -523,7 +548,8 @@ export class AppDelivery {
     let defaultVersionNote = ''
     const previous = input.previousJobId ? (await this.open(scope.directory, input.previousJobId)).job : undefined
     if (previous && previous.slug !== input.slug) throw new Error('重新导入须保持原应用标识')
-    if (input.upgrade) {
+    const isUpgrade = Boolean(input.upgrade || previous?.upgrade || previous?.published)
+    if (isUpgrade) {
       const existing = await this.platform('/' + input.slug, expected)
       if (!existing.can_manage) throw new Error('只有应用创建人或管理员可以升级此应用')
       targetUrl = existing.app_url
@@ -549,8 +575,9 @@ export class AppDelivery {
       url: targetUrl,
       port: targetPort,
       description: targetDesc,
-      upgrade: Boolean(input.upgrade),
+      upgrade: isUpgrade,
       versionNote: defaultVersionNote,
+      createdAt: Date.now(),
       modelSelection: input.modelSelection && typeof input.modelSelection.provider === 'string' && typeof input.modelSelection.model === 'string'
         ? { provider: input.modelSelection.provider, model: input.modelSelection.model, reasoningEffort: typeof input.modelSelection.reasoningEffort === 'string' ? input.modelSelection.reasoningEffort : undefined }
         : undefined,
@@ -621,10 +648,28 @@ export class AppDelivery {
       })
       await this.credentials.write(`draft-${id}`, Object.fromEntries(rows.map((row: AppDocument) => [row.key, row.value])))
       scope.assertCurrent()
-      job.configDraft = { artifactHash: fingerprint(job.hashes), rows: rows.map(({ value: _value, ...row }) => row), versionNote: '' }
+      const priorBindings = job.configDraft?.storageBindings ?? {}
+      const existingMounts: AppDocument[] = Array.isArray(remote.storage_mounts) ? remote.storage_mounts : []
+      const storageBindings: Record<string, string> = {}
+      for (const mount of (job.proposal.contract.storage_mounts ?? []) as AppDocument[]) {
+        const path = mount.container_path
+        const fromDraft = typeof path === 'string' ? priorBindings[path] : undefined
+        const fromRemote = typeof path === 'string'
+          ? existingMounts.find(old => old.container_path === path)?.resource_id
+          : undefined
+        if (typeof fromDraft === 'string' && fromDraft) storageBindings[path] = fromDraft
+        else if (typeof fromRemote === 'string' && fromRemote) storageBindings[path] = fromRemote
+      }
+      job.configDraft = {
+        artifactHash: fingerprint(job.hashes),
+        rows: rows.map(({ value: _value, ...row }) => row),
+        versionNote: '',
+        ...(Object.keys(storageBindings).length > 0 ? { storageBindings } : {}),
+      }
       job.confirmationToken = undefined
       job.status = 'ready'
       job.published = undefined
+      job.superseded = undefined
       job.events.push('已恢复失败版本的交付包和运行配置，请核对后重新部署')
       await this.save(root, job)
       return this.public(job, root)
@@ -979,7 +1024,7 @@ export class AppDelivery {
       throw new Error('存储选择必须对应已确认的持久化目录')
     }
     if (input.storageBindings !== undefined && declaredMounts.some(mount => !storageBindings[mount.container_path])) {
-      const existing: AppDocument[] = job.upgrade
+      const existing: AppDocument[] = (job.upgrade || job.published)
         ? (await this.platform('/' + job.slug, expected)).storage_mounts ?? []
         : []
       if (declaredMounts.some(mount => !storageBindings[mount.container_path] &&
@@ -1240,6 +1285,7 @@ export class AppDelivery {
             await this.demoteOtherJobsForSlug(scope.directory, job.slug, job.id)
             job.configFingerprint = latest.config_fingerprint
             job.published = true
+            job.superseded = undefined
             job.checks = [{ operation: 'page_verification', status: 200 }]
             job.pagesVerified = true
             job.version = remote.current_version
@@ -1249,6 +1295,7 @@ export class AppDelivery {
             scope.assertCurrent()
             job.configFingerprint = latest.config_fingerprint
             job.published = true
+            job.superseded = undefined
             job.version = remote.current_version
             job.status = 'awaiting_page_verification'
             job.events.push('容器与健康身份已就绪，请打开应用页面完成人工验收后确认启用')
@@ -1260,6 +1307,7 @@ export class AppDelivery {
           await this.demoteOtherJobsForSlug(scope.directory, job.slug, job.id)
           job.configFingerprint = latest.config_fingerprint
           job.published = true
+          job.superseded = undefined
           // Verification credentials are transient unless the user opts into local skill use.
           if (options?.rememberCredentials === true && Object.keys(supplied).length) {
             await this.credentials.write(`version-${job.id}-${remote.current_version}`, credentials)
@@ -1349,14 +1397,54 @@ export class AppDelivery {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     const scope = this.scope(expected)
     const result = await this.platform(`/${slug}/config`, expected, { method: 'PUT', body })
+    const activeVersion = result.current_version ?? result.version
     for (const parent of await this.directories(scope.directory)) {
       const entries = await readdir(parent).catch(() => [] as string[])
       for (const id of entries.filter(e => /^[a-f0-9-]{36}$/.test(e))) {
         const opened = await this.open(scope.directory, id).catch(() => undefined)
-        if (opened && opened.job.slug === slug && ['verified', 'awaiting_page_verification'].includes(opened.job.status)) {
-          const activeVersion = result.current_version ?? result.version
-          if (activeVersion && opened.job.version !== activeVersion) continue
+        const eligibleStatus = ['verified', 'awaiting_page_verification'].includes(opened?.job.status ?? '') ||
+          (opened?.job.published && opened.job.status === 'failed' && opened.job.failureStage === 'verification')
+        if (opened && opened.job.slug === slug && !opened.job.superseded && eligibleStatus) {
+          if (activeVersion && opened.job.version && opened.job.version !== activeVersion) continue
+          if (Number.isInteger(body.container_port) && body.container_port >= 1 && body.container_port <= 65535) {
+            opened.job.port = body.container_port
+          }
+          if (Array.isArray(body.app_config)) {
+            const secretKeys = new Set(
+              (opened.job.proposal?.contract?.configs ?? [])
+                .filter((cfg: AppDocument) => cfg.secret)
+                .map((cfg: AppDocument) => cfg.key),
+            )
+            const requestId = opened.job.requestId ||= randomUUID().replaceAll('-', '')
+            const existingSaved = await this.credentials.read(`publish-config-${requestId}`)
+            const existingRows: AppDocument[] = existingSaved.rows ? JSON.parse(existingSaved.rows) : []
+            const existingByKey = new Map(existingRows.map(row => [row.key, row]))
+            const nextRows: AppDocument[] = body.app_config.map((row: AppDocument) => {
+              const prior = existingByKey.get(row.key)
+              const keepSecret = secretKeys.has(row.key) && !row.resource_id && !row.value && prior && !prior.resource_id && prior.value
+              return {
+                ...row,
+                value: row.resource_id ? '' : (keepSecret ? prior.value : (row.value ?? '')),
+              }
+            })
+            await this.credentials.write(`publish-config-${requestId}`, { rows: JSON.stringify(nextRows) })
+            if (opened.job.version) {
+              const versionKey = `version-${opened.job.id}-${opened.job.version}`
+              const versionCreds = await this.credentials.read(versionKey)
+              const updatedVersionCreds = { ...versionCreds }
+              let touchedVersionCreds = false
+              for (const row of nextRows) {
+                if (row.key in updatedVersionCreds && !row.resource_id && typeof row.value === 'string' && row.value) {
+                  updatedVersionCreds[row.key] = row.value
+                  touchedVersionCreds = true
+                }
+              }
+              if (touchedVersionCreds) await this.credentials.write(versionKey, updatedVersionCreds)
+            }
+          }
           opened.job.status = 'building'
+          opened.job.failureStage = undefined
+          opened.job.error = undefined
           opened.job.configFingerprint = undefined
           opened.job.pagesVerified = undefined
           opened.job.events.push('运行配置已更新，需重新验证业务后启用技能')
@@ -1460,6 +1548,7 @@ export class AppDelivery {
         requestId: typeof localMeta?.requestId === 'string' && /^[a-f0-9]+$/.test(localMeta.requestId) &&
           localMeta.hashes?.['app.tar'] === expectedAppTarSha && localMeta.hashes?.['skill.zip'] === expectedSkillSha ? localMeta.requestId : undefined,
         port: current.container_port ?? verInfo.container_port,
+        createdAt: Date.now(),
         events: [`从平台同步回退版本 v${targetVersion}`],
         proposal: { summary: `回退至版本 v${targetVersion}`, unresolved: [], changes: [], contract: {} },
       }
@@ -1475,7 +1564,11 @@ export class AppDelivery {
       if (opened !== primary) {
         if (['verified', 'awaiting_page_verification'].includes(opened.job.status)) {
           opened.job.status = 'ready'
+          opened.job.superseded = true
           opened.job.events.push(`应用已回退至 v${targetVersion}，旧任务技能已停用`)
+          await this.save(opened.root, opened.job)
+        } else if (opened.job.published && !opened.job.superseded) {
+          opened.job.superseded = true
           await this.save(opened.root, opened.job)
         }
         continue
@@ -1483,6 +1576,7 @@ export class AppDelivery {
       opened.job.version = targetVersion
       opened.job.published = true
       opened.job.restoredVersion = true
+      opened.job.superseded = undefined
       opened.job.pagesVerified = undefined
         opened.job.checks = undefined
       opened.job.configFingerprint = current.config_fingerprint ?? rbResult.config_fingerprint
