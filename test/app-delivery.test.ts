@@ -1330,3 +1330,133 @@ test('upgrade list failure detection, previousJobId inheritance, updateConfig cr
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('default volume resolution, preserved upgrade secret has_value, stale-hash draft recovery, and python volume grouping', async () => {
+  const workDir = await mkdtemp(join(tmpdir(), 'opc-defvol-'))
+  try {
+    // 1. Python runtime: local-directory and aliyun-oss-volume share a single application-volume default group,
+    // and _ADDITIVE_SQLITE_SYNC_PY tolerates expression defaults on single columns without losing other changes.
+    const runtimeDir = fileURLToPath(new URL('../runtime', import.meta.url))
+    const pyCheck = `
+import json, sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(runtimeDir)})
+import app_delivery_migration as m
+
+filtered = m.select_and_filter_platform_resources([
+    {"id": "oss-1", "type": "aliyun-oss-volume", "is_default": False},
+    {"id": "disk-default", "type": "local-directory", "is_default": True},
+], "my-app", default_only=True)
+assert [r["id"] for r in filtered] == ["disk-default"], f"unexpected volume default grouping: {filtered}"
+
+tmp = Path(${JSON.stringify(workDir)})
+seed_dir, dst_dir = tmp / "seed", tmp / "dst"
+seed_dir.mkdir(); dst_dir.mkdir()
+with sqlite3.connect(dst_dir / "app.db") as dc:
+    dc.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    dc.execute("INSERT INTO items VALUES (1, 'prod')")
+with sqlite3.connect(seed_dir / "app.db") as sc:
+    sc.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, ts TEXT NOT NULL DEFAULT (datetime('now')), note TEXT DEFAULT 'v2')")
+    sc.execute("CREATE TABLE logs (id INTEGER PRIMARY KEY, msg TEXT)")
+    sc.execute("INSERT INTO logs VALUES (1, 'ok')")
+ns = {}
+exec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})
+`
+    const pyCheck2 = pyCheck.replace(
+      'exec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})',
+      'sys.argv = ["sync", str(seed_dir), str(dst_dir)]\nexec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})\nwith sqlite3.connect(dst_dir / "app.db") as vc:\n  rows = vc.execute("SELECT id, name, ts, note FROM items").fetchall()\n  logs = vc.execute("SELECT msg FROM logs").fetchall()\n  print(json.dumps({"rows": rows, "logs": logs}))',
+    )
+    const { stdout } = await promisify(execFile)('python3', ['-c', pyCheck2])
+    const pyResult = JSON.parse(stdout)
+    assert.deepEqual(pyResult.rows, [[1, 'prod', '', 'v2']])
+    assert.deepEqual(pyResult.logs, [['ok']])
+
+    // 2. Host: upgrade auto-binds is_default volume when storageBindings omitted, accepts required has_value secret,
+    // reopenDeployment preserves upgrade: true, and configDraft survives revision hash updates.
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const storeMap = new Map<string, Record<string, string>>()
+    const delivery = new AppDelivery(core, workDir, {
+      async read(id: string) { return { ...(storeMap.get(id) ?? {}) } },
+      async write(id: string, values: Record<string, string>) { storeMap.set(id, { ...values }) },
+    })
+
+    const jobId = '44444444-4444-4444-8444-444444444444'
+    const scopeDir = join(workDir, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context))
+    const jobRoot = join(scopeDir, jobId)
+    const rev = 'rev1'
+    await mkdir(join(jobRoot, rev, 'bundle'), { recursive: true })
+    const tarBytes = Buffer.from('tar-bytes')
+    const zipBytes = Buffer.from('zip-bytes')
+    await writeFile(join(jobRoot, rev, 'bundle', 'app.tar'), tarBytes)
+    await writeFile(join(jobRoot, rev, 'bundle', 'skill.zip'), zipBytes)
+    const hashes = {
+      'app.tar': createHash('sha256').update(tarBytes).digest('hex'),
+      'skill.zip': createHash('sha256').update(zipBytes).digest('hex'),
+    }
+    const baseProp = proposal('http://def-app.example.test')
+    baseProp.contract.slug = 'def-app'
+    baseProp.contract.storage_mounts = [
+      { name: 'data', container_path: '/app/data', kind: 'sqlite', purpose: 'db' },
+    ]
+    baseProp.contract.configs = [{ key: 'API_SECRET', secret: true, required: true }]
+
+    await writeFile(join(jobRoot, 'job.json'), JSON.stringify({
+      id: jobId, name: 'Def App', slug: 'def-app', url: 'http://def-app.example.test',
+      session: 's1', status: 'ready', upgrade: true, revision: rev, port: 8080,
+      events: [], proposal: baseProp, hashes,
+      dockerfileContent: 'FROM python:3.11-alpine\n',
+      configDraft: { artifactHash: 'older-hash-after-repair', rows: [{ key: 'API_SECRET' }], versionNote: 'keep-note', storageBindings: { '/app/data': 'vol-default' } },
+    }))
+    await storeMap.set(`draft-${jobId}`, { API_SECRET: 'draft-secret' })
+
+    let publishedMounts: any[] = []
+    let publishedConfigs: any[] = []
+    delivery.platform = async (path, _ctx, opts) => {
+      if (path === '/def-app') return { app_url: 'http://def-app.example.test', can_manage: true, storage_mounts: [] }
+      if (path === '/resources') {
+        return {
+          resources: [
+            { id: 'oss-nondefault', type: 'aliyun-oss-volume', is_default: true },
+            { id: 'vol-other', type: 'local-directory', is_default: false },
+            { id: 'vol-default', type: 'local-directory', is_default: true },
+          ],
+        }
+      }
+      if (path === '/publish' && opts?.form) {
+        publishedMounts = JSON.parse(String(opts.form.get('storage_mounts')))
+        publishedConfigs = JSON.parse(String(opts.form.get('app_config')))
+        return { app_url: 'http://def-app.example.test', version: 2, status: 'building' }
+      }
+      return {}
+    }
+
+    const draft = await delivery.configDraft(jobId, expected)
+    assert.equal(draft?.versionNote, 'keep-note')
+    assert.equal(draft?.rows[0]?.value, 'draft-secret')
+
+    const artifactHash = fingerprint(hashes)
+    const confirmInput = {
+      artifactHash,
+      storageBindings: {},
+      config: [{ key: 'API_SECRET', value: '', has_value: true }],
+    }
+    const { confirmationToken } = await delivery.confirmDeployment(jobId, confirmInput, expected)
+    await delivery.publish(jobId, { ...confirmInput, confirmationToken }, expected)
+    assert.equal(publishedMounts[0]?.resource_id, 'vol-default')
+    assert.equal(publishedConfigs.find(c => c.key === 'API_SECRET')?.has_value, true)
+
+    // Fail the deployment, reopenDeployment -> upgrade must remain true
+    const afterFail = JSON.parse(await readFile(join(jobRoot, 'job.json'), 'utf8'))
+    afterFail.status = 'failed'
+    afterFail.published = true
+    afterFail.upgrade = false
+    await writeFile(join(jobRoot, 'job.json'), JSON.stringify(afterFail))
+    const reopened = await delivery.reopenDeployment(jobId, expected)
+    assert.equal(reopened.upgrade, true)
+  } finally {
+    await rm(workDir, { recursive: true, force: true })
+  }
+})

@@ -668,6 +668,7 @@ export class AppDelivery {
       }
       job.confirmationToken = undefined
       job.status = 'ready'
+      if (job.published) job.upgrade = true
       job.published = undefined
       job.superseded = undefined
       job.events.push('已恢复失败版本的交付包和运行配置，请核对后重新部署')
@@ -811,7 +812,7 @@ export class AppDelivery {
   async configDraft(id: string, expected: string) {
     const scope = this.scope(expected)
     const { job } = await this.open(scope.directory, id)
-    if (job.status !== 'ready' || !job.configDraft || job.configDraft.artifactHash !== fingerprint(job.hashes)) return null
+    if (job.status !== 'ready' || !job.configDraft) return null
     const values = await this.credentials.read(`draft-${id}`)
     scope.assertCurrent()
     return { ...job.configDraft, rows: job.configDraft.rows.map(row => ({ ...row, value: values[row.key] ?? '' })) }
@@ -996,6 +997,25 @@ export class AppDelivery {
       signal.throwIfAborted(); assertCurrent()
       job.autoPrepared = autoPrepared
       job.status = 'ready'
+      if (job.published) {
+        job.upgrade = true
+        if (!job.configDraft && job.requestId) {
+          const priorPublished = await this.credentials.read(`publish-config-${job.requestId}`)
+          const rows: AppDocument[] = priorPublished.rows ? JSON.parse(priorPublished.rows) : []
+          if (rows.length > 0) {
+            await this.credentials.write(`draft-${job.id}`, Object.fromEntries(rows.map(row => [row.key, row.value ?? ''])))
+            job.configDraft = {
+              artifactHash: fingerprint(job.hashes),
+              rows: rows.map(({ value: _value, ...row }) => ({
+                key: row.key,
+                resource_id: row.resource_id,
+                local_connection_confirmed: row.local_connection_confirmed === true,
+              })),
+              versionNote: job.versionNote ?? '',
+            }
+          }
+        }
+      }
       job.version = undefined
       job.published = undefined
       job.restoredVersion = undefined
@@ -1011,7 +1031,7 @@ export class AppDelivery {
     await this.save(root, job)
   }
   private async deploymentConfiguration(job: DeliveryJob, input: AppDocument, expected: string) {
-    const rawConfigs = input.config as { key: string; value: string; resource_id?: string; local_connection_confirmed?: boolean }[]
+    const rawConfigs = input.config as { key: string; value: string; resource_id?: string; local_connection_confirmed?: boolean; has_value?: boolean }[]
     if (!Array.isArray(rawConfigs) || rawConfigs.some(c => !c || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(c.key) || typeof c.value !== 'string' || (c.resource_id !== undefined && typeof c.resource_id !== 'string')) || new Set(rawConfigs.map(c => c.key)).size !== rawConfigs.length) throw new Error('配置格式无效')
     const origValues = await this.credentials.read(`orig-${job.id}`)
     const configs = rawConfigs.map(c => {
@@ -1023,18 +1043,27 @@ export class AppDelivery {
     if (Object.keys(storageBindings).some(path => !declaredMounts.some(mount => mount.container_path === path))) {
       throw new Error('存储选择必须对应已确认的持久化目录')
     }
-    if (input.storageBindings !== undefined && declaredMounts.some(mount => !storageBindings[mount.container_path])) {
-      const existing: AppDocument[] = (job.upgrade || job.published)
-        ? (await this.platform('/' + job.slug, expected)).storage_mounts ?? []
-        : []
-      if (declaredMounts.some(mount => !storageBindings[mount.container_path] &&
-        !existing.some(old => old.container_path === mount.container_path))) {
-        throw new Error('请为新增持久化目录选择 Platform 卷资源')
+    const existingMounts: AppDocument[] = (job.upgrade || job.published) && declaredMounts.length
+      ? (await this.platform('/' + job.slug, expected)).storage_mounts ?? []
+      : []
+    const needsDefaultMountResolution = input.storageBindings !== undefined && declaredMounts.some(mount =>
+      !storageBindings[mount.container_path] && !existingMounts.some(old => old.container_path === mount.container_path))
+    const ids = [...new Set(configs.flatMap(c => c.resource_id ? [c.resource_id] : []))].sort()
+    const available: AppDocument[] = ids.length || Object.keys(storageBindings).length || needsDefaultMountResolution
+      ? (await this.platform('/resources', expected)).resources ?? [] : []
+    if (needsDefaultMountResolution) {
+      for (const mount of declaredMounts) {
+        if (storageBindings[mount.container_path] || existingMounts.some(old => old.container_path === mount.container_path)) continue
+        const compatibleDefault = available.find(resource =>
+          resource.is_default === true &&
+          (resource.type === 'local-directory' || (resource.type === 'aliyun-oss-volume' && mount.kind !== 'sqlite')))
+        if (compatibleDefault) {
+          storageBindings[mount.container_path] = compatibleDefault.id
+        } else {
+          throw new Error('请为新增持久化目录选择 Platform 卷资源')
+        }
       }
     }
-    const ids = [...new Set(configs.flatMap(c => c.resource_id ? [c.resource_id] : []))].sort()
-    const available: AppDocument[] = ids.length || Object.keys(storageBindings).length
-      ? (await this.platform('/resources', expected)).resources ?? [] : []
     for (const [path, id] of Object.entries(storageBindings)) {
       const resource = available.find(resource => resource.id === id &&
         ['local-directory', 'aliyun-oss-volume', 'docker-volume'].includes(resource.type))
@@ -1061,10 +1090,17 @@ export class AppDelivery {
     const declarations: AppDocument[] = job.proposal!.contract.configs ?? []
     for (const c of declarations) {
       const selected = configs.find(i => i.key === c.key)
-      if (c.required && !selected?.value && !selected?.resource_id) throw new Error(`请填写 ${c.key}`)
+      const preservedOnlineSecret = Boolean((job.upgrade || job.published) && selected?.has_value)
+      if (c.required && !selected?.value && !selected?.resource_id && !preservedOnlineSecret) throw new Error(`请填写 ${c.key}`)
     }
-    const bindings = configs.map(c => ({ key: c.key, value: c.value, value_source: c.value_source, resource_id: c.resource_id,
-      required: declarations.some(item => item.key === c.key && item.required) }))
+    const bindings = configs.map(c => ({
+      key: c.key,
+      value: c.value,
+      value_source: c.value_source,
+      ...(c.has_value === true && !c.value && !c.resource_id ? { has_value: true } : {}),
+      resource_id: c.resource_id,
+      required: declarations.some(item => item.key === c.key && item.required),
+    }))
     const note = input.versionNote ?? input.version_note
     const versionNote = typeof note === 'string' && note.trim() ? note.trim() : job.versionNote ?? ''
     const digest = fingerprint({ hashes: job.hashes, url: job.url, port: job.port, bindings, ids, storageMounts, versionNote })

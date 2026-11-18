@@ -418,6 +418,7 @@ function sanitizeConfigRowsForApi(configs: AppConfigItem[]): Array<{
   key: string
   value: string
   resource_id?: string
+  has_value?: boolean
   local_connection_confirmed?: boolean
 }> {
   return configs
@@ -425,6 +426,7 @@ function sanitizeConfigRowsForApi(configs: AppConfigItem[]): Array<{
       key: (c.key || '').trim(),
       value: c.resource_id ? '' : (c.value ?? ''),
       resource_id: c.resource_id || undefined,
+      has_value: !c.resource_id && !(c.value ?? '') && c.has_value === true ? true : undefined,
       local_connection_confirmed: c.local_connection_confirmed === true ? true : undefined,
     }))
     .filter(c => c.key.length > 0)
@@ -753,39 +755,51 @@ export function AppsPanel({
           ? resources.filter(resource => detail.resource_ids?.includes(resource.id))
           : []
         const mergedConfigs = !draft && detail
-          ? configs.map(config => {
-              const online = detailConfigMap.get(config.key)
-              const matchedResource = boundResources.find(resource =>
-                resource.id === online?.resource_id || resource.env_keys.includes(config.key))
-              if (matchedResource) {
-                return { ...config, value: '', value_source: 'resource', resource_id: matchedResource.id }
-              }
-              if (!online) return config
-              if (config.key === 'PORT') return config
-              if (online.resource_id) {
-                return { ...config, value: '', value_source: 'resource', resource_id: online.resource_id }
-              }
-              if (config.secret || online.secret) {
-                return {
-                  ...config,
-                  has_value: Boolean(config.has_value || online.has_value || online.value),
-                  local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
+          ? [
+              ...configs.map(config => {
+                const online = detailConfigMap.get(config.key)
+                const matchedResource = boundResources.find(resource =>
+                  resource.id === online?.resource_id || resource.env_keys.includes(config.key))
+                if (matchedResource) {
+                  return { ...config, value: '', value_source: 'resource', resource_id: matchedResource.id }
                 }
-              }
-              if (typeof online.value === 'string' && online.value !== '') {
-                return {
-                  ...config,
-                  value: online.value,
-                  value_source: 'manual',
-                  has_value: true,
-                  local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
+                if (!online) return config
+                if (config.key === 'PORT') return config
+                if (online.resource_id) {
+                  return { ...config, value: '', value_source: 'resource', resource_id: online.resource_id }
                 }
-              }
-              if (online.local_connection_confirmed) {
-                return { ...config, local_connection_confirmed: true }
-              }
-              return config
-            })
+                if (typeof online.value === 'string' && online.value !== '') {
+                  return {
+                    ...config,
+                    value: online.value,
+                    value_source: online.value_source || 'manual',
+                    has_value: true,
+                    local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
+                  }
+                }
+                if (config.secret || online.secret) {
+                  return {
+                    ...config,
+                    has_value: Boolean(config.has_value || online.has_value || online.value),
+                    local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
+                  }
+                }
+                if (online.local_connection_confirmed) {
+                  return { ...config, local_connection_confirmed: true }
+                }
+                return config
+              }),
+              ...(detail.app_config ?? [])
+                .filter(online => {
+                  const key = (online.key || '').trim()
+                  if (!key || key === 'PORT' || key.startsWith('OPC_STORAGE_')) return false
+                  return !configs.some(cfg => cfg.key === key)
+                })
+                .map(online => ({
+                  ...online,
+                  has_value: Boolean(online.has_value || online.value || online.resource_id),
+                })),
+            ]
           : configs
         setConfigDrafts(mergedConfigs)
         setOriginalConfigs(originals)
@@ -2258,6 +2272,7 @@ export function AppsPanel({
                                   {options.map(resource => (
                                     <option key={resource.id} value={resource.id}>
                                       {resource.name} · {resource.type === 'aliyun-oss-volume' ? '阿里云 OSS' : '本地磁盘'}
+                                      {resource.is_default ? '（默认）' : ''}
                                     </option>
                                   ))}
                                 </select>
