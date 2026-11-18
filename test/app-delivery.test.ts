@@ -11,6 +11,7 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { zipSync, strToU8 } from 'fflate'
 import { AppDelivery, AppRequestError, fingerprint, worker } from '../src/host/app-delivery.ts'
+import { attachAppAgent } from '../src/host/app-agent.ts'
 import { AppSkillProvider } from '../src/host/app-skills.ts'
 import { ContextStore, identityHash } from '../src/host/context.ts'
 import type { OpcCore } from '../src/host/core.ts'
@@ -1456,6 +1457,104 @@ exec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})
     await writeFile(join(jobRoot, 'job.json'), JSON.stringify(afterFail))
     const reopened = await delivery.reopenDeployment(jobId, expected)
     assert.equal(reopened.upgrade, true)
+  } finally {
+    await rm(workDir, { recursive: true, force: true })
+  }
+})
+
+test('attachAppAgent creates fresh live session instead of resuming disposed session and auth errors pinpoint target and unresolved question', async () => {
+  const workDir = await mkdtemp(join(tmpdir(), 'opc-agent-auth-'))
+  try {
+    // 1. Python auth validation diagnostics and trimmed auth_blockers match
+    const { stdout: authResult } = await promisify(execFile)('python3', [
+      '-c',
+      [
+        'import json, sys',
+        `sys.path.insert(0, ${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), '..', 'runtime'))})`,
+        'from app_delivery_auth import resolve_authentication, validate_auth_questions',
+        'out = {}',
+        'try:',
+        '  validate_auth_questions({"unresolved": ["是否启用 REIMBURSE_ADMIN_TOKEN 应急令牌？"], "contract": {"unresolved": [], "auth_blockers": []}})',
+        'except ValueError as e:',
+        '  out["missing_blocker"] = str(e)',
+        'validate_auth_questions({"unresolved": [" 是否启用 REIMBURSE_ADMIN_TOKEN 应急令牌？ "], "contract": {"unresolved": [], "auth_blockers": [{"question": "是否启用 REIMBURSE_ADMIN_TOKEN 应急令牌？", "evidence": ["server/app/admin_auth.py:12"], "affected": ["/api/admin/*"], "action": "配置令牌或创建脚本", "reason": "external_authorization"}]}})',
+        'out["trimmed_ok"] = True',
+        'try:',
+        '  resolve_authentication({"apis": [{"method": "GET", "path": "/", "evidence": ["main.py:72"], "auth": {"type": "unknown"}}], "pages": [], "auth_rules": [{"target": "page", "path": "/", "auth": {"type": "none"}, "evidence": ["main.py:72"]}]})',
+        'except ValueError as e:',
+        '  out["unmatched_root_api"] = str(e)',
+        'print(json.dumps(out, ensure_ascii=False))',
+      ].join('\n'),
+    ])
+    const parsed = JSON.parse(authResult)
+    assert.equal(parsed.trimmed_ok, true)
+    assert.match(parsed.missing_blocker, /unresolved 条目「是否启用 REIMBURSE_ADMIN_TOKEN 应急令牌？」/)
+    assert.match(parsed.unmatched_root_api, /apis 项，需匹配 target='api'.*target='api' 且 path='\/'/)
+
+    // 2. attachAppAgent never calls agents.resume on a disposed sessionId and injects pending questions on waitingForReply
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, workDir, { read: async () => ({}), write: async () => {} })
+    delivery.platform = async () => ({ resources: [] })
+
+    const createdSessions: string[] = []
+    const injectedNotices: string[] = []
+    let resumeCalled = false
+    const fakeCtx = {
+      agents: {
+        get: () => undefined,
+        resume: async () => {
+          resumeCalled = true
+          throw new Error('must not resume disposed session')
+        },
+        create: async ({ sessionId }: { sessionId: string }) => {
+          createdSessions.push(sessionId)
+          return {
+            agent: {
+              session: { id: sessionId },
+              tools: { restrict: () => {}, register: () => {} },
+              systemPrompt: { section: () => {} },
+              on: () => {},
+              cancel: () => {},
+              inject: (msg: { source?: { summary?: string } }) => {
+                if (msg.source?.summary) injectedNotices.push(msg.source.summary)
+              },
+              followup: () => {},
+              whenIdle: async () => {},
+            },
+            dispose: async () => {},
+          }
+        },
+      },
+      on: () => () => {},
+      effect: () => {},
+    }
+    attachAppAgent(fakeCtx as any, delivery)
+
+    const ac = new AbortController()
+    const fakeJob: any = {
+      id: 'job-1',
+      name: '报销系统',
+      slug: 'baoxiao',
+      url: 'http://baoxiao.apps.example.test',
+      port: 8080,
+      status: 'review',
+      analysisSessions: ['disposed-session-1'],
+      proposal: { unresolved: ['管理员账号如何创建？'], contract: { unresolved: [] } },
+      events: [],
+    }
+    await assert.rejects(
+      () => delivery.analyze!(fakeJob, workDir, '', ac.signal, async () => {
+        setTimeout(() => ac.abort(), 10)
+      }),
+      /AbortError|aborted/i,
+    )
+
+    assert.equal(resumeCalled, false)
+    assert.equal(createdSessions.length, 1)
+    assert.notEqual(createdSessions[0], 'disposed-session-1')
+    assert.ok(injectedNotices.some(s => s.includes('等待确认的问题：管理员账号如何创建？')))
   } finally {
     await rm(workDir, { recursive: true, force: true })
   }

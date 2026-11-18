@@ -47,7 +47,10 @@ def resolve_authentication(contract):
                 location = evidence[0] if isinstance(evidence, list) and evidence else ''
                 origin = f"。源码位置：{location}" if isinstance(location, str) and location else ""
                 label = item.get('method') if target == 'api' else '页面'
-                raise ValueError(f"认证尚未分析：{label or '接口'} {item['path']}{origin}。请读取该条目的实际登录、会话或权限代码，补齐对应的 auth 或 auth_rules。")
+                raise ValueError(
+                    f"认证尚未分析（{key} 项，需匹配 target='{target}'）：{label or '接口'} {item['path']}{origin}。"
+                    f"请读取该条目的实际登录、会话或权限代码，并在 auth_rules 中补充 target='{target}' 且 path='{item['path']}'（或覆盖它的 prefix）的规则，或直接补齐该条目的 auth 与 evidence。"
+                )
     return contract
 
 
@@ -109,16 +112,23 @@ def verification_credential_fields(contract):
 def validate_auth_questions(proposal):
     """Technical uncertainty is returned to the model, not turned into a user prompt."""
     contract = proposal.get('contract', {})
-    questions = set(proposal.get('unresolved', []) + contract.get('unresolved', []))
+    questions = [q for q in [*proposal.get('unresolved', []), *contract.get('unresolved', [])] if isinstance(q, str) and q.strip()]
     blockers = contract.get('auth_blockers', [])
     if not isinstance(blockers, list):
         raise ValueError('auth_blockers 必须是数组')
-    for question in questions:
+    valid_reasons = {'external_authorization', 'missing_credential', 'role_change'}
+    for question in dict.fromkeys(questions):
         if re.search(r'令牌|token|登录|账密|凭据|授权码', question, re.I):
-            if not any(b.get('question') == question and b.get('evidence') and b.get('affected')
-                       and b.get('action') and b.get('reason') in {'external_authorization', 'missing_credential', 'role_change'}
-                       for b in blockers if isinstance(b, dict)):
-                raise ValueError('认证提问缺少证据：请先核对实际认证代码；确实需要外部授权时提供 auth_blockers 的 question/evidence/affected/action/reason，不要重复询问推测的管理令牌。')
+            q_trimmed = question.strip()
+            matched = [b for b in blockers if isinstance(b, dict) and str(b.get('question', '')).strip() == q_trimmed]
+            if not any(b.get('evidence') and b.get('affected') and b.get('action') and b.get('reason') in valid_reasons for b in matched):
+                if matched:
+                    detail = '对应的 auth_blockers 项缺少非空的 evidence/affected/action 或有效 reason（external_authorization/missing_credential/role_change）'
+                elif blockers:
+                    detail = 'contract.auth_blockers[].question 必须与 unresolved 中的问题文本完全一致'
+                else:
+                    detail = '如运行时账号/令牌可在第 3 步部署配置填写，请从 unresolved 移除；若确实阻塞改造，请在 contract.auth_blockers 中用完全相同的 question 提供 evidence/affected/action/reason'
+                raise ValueError(f'认证提问缺少证据（unresolved 条目「{q_trimmed}」）：{detail}。')
 
 
 def validate_auth_probe_coverage(contract):
