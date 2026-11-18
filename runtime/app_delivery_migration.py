@@ -1,6 +1,6 @@
 """Step 1 & Step 2 helpers for OPC App Delivery:
 - Dockerfile template fetching from platform-opc (deploy-opc database)
-- Local SQLite / local DB (PostgreSQL, MySQL, SQLServer) / local Redis inspection and automatic migration to platform-opc server resources
+- Local SQLite / local DB (PostgreSQL, MySQL, SQLServer) / local Redis inspection and persistent storage adaptation
 """
 
 from __future__ import annotations
@@ -8,9 +8,12 @@ from __future__ import annotations
 import ast
 import base64
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -112,7 +115,6 @@ def inspect_local_file_storage(
     source: Path,
     slug: str = "",
     workdir: str = "/app",
-    has_migrations: bool = False,
 ) -> dict:
     """Detect local JSON/file data directories, upload folders, report/backup folders, and seed files
     that require external persistent volume mounting (Docker Volume / Host Bind / S3-OSS).
@@ -143,7 +145,7 @@ def inspect_local_file_storage(
                 ext = p.suffix.lower()
                 if ext in _SOURCE_CODE_EXTENSIONS:
                     dir_has_code.add(top)
-                elif not (has_migrations and ext in {".sqlite", ".sqlite3", ".db"}):
+                else:
                     dir_seed_files.setdefault(top, []).append(p.relative_to(source).as_posix())
 
         # 2. Check second-level persistent directories (e.g. reimburse-web/server/data)
@@ -159,7 +161,7 @@ def inspect_local_file_storage(
                         ext = p.suffix.lower()
                         if ext in _SOURCE_CODE_EXTENSIONS:
                             dir_has_code.add(rel_dir)
-                        elif not (has_migrations and ext in {".sqlite", ".sqlite3", ".db"}):
+                        else:
                             dir_seed_files.setdefault(rel_dir, []).append(p.relative_to(source).as_posix())
 
         # 3. Scan source code for runtime mutable directories (e.g. join(root, "uploads"), join(root, "reports"))
@@ -350,75 +352,6 @@ def extract_sqlite_tables(sqlite_file: Path, max_rows_per_table: int | None = No
                 except OSError:
                     pass
     return tables
-
-
-def migrate_local_data_to_platform(
-    *,
-    platform_url: str,
-    slug: str,
-    source_dir: Path,
-    source_type: str = "sqlite",
-    sqlite_path: str = "",
-    target_type: str = "postgres",
-    target_resource_id: str = "",
-    tables_override: list | None = None,
-    redis_keys: list | None = None,
-) -> dict:
-    """Extract schema & 100% of data from local SQLite (or provided tables/redis_keys) and upload to platform-opc POST /api/v1/apps/:slug/migrate-data."""
-    tables = tables_override or []
-    if not tables and source_type.lower() == "sqlite":
-        if sqlite_path.strip():
-            db_file = delivery.relative(source_dir, sqlite_path.strip())
-            if db_file.is_file() and db_file.stat().st_size > 0:
-                tables = extract_sqlite_tables(db_file, max_rows_per_table=None)
-        if not tables:
-            found = [
-                p for p in sorted(source_dir.rglob("*"))
-                if p.is_file() and p.suffix.lower() in {".sqlite", ".sqlite3", ".db"} and p.stat().st_size > 0
-            ]
-            if not found:
-                raise ValueError("未在源码目录中找到非空 SQLite 数据库文件")
-            # Sort non-empty SQLite files by size descending and merge all non-empty tables
-            found.sort(key=lambda p: p.stat().st_size, reverse=True)
-            seen_tables = set()
-            for db_file in found:
-                try:
-                    extracted = extract_sqlite_tables(db_file, max_rows_per_table=None)
-                except Exception:
-                    continue
-                for tbl in extracted:
-                    if tbl["name"] not in seen_tables:
-                        seen_tables.add(tbl["name"])
-                        tables.append(tbl)
-
-    payload = {
-        "source_type": source_type.lower().strip(),
-        "target_type": target_type.lower().strip() or "postgres",
-        "target_resource_id": target_resource_id.strip(),
-        "tables": tables,
-        "redis_keys": redis_keys or [],
-    }
-    base = (platform_url or "https://shtokendance.benlai.com").rstrip("/")
-    url = f"{base}/api/v1/apps/{urllib.parse.quote(slug)}/migrate-data"
-    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body_bytes,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(req, timeout=600) as resp:
-            resp_json = json.loads(resp.read().decode("utf-8"))
-            if resp_json.get("code") == 0 and resp_json.get("data"):
-                return resp_json["data"]
-            return resp_json
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise ValueError(f"平台数据迁移接口返回错误 ({exc.code}): {detail}") from exc
-    except Exception as exc:
-        raise ValueError(f"调用平台数据迁移接口失败: {exc}") from exc
 
 
 def _join_route_paths(*parts: str) -> str:
@@ -1856,258 +1789,87 @@ def select_and_filter_platform_resources(resources: list[dict] | None, slug: str
     return result
 
 
-_PG_SQLITE3_COMPAT_SHIM = '''# --- OPC Platform PostgreSQL (DATABASE_URL) Compatibility Shim ---
-import os as _opc_os, re as _opc_re
-if _opc_os.getenv("DATABASE_URL", "").startswith(("postgres://", "postgresql://")):
-    import psycopg2 as _opc_pg
-    class _OpcPgRow(dict):
-        def __init__(self, cols, vals):
-            super().__init__(zip(cols, vals))
-            self._vals = tuple(vals)
-        def __getitem__(self, key):
-            return self._vals[key] if isinstance(key, (int, slice)) else super().__getitem__(key)
-    def _opc_translate_sql(sql: str) -> str:
-        s = sql.strip()
-        u = s.upper()
-        if u.startswith("BEGIN IMMEDIATE") or u.startswith("BEGIN EXCLUSIVE") or u == "BEGIN":
-            return "SELECT 1"
-        if _opc_re.match(r"(?is)^INSERT\\s+OR\\s+IGNORE\\s+INTO\\b", s):
-            s = _opc_re.sub(r"(?is)^INSERT\\s+OR\\s+IGNORE\\s+INTO\\b", "INSERT INTO", s, count=1).rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
-        out, in_sq, in_dq, i = [], False, False, 0
-        while i < len(s):
-            ch = s[i]
-            if ch == "'" and not in_dq:
-                in_sq = not in_sq
-                out.append(ch)
-            elif ch == '"' and not in_sq:
-                in_dq = not in_dq
-                out.append(ch)
-            elif ch == "?" and not in_sq and not in_dq:
-                out.append("%s")
-            elif ch == "%" and not in_sq and not in_dq and (i + 1 >= len(s) or s[i + 1] != "s"):
-                out.append("%%")
-            else:
-                out.append(ch)
-            i += 1
-        return "".join(out)
-    class _OpcPgCursor:
-        def __init__(self, rows=None, rowcount=0, lastrowid=None):
-            self._rows = list(rows or [])
-            self._idx = 0
-            self.rowcount = rowcount
-            self.lastrowid = lastrowid
-        def fetchone(self):
-            if self._idx >= len(self._rows):
-                return None
-            r = self._rows[self._idx]
-            self._idx += 1
-            return r
-        def fetchall(self):
-            r = self._rows[self._idx:]
-            self._idx = len(self._rows)
-            return r
-        def __iter__(self):
-            return iter(self._rows)
-    class _OpcPgConn:
-        def __init__(self, dsn: str):
-            self._conn = _opc_pg.connect(dsn)
-            self.row_factory = None
-        def execute(self, sql: str, params=()):
-            s = sql.strip()
-            u = s.upper()
-            if u.startswith("PRAGMA"):
-                m = _opc_re.match(r'(?is)^PRAGMA\\s+table_info\\(\\s*["\\\']?([A-Za-z0-9_]+)["\\\']?\\s*\\)', s)
-                if m and m.group(1).lower() != "invoice_registry":
-                    tbl = m.group(1).lower()
-                    with self._conn.cursor() as cur:
-                        cur.execute("SELECT ordinal_position - 1 AS cid, column_name AS name, data_type AS type, CASE WHEN is_nullable = 'NO' THEN 1 ELSE 0 END AS notnull, column_default AS dflt_value, 0 AS pk FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position", (tbl,))
-                        cols = [d[0] for d in cur.description]
-                        return _OpcPgCursor([_OpcPgRow(cols, r) for r in cur.fetchall()])
-                return _OpcPgCursor([])
-            if "SQLITE_MASTER" in u:
-                return _OpcPgCursor([])
-            pg_sql = _opc_translate_sql(s)
-            with self._conn.cursor() as cur:
-                cur.execute(pg_sql, tuple(params) if params else None)
-                if cur.description:
-                    cols = [d[0] for d in cur.description]
-                    rows = [_OpcPgRow(cols, r) for r in cur.fetchall()]
-                    return _OpcPgCursor(rows, cur.rowcount)
-                last_id = None
-                if u.startswith("INSERT"):
-                    try:
-                        cur.execute("SAVEPOINT _opc_lv; SELECT LASTVAL()")
-                        r = cur.fetchone()
-                        last_id = r[0] if r else None
-                        cur.execute("RELEASE SAVEPOINT _opc_lv")
-                    except Exception:
-                        try:
-                            cur.execute("ROLLBACK TO SAVEPOINT _opc_lv")
-                        except Exception:
-                            pass
-                return _OpcPgCursor([], cur.rowcount, last_id)
-        def executemany(self, sql: str, seq_of_params):
-            pg_sql = _opc_translate_sql(sql)
-            with self._conn.cursor() as cur:
-                for p in seq_of_params:
-                    cur.execute(pg_sql, tuple(p))
-                return _OpcPgCursor([], cur.rowcount)
-        def executescript(self, script: str):
-            return _OpcPgCursor([])
-        def cursor(self):
-            return self
-        def commit(self):
-            self._conn.commit()
-        def rollback(self):
-            self._conn.rollback()
-        def close(self):
-            self._conn.close()
-        def __enter__(self):
-            return self
-        def __exit__(self, exc_type, exc, tb):
-            if exc_type is None:
-                self.commit()
-            else:
-                self.rollback()
-    sqlite3.connect = lambda *a, **kw: _OpcPgConn(_opc_os.environ["DATABASE_URL"])
-# --- End OPC Platform PostgreSQL Compatibility Shim ---
-'''
-
-
-def _auto_adapt_sqlite_to_postgres_changes(source: Path, slug: str, data: dict, proposal: dict) -> None:
-    """When the user has migrated local SQLite to platform PostgreSQL (`data['migrations']`),
-    guarantee that:
-    1. All SQLite database connection modules in Python (e.g. `db.py`) are adapted to connect via `DATABASE_URL` (`psycopg2`).
-    2. `requirements.txt` includes `psycopg2-binary`.
-    3. `contract.configs` declares `DATABASE_URL` and `contract.resources` includes the migrated database resource.
-    """
-    migrations = [m for m in (data.get("migrations") or []) if isinstance(m, dict)]
-    pg_migs = [m for m in migrations if str(m.get("target_type", "postgres")).lower() in {"postgres", "postgresql"}]
-    if not pg_migs:
-        return
-
-    latest_mig = pg_migs[-1]
-    res_id = str(latest_mig.get("resource_id") or f"db-{slug}")
-    db_name = str(latest_mig.get("database_name") or f"app_{slug.replace('-', '_')}")
-
-    contract = proposal.setdefault("contract", {})
-    changes: list[dict] = proposal.setdefault("changes", [])
-    changes_by_path: dict[str, dict] = {c.get("path", ""): c for c in changes if isinstance(c, dict) and c.get("path")}
-    used_ids: set[str] = {str(c.get("id", "")) for c in changes if isinstance(c, dict)}
-
-    def _unique_change_id(base_id: str) -> str:
-        cid = base_id
-        idx = 2
-        while cid in used_ids:
-            cid = f"{base_id}-{idx}"
-            idx += 1
-        used_ids.add(cid)
-        return cid
-
-    # 1. Find Python files that call sqlite3.connect(...)
-    sqlite_py_files: list[Path] = []
-    for p in sorted(source.rglob("*.py")):
-        if not p.is_file() or p.is_symlink():
+def _strip_opc_seed_block(df_text: str) -> str:
+    lines = df_text.splitlines()
+    out: list[str] = []
+    in_cont = False
+    for line in lines:
+        trimmed = line.strip()
+        if in_cont:
+            in_cont = trimmed.endswith("\\")
             continue
-        rel_parts = p.relative_to(source).parts
-        if any(part in delivery.EXCLUDED or part in {"tests", "test"} for part in rel_parts):
+        if trimmed.startswith("# [OPC Persistent Storage]") or trimmed.startswith("# OPC-PERSISTENT-STORAGE-"):
+            continue
+        if ".opc-seed" in trimmed or "opc-storage-init.sh" in trimmed:
+            in_cont = trimmed.endswith("\\")
+            continue
+        out.append(line)
+    return "\n".join(out) + ("\n" if df_text.endswith("\n") else "")
+
+
+_ADDITIVE_SQLITE_SYNC_PY = """import os, sys, sqlite3
+seed_root, dst_root = sys.argv[1], sys.argv[2]
+if not os.path.isdir(seed_root) or not os.path.isdir(dst_root):
+    sys.exit(0)
+def q(ident):
+    return '"' + str(ident).replace('"', '""') + '"'
+for root, dirs, files in os.walk(seed_root):
+    dirs[:] = [d for d in dirs if d != '.opc-backups']
+    rel_dir = os.path.relpath(root, seed_root)
+    for fn in files:
+        if not fn.lower().endswith(('.db', '.sqlite', '.sqlite3')):
+            continue
+        sp = os.path.join(root, fn)
+        dp = os.path.join(dst_root, fn) if rel_dir == '.' else os.path.join(dst_root, rel_dir, fn)
+        if not os.path.isfile(sp) or not os.path.isfile(dp):
             continue
         try:
-            txt = p.read_text(encoding="utf-8")
+            with open(sp, 'rb') as f:
+                if f.read(16) != b'SQLite format 3\\x00':
+                    continue
+            sc = sqlite3.connect('file:' + sp + '?mode=ro', uri=True)
+            dc = sqlite3.connect(dp, timeout=10.0)
+            dc.execute('PRAGMA busy_timeout=10000')
+            existing_tables = {r[0] for r in dc.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for tbl, ddl in sc.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"):
+                if tbl not in existing_tables:
+                    dc.execute(ddl)
+                    rows = sc.execute('SELECT * FROM ' + q(tbl)).fetchall()
+                    if rows:
+                        ph = ','.join('?' for _ in rows[0])
+                        dc.executemany('INSERT OR IGNORE INTO ' + q(tbl) + ' VALUES (' + ph + ')', rows)
+                else:
+                    dst_cols = {r[1] for r in dc.execute('PRAGMA table_info(' + q(tbl) + ')').fetchall()}
+                    for cid, cname, ctype, notnull, dflt, pk in sc.execute('PRAGMA table_info(' + q(tbl) + ')').fetchall():
+                        if cname in dst_cols or pk:
+                            continue
+                        t = (ctype or 'TEXT').strip() or 'TEXT'
+                        clause = q(cname) + ' ' + t
+                        if dflt is not None:
+                            clause += ' DEFAULT ' + str(dflt)
+                        elif notnull:
+                            tu = t.upper()
+                            if 'INT' in tu or 'NUM' in tu or 'REAL' in tu or 'FLOA' in tu or 'DOUB' in tu:
+                                clause += ' NOT NULL DEFAULT 0'
+                            elif 'BLOB' in tu:
+                                clause += " NOT NULL DEFAULT X''"
+                            else:
+                                clause += " NOT NULL DEFAULT ''"
+                        dc.execute('ALTER TABLE ' + q(tbl) + ' ADD COLUMN ' + clause)
+            for idx_name, idx_sql in sc.execute("SELECT name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"):
+                try:
+                    stmt = idx_sql
+                    if 'IF NOT EXISTS' not in stmt.upper():
+                        stmt = stmt.replace('CREATE UNIQUE INDEX ', 'CREATE UNIQUE INDEX IF NOT EXISTS ', 1).replace('CREATE INDEX ', 'CREATE INDEX IF NOT EXISTS ', 1)
+                    dc.execute(stmt)
+                except Exception:
+                    pass
+            dc.commit()
+            sc.close()
+            dc.close()
         except Exception:
-            continue
-        if "import sqlite3" in txt and "sqlite3.connect" in txt:
-            sqlite_py_files.append(p)
-
-    # Prioritize files named db.py / database.py / storage.py
-    sqlite_py_files.sort(key=lambda p: (0 if p.stem.lower() in {"db", "database", "storage", "sqlite"} else 1, len(p.parts)))
-
-    for py_file in sqlite_py_files:
-        rel_path = py_file.relative_to(source).as_posix()
-        existing_change = changes_by_path.get(rel_path)
-        current_content = existing_change["content"] if (existing_change and isinstance(existing_change.get("content"), str)) else py_file.read_text(encoding="utf-8")
-        if "DATABASE_URL" in current_content or "psycopg" in current_content:
-            continue
-        # Inject _PG_SQLITE3_COMPAT_SHIM right after `import sqlite3`
-        new_content, n_subs = re.subn(
-            r"(?m)^(\s*import\s+sqlite3\b[^\n]*\n)",
-            lambda m: m.group(1) + _PG_SQLITE3_COMPAT_SHIM,
-            current_content,
-            count=1,
-        )
-        if n_subs == 0:
-            continue
-        if existing_change:
-            existing_change["content"] = new_content
-            if "PostgreSQL" not in existing_change.get("reason", ""):
-                existing_change["reason"] = existing_change.get("reason", "").rstrip("。") + "；并接入平台 PostgreSQL 数据库 (DATABASE_URL)"
-        else:
-            change_obj = {
-                "id": _unique_change_id("adapt-postgres-db"),
-                "path": rel_path,
-                "group": "迁移并接入平台 PostgreSQL 数据库",
-                "reason": f"将本地 SQLite 数据库连接切换至平台默认 PostgreSQL（专属库 {db_name}，读取 DATABASE_URL 环境变量，保留原业务查询逻辑不变）",
-                "content": new_content,
-                "executable": False,
-            }
-            changes.append(change_obj)
-            changes_by_path[rel_path] = change_obj
-
-    # 2. Ensure requirements.txt includes psycopg2-binary
-    req_files: list[Path] = []
-    for p in sorted(source.rglob("requirements*.txt")):
-        if p.is_file() and not p.is_symlink() and not any(part in delivery.EXCLUDED for part in p.relative_to(source).parts):
-            req_files.append(p)
-    req_files.sort(key=lambda p: (0 if p.name == "requirements.txt" else 1, len(p.parts)))
-    if req_files:
-        req_file = req_files[0]
-        req_rel = req_file.relative_to(source).as_posix()
-        existing_req = changes_by_path.get(req_rel)
-        req_content = existing_req["content"] if (existing_req and isinstance(existing_req.get("content"), str)) else req_file.read_text(encoding="utf-8")
-        if not re.search(r"(?i)\bpsycopg2(?:-binary)?\b", req_content):
-            updated_req = req_content.rstrip() + "\npsycopg2-binary>=2.9\n"
-            if existing_req:
-                existing_req["content"] = updated_req
-            else:
-                req_change = {
-                    "id": _unique_change_id("add-postgres-driver"),
-                    "path": req_rel,
-                    "group": "迁移并接入平台 PostgreSQL 数据库",
-                    "reason": "添加 PostgreSQL 数据库驱动依赖 psycopg2-binary，使应用在容器内可直连平台 PostgreSQL",
-                    "content": updated_req,
-                    "executable": False,
-                }
-                changes.append(req_change)
-                changes_by_path[req_rel] = req_change
-
-    # 3. Ensure DATABASE_URL is declared in contract.configs
-    configs: list[dict] = contract.setdefault("configs", [])
-    if not any(isinstance(c, dict) and c.get("key") == "DATABASE_URL" for c in configs):
-        configs.append({
-            "key": "DATABASE_URL",
-            "default": "",
-            "secret": True,
-            "required": True,
-            "description": f"平台 PostgreSQL 数据库连接地址（自动绑定专属迁移库 {db_name}）",
-        })
-
-    # 4. Ensure migrated resource is listed in contract.resources
-    c_resources: list[dict] = contract.setdefault("resources", [])
-    if not any(isinstance(r, dict) and r.get("id") == res_id for r in c_resources):
-        c_resources.append({
-            "id": res_id,
-            "type": "postgres",
-            "purpose": f"平台自动迁移创建的专属 PostgreSQL 数据库 ({db_name})",
-        })
-
-    # 5. Ensure build_context covers any newly added/modified files
-    build_ctx: list[str] = contract.setdefault("build_context", [])
-    if isinstance(build_ctx, list) and build_ctx and "." not in build_ctx:
-        for ch_path in changes_by_path:
-            covered = any(ch_path == entry or ch_path.startswith(entry.rstrip("/") + "/") for entry in build_ctx if isinstance(entry, str))
-            if not covered:
-                top_dir = ch_path.split("/")[0]
-                build_ctx.append(top_dir if "/" in ch_path else ch_path)
+            pass
+"""
 
 
 def _auto_adapt_persistent_file_storage(source: Path, slug: str, data: dict, proposal: dict) -> list[dict]:
@@ -2142,7 +1904,7 @@ def _auto_adapt_persistent_file_storage(source: Path, slug: str, data: dict, pro
         workdir = workdirs[-1].rstrip("/") or "/app"
 
     # 2. Deterministically inspect local file storage & merge with any AI-declared mounts
-    scanned_storage = inspect_local_file_storage(source, slug=slug, workdir=workdir, has_migrations=False)
+    scanned_storage = inspect_local_file_storage(source, slug=slug, workdir=workdir)
     mounts_by_cpath: dict[str, dict] = {}
     for item in scanned_storage.get("storage_mounts") or []:
         if isinstance(item, dict) and item.get("container_path"):
@@ -2190,16 +1952,98 @@ def _auto_adapt_persistent_file_storage(source: Path, slug: str, data: dict, pro
                     build_ctx.append(top_dir)
 
     # 4. Seed the actual volume destinations without replacing a custom startup.
-    has_entrypoint = bool(re.search(r"(?im)^\s*ENTRYPOINT\s+", final_stage))
-    if df_text and not has_entrypoint and ".opc-seed" not in final_stage and "opc-storage-init.sh" not in final_stage:
+    #    If Dockerfile already contains an OPC seed block from v1, update it when mounts change.
+    stripped_df = _strip_opc_seed_block(df_text)
+    stripped_lines = stripped_df.splitlines()
+    stripped_stage_start = next(
+        (index for index in range(len(stripped_lines) - 1, -1, -1) if re.match(r"\s*FROM\s+", stripped_lines[index], re.I)),
+        0,
+    )
+    stripped_final_stage = "\n".join(stripped_lines[stripped_stage_start:])
+    has_custom_entrypoint = bool(re.search(r"(?im)^\s*ENTRYPOINT\s+", stripped_final_stage))
+    already_has_opc_seed = ".opc-seed" in final_stage or "opc-storage-init.sh" in final_stage
+    all_mounts_covered = all(m["container_path"] in final_stage for m in mounts)
+
+    if df_text and not has_custom_entrypoint and (not already_has_opc_seed or not all_mounts_covered):
         seed_dir = f"{workdir}/.opc-seed"
-        cpaths_sh = " ".join(
-            f'"{path}"' for path in (m["container_path"] for m in mounts)
+        safe_paths = [
+            path for path in (m["container_path"] for m in mounts)
             if re.fullmatch(r"/[A-Za-z0-9_./-]+", path) and ".." not in Path(path).parts
             and not (seed_dir == path.rstrip("/") or seed_dir.startswith(path.rstrip("/") + "/") or path.startswith(seed_dir + "/"))
-        )
+        ]
+        cpaths_sh = " ".join(f'"{p}"' for p in safe_paths)
         if cpaths_sh:
-            init_script = f"{workdir}/.opc-seed/opc-storage-init.sh"
+            init_script = f"{seed_dir}/opc-storage-init.sh"
+            sync_py_path = f"{seed_dir}/sync_sqlite.py"
+            sync_py_b64 = base64.b64encode(_ADDITIVE_SQLITE_SYNC_PY.encode("utf-8")).decode("ascii")
+            init_sh_body = f"""#!/bin/sh
+set -e
+_opc_backup_mount() {{
+  _d="$1"
+  _bid="$2"
+  _broot="$_d/.opc-backups"
+  _marker="$_broot/.last-build-id"
+  _prev=""
+  if [ -f "$_marker" ]; then
+    _prev="$(cat "$_marker" 2>/dev/null || true)"
+  fi
+  if [ "$_prev" != "$_bid" ] && [ -d "$_d" ]; then
+    _has_data="$(find "$_d" -maxdepth 4 -path "$_broot" -prune -o -type f \\( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.json' \\) -print 2>/dev/null | head -n 1 || true)"
+    if [ -n "$_has_data" ]; then
+      _snap="$_broot/pre-$_bid"
+      mkdir -p "$_snap"
+      (cd "$_d" && find . -maxdepth 4 -path './.opc-backups' -prune -o -type f \\( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db-wal' -o -name '*.db-shm' -o -name '*.sqlite-wal' -o -name '*.sqlite-shm' -o -name '*.sqlite3-wal' -o -name '*.sqlite3-shm' -o -name '*.json' \\) -print 2>/dev/null | while IFS= read -r _rel; do
+        _rel="${{_rel#./}}"
+        mkdir -p "$_snap/$(dirname "$_rel")"
+        cp -a "$_d/$_rel" "$_snap/$_rel" 2>/dev/null || true
+      done)
+      _old_snaps="$(ls -1d "$_broot"/pre-* 2>/dev/null | sort || true)"
+      _count="$(printf '%s\\n' "$_old_snaps" | grep -c '^' 2>/dev/null || echo 0)"
+      if [ "$_count" -gt 3 ]; then
+        printf '%s\\n' "$_old_snaps" | head -n $((_count - 3)) | while IFS= read -r _old; do
+          rm -rf "$_old" 2>/dev/null || true
+        done
+      fi
+    fi
+  fi
+  mkdir -p "$_broot"
+  printf '%s' "$_bid" > "$_marker" 2>/dev/null || true
+}}
+_opc_copy_seed_dir() {{
+  _s="$1"
+  _d="$2"
+  if [ ! -d "$_s" ]; then
+    return 0
+  fi
+  mkdir -p "$_d"
+  for _f in "$_s"/* "$_s"/.[!.]*; do
+    [ -e "$_f" ] || continue
+    _base="$(basename "$_f")"
+    _target="$_d/$_base"
+    if [ -d "$_f" ]; then
+      _opc_copy_seed_dir "$_f" "$_target"
+    elif [ ! -e "$_target" ]; then
+      cp -a "$_f" "$_target" 2>/dev/null || true
+    fi
+  done
+}}
+_opc_build_id="1"
+if [ -f "{seed_dir}/.build-id" ]; then
+  _opc_build_id="$(cat "{seed_dir}/.build-id" 2>/dev/null || echo 1)"
+fi
+i=0
+for d in {cpaths_sh}; do
+  i=$((i+1))
+  mkdir -p "$d"
+  _opc_backup_mount "$d" "$_opc_build_id"
+  _opc_copy_seed_dir "{seed_dir}/$i" "$d"
+  if command -v python3 >/dev/null 2>&1 && [ -f "{sync_py_path}" ]; then
+    python3 "{sync_py_path}" "{seed_dir}/$i" "$d" 2>/dev/null || true
+  fi
+done
+exec "$@"
+"""
+            init_sh_b64 = base64.b64encode(init_sh_body.encode("utf-8")).decode("ascii")
             seed_snippet_lines = [
                 "# [OPC Persistent Storage] Backup initial seed data & hydrate external volume on startup",
                 f'RUN mkdir -p "{seed_dir}" {cpaths_sh} \\',
@@ -2209,16 +2053,25 @@ def _auto_adapt_persistent_file_storage(source: Path, slug: str, data: dict, pro
                 f'           mkdir -p "{seed_dir}/$i" && cp -a "$d/." "{seed_dir}/$i/" || exit 1; \\',
                 "         fi; \\",
                 "       done \\",
-                f"    && printf '#!/bin/sh\\nset -e\\ni=0\\nfor d in {cpaths_sh}; do\\n  i=$((i+1))\\n  mkdir -p \"$d\"\\n  if [ -d \"{seed_dir}/$i\" ]; then\\n    for f in \"{seed_dir}/$i\"/* \"{seed_dir}/$i\"/.[!.]*; do\\n      [ -e \"$f\" ] || continue\\n      bn=\"$(basename \"$f\")\"\\n      [ -e \"$d/$bn\" ] || cp -a \"$f\" \"$d/$bn\"\\n    done\\n  fi\\ndone\\nexec \"$@\"\\n' > \"{init_script}\" \\",
+                f'    && (date +%s%N 2>/dev/null || date +%s) > "{seed_dir}/.build-id" \\',
+                f'    && printf \'%s\' \'{sync_py_b64}\' | (base64 -d 2>/dev/null || base64 --decode) > "{sync_py_path}" \\',
+                f'    && printf \'%s\' \'{init_sh_b64}\' | (base64 -d 2>/dev/null || base64 --decode) > "{init_script}" \\',
                 f'    && chmod +x "{init_script}"',
                 "ENTRYPOINT " + json.dumps([init_script]),
             ]
             seed_block = "\n".join(seed_snippet_lines)
-            insert_idx = next(
-                (index for index in range(len(lines) - 1, final_stage_start, -1) if re.match(r"\s*CMD(?:\s+|\[)", lines[index], re.I)),
-                len(lines),
-            )
-            updated_df = "\n".join(lines[:insert_idx] + [seed_block] + lines[insert_idx:]) + "\n"
+            base_lines = stripped_lines if already_has_opc_seed else lines
+            base_stage_start = stripped_stage_start if already_has_opc_seed else final_stage_start
+            last_copy_idx = base_stage_start
+            for idx in range(base_stage_start + 1, len(base_lines)):
+                t = base_lines[idx].strip().upper()
+                if t.startswith(("COPY ", "COPY[", "ADD ", "ADD[")):
+                    last_copy_idx = idx
+            insert_idx = len(base_lines)
+            for idx in range(len(base_lines) - 1, last_copy_idx, -1):
+                if re.match(r"\s*(?:CMD(?:\s+|\[)|USER\s+)", base_lines[idx], re.I):
+                    insert_idx = idx
+            updated_df = "\n".join(base_lines[:insert_idx] + [seed_block] + base_lines[insert_idx:]) + "\n"
             mount_summary = "、".join(m["container_path"] for m in mounts)
             if "Dockerfile" in changes_by_path:
                 changes_by_path["Dockerfile"]["content"] = updated_df
@@ -2251,7 +2104,18 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
     build_context = contract.get("build_context")
     if not isinstance(build_context, list):
         build_context = None
-    scan = scan_app_routes_and_pages(source, build_context=build_context)
+    changes = [ch for ch in (proposal.get("changes") or []) if isinstance(ch, dict) and isinstance(ch.get("path"), str) and isinstance(ch.get("content"), str)]
+    if changes:
+        with tempfile.TemporaryDirectory(prefix="opc-scan-") as tmp_dir:
+            scan_root = Path(tmp_dir) / "source"
+            shutil.copytree(source, scan_root, symlinks=True)
+            for ch in changes:
+                target_file = delivery.relative(scan_root, ch["path"])
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                target_file.write_text(ch["content"], encoding="utf-8")
+            scan = scan_app_routes_and_pages(scan_root, build_context=build_context)
+    else:
+        scan = scan_app_routes_and_pages(source, build_context=build_context)
     sqlite_info = inspect_local_sqlite_files(source)
 
     # 1. Merge any missing scanned APIs into contract['apis'] so 0 routes are omitted
@@ -2292,20 +2156,15 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
         })
     contract["pages"] = existing_pages
 
-    # 2b. When user has migrated SQLite to platform PostgreSQL, auto-complete any missing DB code/driver/config adaptations
-    # Local file databases remain on volumes; historical migration receipts do not trigger code rewrites.
-
-    # 2b-2. Automatically detect & adapt persistent local file storage (JSON state, uploads, reports, backups)
+    # 2b. Automatically detect & adapt persistent local file storage (SQLite, JSON state, uploads, reports, backups)
     storage_mounts = _auto_adapt_persistent_file_storage(source, str(data.get("slug", "")), data, proposal)
 
-    # 2c. Filter out internal tool/truncation/row-diff/db-adaptation/default-password/local-json noise from unresolved & decisions
+    # 2c. Filter out internal tool/truncation/default-password/local-json noise from unresolved & decisions
     internal_noise_re = re.compile(
-        r"(截断|truncated|补齐.*扫描|完整接口详情|接口扫描显示|扫描结果不一致|自动路由扫描未识别|逐表差异|逐表核对|10,?264|14,?758|healthz|健康检查接口|尚无.*PostgreSQL.*连接适配|数据库切换不能视为已完成|专属\s*PostgreSQL.*连接适配|默认管理员密码|公开的默认.*密码|演示口令|仅存于容器本地文件|容器重建后.*丢失)",
+        r"(截断|truncated|补齐.*扫描|完整接口详情|接口扫描显示|扫描结果不一致|自动路由扫描未识别|逐表差异|逐表核对|10,?264|14,?758|healthz|健康检查接口|默认管理员密码|公开的默认.*密码|演示口令|仅存于容器本地文件|容器重建后.*丢失)",
         re.I,
     )
-    has_migrated = bool(data.get("migrations"))
     feedback_text = str(data.get("feedback") or "")
-    user_confirmed_db = has_migrated or bool(re.search(r"(迁移|PostgreSQL|平台.*数据库|直接迁移|保留.*SQLite)", feedback_text, re.I))
     user_confirmed_local_or_pwd = bool(re.search(r"(保留演示口令|保留文件存储|保留原|先保留)", feedback_text, re.I))
 
     def _keep_question(q: str) -> bool:
@@ -2313,8 +2172,6 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
         if not s:
             return False
         if internal_noise_re.search(s):
-            return False
-        if user_confirmed_db and re.search(r"(SQLite.*迁移|补迁|保留\s*SQLite|PostgreSQL\s*连接适配|数据库切换)", s, re.I):
             return False
         if user_confirmed_local_or_pwd and re.search(r"(密码|口令|本地文件|文件存储|JSON)", s, re.I):
             return False
@@ -2368,12 +2225,6 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
 
     sqlite_dbs = sqlite_info.get("sqlite_databases") or []
     resources = select_and_filter_platform_resources(data.get("resources") or [], str(data.get("slug", "")))
-    pg_resources = [
-        r for r in resources
-        if str(r.get("type", "")).lower() in {"postgres", "postgresql"}
-        and not str(r.get("id", "")).lower().startswith("db-")
-    ]
-    pg_resources.sort(key=lambda r: (0 if r.get("is_default") else 1, str(r.get("id", ""))))
     storage_type = step1_ai.get("storage_type") or (
         "sqlite" if sqlite_dbs else ("persistent_volume" if storage_mounts else "none")
     )
@@ -2470,9 +2321,6 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
                 }
                 for db in sqlite_dbs
             ],
-            "can_migrate_to_platform_pg": False,
-            "platform_pg_resource": pg_resources[0]["name"] if pg_resources else "",
-            "platform_pg_id": pg_resources[0]["id"] if pg_resources else "",
             "storage_mounts": storage_mounts,
             "storage_migration_plan": default_storage_plan if sqlite_dbs else (step2_ai.get("storage_migration") or default_storage_plan),
         },

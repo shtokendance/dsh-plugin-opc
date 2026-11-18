@@ -209,7 +209,7 @@ function readAppHealthCheck(raw: string): AppHealthCheck {
 }
 
 function isResumableJob(job: AppDeliveryJob): boolean {
-  if (!job || !job.id) return false
+  if (!job || !job.id || job.superseded) return false
   return [
     'draft',
     'importing',
@@ -238,6 +238,15 @@ function showTaskBanner(job: AppDeliveryJob, apps: DeployedApp[], loading: boole
   // A previous version running must not hide an unfinished upgrade.
   return !loading && !apps.some(app => app.status === 'running' && app.slug === job.slug &&
     job.version != null && app.current_version === job.version)
+}
+
+function findAppJob(jobs: AppDeliveryJob[], app: Pick<DeployedApp, 'slug' | 'current_version'>): AppDeliveryJob | undefined {
+  const forSlug = jobs.filter(job => job.slug === app.slug)
+  return (
+    forSlug.find(job => !job.superseded && app.current_version != null && job.version === app.current_version) ??
+    forSlug.find(job => !job.superseded) ??
+    forSlug[0]
+  )
 }
 
 function deploymentProgress(job: AppDeliveryJob) {
@@ -497,6 +506,10 @@ export function AppsPanel({
   // Step 1 Form State
   const [upgradeTarget, setUpgradeTarget] = useState<DeployedApp | null>(null)
   const [previousJobId, setPreviousJobId] = useState<string | undefined>(undefined)
+  const upgradingStep1 = Boolean(
+    upgradeTarget ||
+      (previousJobId && wizardJob?.id === previousJobId && (wizardJob.upgrade || wizardJob.published)),
+  )
   const [appName, setAppName] = useState('')
   const [appSlug, setAppSlug] = useState('')
   const [slugManual, setSlugManual] = useState(false)
@@ -661,7 +674,7 @@ export function AppsPanel({
 
   // Debounced slug check in Step 1 (new app only)
   useEffect(() => {
-    if (viewMode !== 'wizard' || wizardStep !== 1 || upgradeTarget) {
+    if (viewMode !== 'wizard' || wizardStep !== 1 || upgradingStep1) {
       setSlugCheck({ checking: false })
       return
     }
@@ -706,7 +719,7 @@ export function AppsPanel({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [api, appSlug, apps, contextId, opcConfig.appDomainRoot, upgradeTarget, viewMode, wizardStep])
+  }, [api, appSlug, apps, contextId, opcConfig.appDomainRoot, upgradingStep1, viewMode, wizardStep])
 
   const refreshWizardJob = useCallback(
     async (jobId: string): Promise<AppDeliveryJob | null> => {
@@ -732,13 +745,49 @@ export function AppsPanel({
         const draftRaw = api.appConfigDraft ? await api.appConfigDraft(job.id, contextId).catch(() => 'null') : 'null'
         const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw, null)
         const { configs, originals } = mergeJobConfigs(job, draft)
-        const detail = job.upgrade ? parseJson<DeployedApp | null>(await api.appDetails(job.slug, contextId), null) : null
-        const objectStorage = resources.find(resource =>
-          resource.type === 'minio-app-storage' && detail?.resource_ids?.includes(resource.id))
-        setConfigDrafts(draft || !objectStorage ? configs : configs.map(config =>
-          objectStorage.env_keys.includes(config.key)
-            ? { ...config, value: '', value_source: 'resource', resource_id: objectStorage.id }
-            : config))
+        const detail = (job.upgrade || job.published)
+          ? parseJson<DeployedApp | null>(await api.appDetails(job.slug, contextId).catch(() => 'null'), null)
+          : null
+        const detailConfigMap = new Map((detail?.app_config ?? []).map(item => [item.key, item]))
+        const boundResources = detail?.resource_ids?.length
+          ? resources.filter(resource => detail.resource_ids?.includes(resource.id))
+          : []
+        const mergedConfigs = !draft && detail
+          ? configs.map(config => {
+              const online = detailConfigMap.get(config.key)
+              const matchedResource = boundResources.find(resource =>
+                resource.id === online?.resource_id || resource.env_keys.includes(config.key))
+              if (matchedResource) {
+                return { ...config, value: '', value_source: 'resource', resource_id: matchedResource.id }
+              }
+              if (!online) return config
+              if (config.key === 'PORT') return config
+              if (online.resource_id) {
+                return { ...config, value: '', value_source: 'resource', resource_id: online.resource_id }
+              }
+              if (config.secret || online.secret) {
+                return {
+                  ...config,
+                  has_value: Boolean(config.has_value || online.has_value || online.value),
+                  local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
+                }
+              }
+              if (typeof online.value === 'string' && online.value !== '') {
+                return {
+                  ...config,
+                  value: online.value,
+                  value_source: 'manual',
+                  has_value: true,
+                  local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
+                }
+              }
+              if (online.local_connection_confirmed) {
+                return { ...config, local_connection_confirmed: true }
+              }
+              return config
+            })
+          : configs
+        setConfigDrafts(mergedConfigs)
         setOriginalConfigs(originals)
         setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
         setStorageBindings(draft?.storageBindings ?? {})
@@ -982,7 +1031,7 @@ export function AppsPanel({
       setWizardError('应用标识须为 3–40 位小写字母、数字或短横线，且以字母开头')
       return
     }
-    if (!upgradeTarget && slugCheck.available === false) {
+    if (!upgradingStep1 && slugCheck.available === false) {
       setWizardError('该应用标识已被占用，请更换其他标识')
       return
     }
@@ -1004,7 +1053,7 @@ export function AppsPanel({
         slug: cleanSlug,
         container_port: parsedPort,
         description: appDescription.trim(),
-        upgrade: Boolean(upgradeTarget),
+        upgrade: upgradingStep1,
         previousJobId: previousJobId || undefined,
         modelSelection:
           selectedProvider && selectedModel
@@ -1424,7 +1473,11 @@ export function AppsPanel({
       setDetailError('容器端口必须为 1 至 65535 的整数')
       return
     }
-    const validationErr = validateConfigsForPublish(editConfigs, portNum)
+    const normalizedConfigs = editConfigs.map(c =>
+      (c.key || '').trim() === 'PORT' && !c.resource_id
+        ? { ...c, value: String(portNum) }
+        : c)
+    const validationErr = validateConfigsForPublish(normalizedConfigs, portNum)
     if (validationErr) {
       setDetailError(validationErr)
       return
@@ -1433,7 +1486,8 @@ export function AppsPanel({
     setDetailError(null)
     setDetailNotice(null)
     try {
-      const sanitized = sanitizeConfigRowsForApi(editConfigs)
+      setEditConfigs(normalizedConfigs)
+      const sanitized = sanitizeConfigRowsForApi(normalizedConfigs)
       const resourceIds = Array.from(new Set(sanitized.map(c => c.resource_id).filter((id): id is string => Boolean(id))))
       await api.appUpdateConfig(
         detailApp.slug,
@@ -1444,7 +1498,28 @@ export function AppsPanel({
         }),
         contextId,
       )
-      setDetailNotice('配置已更新并触发容器重启，正在刷新最新状态…')
+      let notice = '配置已更新并触发容器重启，正在刷新最新状态…'
+      const activeJob = findAppJob(jobs, detailApp)
+      if (activeJob) {
+        try {
+          const verifyRaw = api.appVerifyWithOptions
+            ? await api.appVerifyWithOptions(activeJob.id, JSON.stringify({ automatic: true }), contextId)
+            : await api.appVerify(activeJob.id, contextId)
+          const verified = parseJson<AppDeliveryJob | null>(verifyRaw, null)
+          if (verified?.status === 'verified') {
+            notice = '配置已更新并完成业务重新验证，本地应用技能已同步启用。'
+          } else if (verified?.status === 'awaiting_page_verification') {
+            notice = '配置已更新，需重新完成页面验收后启用本地应用技能。'
+          } else if (verified?.status === 'failed') {
+            notice = `配置已更新，但本地技能自动重验未通过：${verified.error || '请在详情或向导第 4 步填写凭据重验。'}`
+          } else {
+            notice = '配置已更新；本地应用技能需重新验证后启用。'
+          }
+        } catch {
+          notice = '配置已更新；本地应用技能需在重新验证后启用。'
+        }
+      }
+      setDetailNotice(notice)
       await openAppDetail(detailApp.slug, 'configs', true)
       void loadWorkspaceData(true)
     } catch (error) {
@@ -1636,7 +1711,7 @@ export function AppsPanel({
             const tone = jobStatusTone(app.status)
             const readOnly = app.can_manage !== true
             const isFailed = app.status === 'failed' || app.status === 'unhealthy'
-            const matchingJob = jobs.find(j => j.slug === app.slug)
+            const matchingJob = findAppJob(jobs, app)
             return (
               <article key={app.slug} className="oa-app-card">
                 <div className="oa-app-card-head">
@@ -1700,7 +1775,7 @@ export function AppsPanel({
                       <button type="button" className="oa-btn oa-btn-xs" onClick={() => void openAppDetail(app.slug, 'versions')}>
                         版本与回退
                       </button>
-                      <button type="button" className="oa-btn oa-btn-xs oa-btn-accent-soft" onClick={() => startWizardNew(app)}>
+                      <button type="button" className="oa-btn oa-btn-xs oa-btn-accent-soft" onClick={() => startWizardNew(app, matchingJob)}>
                         升级新版本
                       </button>
                     </>
@@ -1726,7 +1801,7 @@ export function AppsPanel({
       { id: 3, label: '核对部署内容' },
       { id: 4, label: '部署与使用' },
     ]
-    const upgrading = Boolean(upgradeTarget || wizardJob?.upgrade)
+    const upgrading = Boolean(upgradeTarget || wizardJob?.upgrade || wizardJob?.published)
 
     const portNum = Number.parseInt(containerPort, 10)
     const slugValid = SLUG_RE.test(toAppSlug(appSlug, { allowTrailingDash: false }))
@@ -1734,7 +1809,7 @@ export function AppsPanel({
       !wizardBusy &&
       appName.trim().length > 0 &&
       slugValid &&
-      (Boolean(upgradeTarget) || slugCheck.available !== false) &&
+      (upgradingStep1 || slugCheck.available !== false) &&
       Number.isInteger(portNum) &&
       portNum >= 1 &&
       portNum <= 65535 &&
@@ -1850,7 +1925,7 @@ export function AppsPanel({
                 <div className="oa-field">
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                     <label className="oa-label" htmlFor={`${formId}-app-slug`}>应用访问子域名 (唯一标识) *</label>
-                    {!upgradeTarget && slugManual && appName.trim() && (
+                    {!upgradingStep1 && slugManual && appName.trim() && (
                       <button
                         type="button"
                         className="oa-btn-link"
@@ -1870,7 +1945,7 @@ export function AppsPanel({
                       id={`${formId}-app-slug`}
                       className="oa-compound-input oa-mono"
                       value={appSlug}
-                      disabled={Boolean(upgradeTarget)}
+                      disabled={upgradingStep1}
                       placeholder="例如：devops-aly（仅限小写字母、数字和中划线）"
                       onCompositionStart={() => {
                         isSlugComposingRef.current = true
@@ -1900,22 +1975,37 @@ export function AppsPanel({
                       >
                         http://{appSlug.trim() || 'your-app'}.{opcConfig.appDomainRoot}
                       </span>
-                      {!upgradeTarget && slugCheck.checking && (
+                      {!upgradingStep1 && slugCheck.checking && (
                         <span className="oa-pill">正在校验…</span>
                       )}
-                      {!upgradeTarget && !slugCheck.checking && !slugCheck.error && slugCheck.available && (
+                      {!upgradingStep1 && !slugCheck.checking && !slugCheck.error && slugCheck.available && (
                         <span className="oa-pill oa-pill-ok">标识可用</span>
                       )}
                     </div>
                     <span style={{ fontSize: 11.5, color: '#64748b', flexShrink: 0 }}>
-                      (默认容器端口: {containerPort || opcConfig.defaultPort})
+                      (容器端口: {containerPort || opcConfig.defaultPort})
                     </span>
                   </div>
-                  {!upgradeTarget && slugCheck.error && (
+                  {!upgradingStep1 && slugCheck.error && (
                     <div className="oa-hint" style={{ color: '#dc2626', marginTop: 4 }}>
                       {slugCheck.error}
                     </div>
                   )}
+                </div>
+
+                <div className="oa-field" style={{ maxWidth: 260 }}>
+                  <label className="oa-label" htmlFor={`${formId}-container-port`}>容器监听端口 *</label>
+                  <input
+                    id={`${formId}-container-port`}
+                    className="oa-input oa-mono"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={containerPort}
+                    placeholder={String(opcConfig.defaultPort)}
+                    onChange={e => setContainerPort(e.target.value)}
+                  />
+                  <div className="oa-hint">默认 {opcConfig.defaultPort}；若源码或 Dockerfile 监听其他端口可在此调整。</div>
                 </div>
 
                 <div className="oa-field">
@@ -2062,6 +2152,10 @@ export function AppsPanel({
                 setSlugManual(true)
                 setContainerPort(String(wizardJob.port ?? opcConfig.defaultPort))
                 setAppDescription(wizardJob.description ?? '')
+                if (wizardJob.upgrade || wizardJob.published) {
+                  const target = apps.find(a => a.slug === wizardJob.slug && a.can_manage === true)
+                  if (target) setUpgradeTarget(target)
+                }
                 setWizardStep(1)
               }}
               onNextStep={() => setWizardStep(3)}
@@ -2497,6 +2591,10 @@ export function AppsPanel({
                   setSlugManual(true)
                   setContainerPort(String(wizardJob.port ?? opcConfig.defaultPort))
                   setAppDescription(wizardJob.description ?? '')
+                  if (wizardJob.upgrade || wizardJob.published) {
+                    const target = apps.find(a => a.slug === wizardJob.slug && a.can_manage === true)
+                    if (target) setUpgradeTarget(target)
+                  }
                   setWizardStep(1)
                 }}
               >
@@ -2617,7 +2715,7 @@ export function AppsPanel({
               <span>刷新</span>
             </button>
             {!readOnly && (
-              <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => startWizardNew(detailApp)}>
+              <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => startWizardNew(detailApp, findAppJob(jobs, detailApp))}>
                 <AppIcon name="plus" size={13} />
                 <span>发布新版本</span>
               </button>

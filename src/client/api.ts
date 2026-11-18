@@ -132,6 +132,7 @@ export interface AppDeliveryJob {
   url: string
   events: string[]
   error?: string
+  superseded?: boolean
   upgrade?: boolean
   versionNote?: string
   model?: string

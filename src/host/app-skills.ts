@@ -17,7 +17,7 @@ export class AppSkillProvider implements SkillProvider {
     options.signal?.throwIfAborted()
     const seenSlugs = new Set<string>()
     const activeVerified = jobs.filter(job => {
-      if (job.status !== 'verified' || job.userDisabled) return false
+      if (job.status !== 'verified' || job.userDisabled || job.superseded) return false
       if (seenSlugs.has(job.slug)) return false
       seenSlugs.add(job.slug)
       return true
@@ -28,7 +28,12 @@ export class AppSkillProvider implements SkillProvider {
   }
   async get(candidate: SkillCandidate, options: SkillLookupOptions) {
     const locator = candidate.locator as { id: string; context: string; version: number }
-    const { job } = await this.delivery.verifiedJob(locator.id, locator.context)
+    let job
+    try {
+      ({ job } = await this.delivery.verifiedJob(locator.id, locator.context))
+    } catch {
+      return undefined
+    }
     if (job.version !== locator.version) return undefined
     options.signal?.throwIfAborted()
     const contract = job.proposal!.contract
