@@ -27,8 +27,7 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
   "base_url":"http://opc-adapter-stock-demo.orb.local:8080",
   "runtime":{"language":"python","version":"3.11","port":8080},
   "build_context":["Dockerfile","server.py"],
-  "health":{"path":"/healthz","status":200,"json_contains":{"service":"stock-demo"}},
-  "configs":[{"key":"PORT","default":"8080","secret":false,"required":true,"description":"监听端口"}],
+  "configs":[],
   "resources":[],
   "pages":[],
   "apis":[{
@@ -47,8 +46,8 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
 
 - URL 由用户在分析前确定，与 prepare 输入严格一致；不含凭据、路径前缀、query 或 fragment。内网 HTTP/HTTPS 按目标环境选择，不绑定 Cloudflare。
 - build_context 是应用文件/目录白名单，包含真实锁文件、构建与运行资产，以及应用需要的原配置（包括 `.env`）、JSON、SQLite、账户与业务数据。由本机原样复制，不因含凭据而拒绝；不含 VCS、无关原 ZIP 或分析报告。业务技能内的管理员账密按 `admin_account` 规则由打包器写入。业务数据和其他秘密保留在原存储或运行时配置中，模型输出只引用位置。
-- configs 仅有非秘密 default；secret:true 的 default 必须空。原文件内的秘密继续由应用按原方式读取，不必声明成环境变量。只有实际需要的环境变量覆盖才由 env-file、原值引用或用户选择的资源注入；扫描用于 AI 脱敏，不作为应用原文件的打包门禁。
-- secret/required 必须是明确的布尔值，default 是字符串，key 唯一。常见凭据字段（如 API_KEY、PASSWORD、TOKEN、DSN）不能标为非秘密；任何默认值都不能夹带带凭据 URL 或 Password=... 连接串。不要把秘密改个名字或将 secret 改为 false 来绕过。
+- `configs` 只声明确有需要的原应用配置，键必须能在导入源码中找到。文件配置通过 `source: {"path":"config.yaml","keys":["service","url"]}` 引用原值；沿用原配置及读取方式。容器端口来自已确认的 `runtime.port`。
+- `secret` 和 `required` 为布尔值，`key` 唯一，`default` 留空。常见凭据字段（如 API_KEY、PASSWORD、TOKEN、DSN）标为秘密。缺值时请用户在原应用维护。
 - 最终 `apis` / `pages` 收录应用实际部署的接口、页面与业务视图，至少一个数组非空。DSH 提交时可用 `[]` 或只补充、覆盖扫描项，插件合并完整清单。纯页面应用填写浏览器验证计划。
 - 每个 API 必须含 purpose、源码 evidence、实际 parameters/request_body/responses、auth、effect。request_body 为 null 或包含 required、description、schema 的对象；完整 schema 与错误说明应保留，工具不声称完整实现 JSON Schema 验证。API 错误可能包含 HTTP 200 下的业务错误码，业务流程必须明确成功判断，不把 HTTP 成功等同业务成功。
 - auth.type 为 none、bearer 或 header；非 none 必须声明 env 环境变量名或引用 auth_profiles 中的 profile，header 还要提供 header。原始账号密码不要填入契约，由打包器写进生成应用技能的 `SKILL.md`。其他密钥和令牌沿用运行时引用。
@@ -75,7 +74,7 @@ python3 scripts/delivery.py bundle /tmp/app-review --out /tmp/app-delivery
 python3 scripts/delivery.py smoke /tmp/app-review --image opc-adapter/stock-demo:review --container opc-adapter-stock-demo --keep
 ```
 
-现版 smoke 仅处理本机 Docker：URL 必须是该容器的 OrbStack 域名，或事先固定的回环端口。它从实际生成的 app.tar 解包构建，而非另做不同权限的构建目录；创建无外网的专用运行网络、只读文件系统和 /tmp 临时盘，验证真实健康身份和业务 JSON。app.tar 与业务技能 ZIP 规范化时间/权限，避免文件时间或 Python 版本使摘要漂移。构建阶段可能下载应用依赖；它不配置 DNS、Nginx、证书、外部数据库或连接生产服务。
+现版 smoke 仅处理本机 Docker：URL 必须是该容器的 OrbStack 域名，或事先固定的回环端口。它从实际生成的 app.tar 解包构建，而非另做不同权限的构建目录；创建无外网的专用运行网络、只读文件系统和 /tmp 临时盘，检查监听端口和只读业务 JSON。app.tar 与业务技能 ZIP 规范化时间/权限，避免文件时间或 Python 版本使摘要漂移。构建阶段可能下载应用依赖；它不配置 DNS、Nginx、证书、外部数据库或连接生产服务。
 
 本流程保留原数据库引擎与数据，不自动迁库；SQLite 使用一致性快照并挂载完整数据目录。迁移属于独立授权任务。`--env-file` 仅接收受保护的用户配置，不继承宿主环境秘密。
 
@@ -91,4 +90,4 @@ python3 <技能目录>/scripts/invoke_api.py --operation get-stock --params '{"s
 
 ## 状态
 
-bundle 的状态是 packaged-not-deployed。无页面且健康/只读 API 探针通过后，smoke 写 verified-local；有页面写 awaiting-browser-verification（仅保留实际完成的构建/健康/API 证据）。工具不执行浏览器步骤，也不伪造浏览器成功证据。构建/启动/业务测试没有实际执行的项目一律写未验证；只读成功不能声称全部业务已验收。技能 ZIP 生成时已包含完整 URL，但部署成功前不启用为正式技能。
+bundle 的状态是 packaged-not-deployed。无页面且监听端口和只读 API 探针通过后，smoke 写 verified-local；有页面写 awaiting-browser-verification（仅保留实际完成的构建/监听端口/API 证据）。工具不执行浏览器步骤，也不伪造浏览器成功证据。构建/启动/业务测试没有实际执行的项目一律写未验证；只读成功不能声称全部业务已验收。技能 ZIP 生成时已包含完整 URL，但部署成功前不启用为正式技能。

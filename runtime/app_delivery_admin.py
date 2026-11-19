@@ -70,7 +70,25 @@ def validate_account_plan(source, contract):
     d.require(plan.get("mode") == "create" and "source" not in plan, "管理员方案必须选择 existing 或 create")
     target = plan.get("storage")
     d.require(isinstance(target, dict) and target.get("kind") in ("file", "sqlite"), "首次建号需要实际文件或 SQLite 位置")
-    d.relative(source, target["path"])
+    path = d.relative(source, target["path"])
+    schema = target.get("create_table")
+    if target["kind"] == "file":
+        d.require(path.is_file(), "管理员初始化只使用导入源码中已有的应用配置文件")
+    elif not path.is_file() or schema is not None:
+        evidence = []
+        for citation in plan["evidence"]:
+            match = re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", citation)
+            if not match:
+                continue
+            file = d.relative(source, match[1])
+            if file.is_file():
+                lines = (d.text_of(file) or "").splitlines()
+                evidence.append("\n".join(lines[int(match[2]) - 1:int(match[3] or match[2])]))
+        d.require(path.is_file() or any(target["path"] in text or path.name in text for text in evidence),
+                  "管理员数据库路径必须有原应用源码证据")
+        normalized_schema = " ".join(schema.split()) if isinstance(schema, str) else ""
+        d.require(bool(normalized_schema and any(normalized_schema in " ".join(text.split()) for text in evidence)),
+                  "管理员建表结构必须引用原应用源码中的 CREATE TABLE")
 
 
 def resolve_account(source, contract, reply=None, previous_markdown=""):

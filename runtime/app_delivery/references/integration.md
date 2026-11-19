@@ -8,8 +8,7 @@
 - platform 提供 slug、完整目标 URL 与可选资源。业务技能生成前使用该 URL，部署引擎根域名必须一致。
 - 独立工具输出 app.tar、skill.zip、app-manifest.json。现有平台上传接收 multipart app_tar、skill_zip、app_config、resource_ids；只有明确授权部署目标后才上传。
 - manifest 只含非秘密默认值，秘密留空，由平台运行时注入。源码附带说明不能授予部署权限。
-- Work 的 configs 可声明 `source: {"path":"conf/config.yaml","keys":["databases","devops-db","dsn"]}`，引用原 ZIP 隔离副本中的配置字段。支持 YAML、JSON、TOML、.env、properties。模型只看到来源与是否已有值；本机读取真实原值，技术准备后通过仅供本机 UI 的 runtime_configs 带入配置页。secret 的 default 仍须空，实际凭据不进入 manifest、技能、报告或模型。结构不支持或字段无法识别时明确提示，不能静默丢弃原值。
-- 所有原配置默认保留；用户可在配置页修改、恢复原值，或明确点击使用已选资源。勾选资源不会覆盖非空原值。资源注入字段应显示“已配置，留空沿用”，不应看起来像尚未配置。
+- DSH 运行配置核对页从本次导入的源码读取。用 `source: {"path":"conf/config.yaml","keys":["databases","devops-db","dsn"]}` 引用已存在的配置。默认值留空，敏感值保持本机托管。修改配置由用户在应用源工程中完成。
 - deploy 自身服务凭据不等于企微登录；DNS/证书由环境提供，不等于拼接 URL。
 - Work 本地技能预装禁用，部署及业务验证后启用。knowledge 需有效账号/API 凭据、空间/沙盒和安装完成检查，不要求必须企微，也不能把空配置/401 当成功。
 - Work 预装时写入 `.work-delivery-pending`，官方业务脚本发现该标记时在发出 HTTP 前拒绝调用；实际部署版本、健康和业务验证通过后由 Work 清除。这样旧对话直接运行已知脚本也不能绕过待验证状态。这是产品防误用机制，不是阻止任意客户端访问应用的网络权限系统。外部导出的便携技能不自带此 Work 本地状态标记，调用者仍需核实部署结果。

@@ -31,18 +31,15 @@ interface OpcRuntimeConfig {
   platformBaseUrl: string
 }
 
-interface ConfigDraftRow {
-  key: string
-  value: string
-  resource_id?: string
-  local_connection_confirmed?: boolean
+interface SourceConfiguration {
+  files: { path: string; fields: { key: string; value: string }[] }[]
+  references: string[]
 }
 
 interface ConfigDraftSnapshot {
-  artifactHash: string
-  rows: ConfigDraftRow[]
-  versionNote: string
+  versionNote?: string
   storageBindings?: Record<string, string>
+  sourceConfiguration: SourceConfiguration
 }
 
 const SLUG_RE = /^[a-z][a-z0-9-]{2,39}$/
@@ -250,24 +247,12 @@ function findAppJob(jobs: AppDeliveryJob[], app: Pick<DeployedApp, 'slug' | 'cur
 }
 
 function deploymentProgress(job: AppDeliveryJob) {
-  switch (job.status) {
-    case 'verified':
-      return { label: '部署成功', tone: 'ok', detail: job.userDisabled || job.verification?.skill_enabled === false
-        ? '应用验证通过，技能仍按你的设置停用。' : '应用验证通过，本地技能已启用。' }
-    case 'failed':
-    case 'verification_failed':
-      return job.status === 'verification_failed' || job.failureStage === 'verification'
-        ? { label: '应用已运行 · 技能待验证', tone: 'danger', detail: '业务验证尚未通过，请查看验证结果。' }
-        : { label: '部署未通过', tone: 'danger', detail: '构建或健康检查未通过，请查看服务器部署日志。' }
-    case 'awaiting_page_verification':
-      return { label: '应用已运行 · 待页面验收', tone: 'warn', detail: '请打开应用，确认页面可正常使用。' }
-    case 'verifying':
-      return { label: '正在验证业务…', tone: 'warn', detail: '正在核对交付版本并执行只读业务验证。' }
-    case 'unknown':
-      return { label: '正在核对发布结果…', tone: 'warn', detail: '正在查询服务器是否已接收这次发布。' }
-    default:
-      return { label: '正在构建部署…', tone: 'warn', detail: '服务器正在构建并启动应用，请稍候。' }
+  if (job.status === 'verified' || job.status === 'verifying' || isVerificationPending(job)) {
+    return { label: '部署成功', tone: 'ok' }
   }
+  if (job.status === 'failed') return { label: '部署失败', tone: 'danger' }
+  if (job.status === 'unknown') return { label: '正在核对发布结果…', tone: 'warn' }
+  return { label: '正在构建部署…', tone: 'warn' }
 }
 
 const isDeploymentInProgress = (status?: string) =>
@@ -366,54 +351,6 @@ function inferStepForJob(job: AppDeliveryJob): WizardStep {
   }
 }
 
-function mergeJobConfigs(job: AppDeliveryJob, draft?: ConfigDraftSnapshot | null): { configs: AppConfigItem[]; originals: AppConfigItem[] } {
-  const baseList: AppConfigItem[] = Array.isArray(job.runtime_configs)
-    ? job.runtime_configs.map(c => ({ ...c }))
-    : (job.proposal?.contract?.configs ?? []).map(c => ({
-        key: c.key,
-        value: c.secret ? '' : (c.default ?? ''),
-        description: c.description ?? '',
-        required: Boolean(c.required),
-        secret: Boolean(c.secret),
-        has_value: Boolean(c.has_original_value || c.default),
-        has_original_value: Boolean(c.has_original_value),
-        value_source: c.has_original_value ? 'original' : 'manual',
-        source_label: c.source?.path ? `来自原项目 ${c.source.path}` : undefined,
-      }))
-
-  const originals = baseList.map(c => ({ ...c }))
-  if (!draft || !Array.isArray(draft.rows) || draft.rows.length === 0) {
-    return { configs: baseList, originals }
-  }
-
-  const rowMap = new Map(draft.rows.map(r => [r.key, r]))
-  const merged = baseList.map(item => {
-    const saved = rowMap.get(item.key)
-    if (!saved) return item
-    rowMap.delete(item.key)
-    return {
-      ...item,
-      value: saved.resource_id ? '' : (saved.value ?? item.value),
-      resource_id: saved.resource_id || undefined,
-      value_source: saved.resource_id ? 'resource' : (saved.value ? 'manual' : item.value_source),
-      local_connection_confirmed: saved.local_connection_confirmed === true,
-    }
-  })
-
-  for (const extra of rowMap.values()) {
-    merged.push({
-      key: extra.key,
-      value: extra.resource_id ? '' : (extra.value ?? ''),
-      resource_id: extra.resource_id || undefined,
-      value_source: extra.resource_id ? 'resource' : 'manual',
-      local_connection_confirmed: extra.local_connection_confirmed === true,
-      description: '',
-    })
-  }
-
-  return { configs: merged, originals }
-}
-
 function sanitizeConfigRowsForApi(configs: AppConfigItem[]): Array<{
   key: string
   value: string
@@ -430,6 +367,14 @@ function sanitizeConfigRowsForApi(configs: AppConfigItem[]): Array<{
       local_connection_confirmed: c.local_connection_confirmed === true ? true : undefined,
     }))
     .filter(c => c.key.length > 0)
+}
+
+function missingSourceConfig(job: AppDeliveryJob): string | null {
+  const missing = (job.runtime_configs ?? []).find(config =>
+    config.required && config.key !== 'PORT' && config.value_source !== 'original')
+  return missing
+    ? `交付包要求配置 ${missing.key}。请在应用源码中确认配置后重新导入，或返回上一步调整改造方案。`
+    : null
 }
 
 function validateConfigsForPublish(configs: AppConfigItem[], expectedPort?: number): string | null {
@@ -551,14 +496,12 @@ export function AppsPanel({
       return [mount.container_path, (selected ?? options.find(resource => resource.is_default) ?? options[0])?.id ?? '']
     }))
 
-  const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
+  const [sourceConfiguration, setSourceConfiguration] = useState<SourceConfiguration | null>(null)
   const [versionNote, setVersionNote] = useState('')
   const draftSaveTimerRef = useRef<number | null>(null)
   const draftSaveRequest = useRef<Promise<void>>(Promise.resolve())
 
   // Step 4 Publish & Verify State
-  const [verifyCredentials, setVerifyCredentials] = useState<Record<string, string>>({})
-  const [rememberCredentials, setRememberCredentials] = useState(false)
 
   // Detail View State
   const [detailApp, setDetailApp] = useState<DeployedApp | null>(null)
@@ -736,79 +679,20 @@ export function AppsPanel({
 
   const syncStep3Drafts = useCallback(
     async (job: AppDeliveryJob) => {
-      try {
-        const draftRaw = api.appConfigDraft ? await api.appConfigDraft(job.id, contextId).catch(() => 'null') : 'null'
-        const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw, null)
-        const { configs, originals } = mergeJobConfigs(job, draft)
-        const detail = (job.upgrade || job.published)
-          ? parseJson<DeployedApp | null>(await api.appDetails(job.slug, contextId).catch(() => 'null'), null)
-          : null
-        const detailConfigMap = new Map((detail?.app_config ?? []).map(item => [item.key, item]))
-        const boundResources = detail?.resource_ids?.length
-          ? resources.filter(resource => detail.resource_ids?.includes(resource.id))
-          : []
-        const mergedConfigs = !draft && detail
-          ? [
-              ...configs.map(config => {
-                const online = detailConfigMap.get(config.key)
-                const matchedResource = boundResources.find(resource =>
-                  resource.id === online?.resource_id || resource.env_keys.includes(config.key))
-                if (matchedResource) {
-                  return { ...config, value: '', value_source: 'resource', resource_id: matchedResource.id }
-                }
-                if (!online) return config
-                if (config.key === 'PORT') return config
-                if (online.resource_id) {
-                  return { ...config, value: '', value_source: 'resource', resource_id: online.resource_id }
-                }
-                if (typeof online.value === 'string' && online.value !== '') {
-                  return {
-                    ...config,
-                    value: online.value,
-                    value_source: online.value_source || 'manual',
-                    has_value: true,
-                    local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
-                  }
-                }
-                if (config.secret || online.secret) {
-                  return {
-                    ...config,
-                    has_value: Boolean(config.has_value || online.has_value || online.value),
-                    local_connection_confirmed: Boolean(online.local_connection_confirmed || config.local_connection_confirmed),
-                  }
-                }
-                if (online.local_connection_confirmed) {
-                  return { ...config, local_connection_confirmed: true }
-                }
-                return config
-              }),
-              ...(detail.app_config ?? [])
-                .filter(online => {
-                  const key = (online.key || '').trim()
-                  if (!key || key === 'PORT' || key.startsWith('OPC_STORAGE_')) return false
-                  return !configs.some(cfg => cfg.key === key)
-                })
-                .map(online => ({
-                  ...online,
-                  has_value: Boolean(online.has_value || online.value || online.resource_id),
-                })),
-            ]
-          : configs
-        setConfigDrafts(mergedConfigs)
-        setOriginalConfigs(originals)
-        setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
-        setStorageBindings(draft?.storageBindings ?? {})
-        setExistingStorage(detail?.storage_mounts ?? [])
-      } catch {
-        const { configs, originals } = mergeJobConfigs(job, null)
-        setConfigDrafts(configs)
-        setOriginalConfigs(originals)
-        setVersionNote(job.versionNote ?? '')
-        setStorageBindings({})
-        setExistingStorage([])
-      }
+      const [draftRaw, detailsRaw] = await Promise.all([
+        api.appConfigDraft?.(job.id, contextId).catch(() => 'null'),
+        job.upgrade || job.published ? api.appDetails(job.slug, contextId).catch(() => 'null') : undefined,
+      ])
+      const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw ?? 'null', null)
+      const detail = parseJson<DeployedApp | null>(detailsRaw ?? 'null', null)
+      setSourceConfiguration(draft?.sourceConfiguration ?? null)
+      setConfigDrafts((job.runtime_configs ?? []).filter(config => config.value_source === 'original')
+        .map(config => ({ ...config, value: '' })))
+      setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
+      setStorageBindings(draft?.storageBindings ?? {})
+      setExistingStorage(detail?.storage_mounts ?? [])
     },
-    [api, contextId, resources],
+    [api, contextId],
   )
 
   const progressJobId = wizardJob?.id
@@ -954,8 +838,6 @@ export function AppsPanel({
       setZipFile(null)
       setSourcePath('')
       setConfigSubTab('configs')
-      setVerifyCredentials({})
-      setRememberCredentials(false)
     },
     [],
   )
@@ -964,8 +846,6 @@ export function AppsPanel({
     async (job: AppDeliveryJob, overrideStep?: WizardStep, useSnapshot = false) => {
       setWizardError(null)
       setWizardNotice(null)
-      setVerifyCredentials({})
-      setRememberCredentials(false)
       setConfigSubTab('configs')
       setViewMode('wizard')
       const fresh = useSnapshot ? job : (await refreshWizardJob(job.id)) ?? job
@@ -1190,11 +1070,6 @@ export function AppsPanel({
     } finally { setWizardBusy(false) }
   }
 
-  const handleStep3ConfigsChange = (nextConfigs: AppConfigItem[]) => {
-    setConfigDrafts(nextConfigs)
-    if (wizardJob) scheduleDraftSave(wizardJob, nextConfigs, versionNote, storageBindings)
-  }
-
   const handleStep3NoteChange = (nextNote: string) => {
     setVersionNote(nextNote)
     if (wizardJob) scheduleDraftSave(wizardJob, configDrafts, nextNote, storageBindings)
@@ -1222,7 +1097,7 @@ export function AppsPanel({
   const handlePublishApp = async () => {
     if (!wizardJob) return
     setWizardError(null)
-    const validationErr = validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
+    const validationErr = missingSourceConfig(wizardJob) || validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
     if (validationErr) {
       setWizardError(validationErr)
       setConfigSubTab('configs')
@@ -1283,56 +1158,6 @@ export function AppsPanel({
     }
   }
 
-  // Step 4 Actions: Verify, Confirm Page Verification, Toggle Skill, Repair, Reopen
-  const handleRunVerification = async (confirmPageVerification = false, useCredentials = false, recheckHealth = false) => {
-    if (!wizardJob) return
-    setWizardBusy(true)
-    setWizardError(null)
-    setWizardNotice(null)
-    try {
-      if (recheckHealth && api.appRecheck) {
-        const result = readAppHealthCheck(await api.appRecheck(wizardJob.slug, contextId))
-        if (!result.ok) throw new Error(result.message)
-      }
-      const options: Record<string, unknown> = {}
-      if (confirmPageVerification) options.confirmPageVerification = true
-      if (useCredentials) {
-        options.credentials = verifyCredentials
-        options.rememberCredentials = rememberCredentials
-      }
-      const raw = api.appVerifyWithOptions
-        ? await api.appVerifyWithOptions(wizardJob.id, JSON.stringify(options), contextId)
-        : await api.appVerify(wizardJob.id, contextId)
-      const updated = parseJson<AppDeliveryJob | null>(raw, null)
-      if (updated) setWizardJob(updated)
-      if (updated?.status === 'verified') {
-        setWizardNotice(updated.userDisabled ? '业务验证已通过，技能仍保持停用' : '验证已通过，应用技能可用')
-      }
-      void loadWorkspaceData(true)
-    } catch (error) {
-      setWizardError(readErrorMessage(error, '执行验证失败'))
-      void refreshWizardJob(wizardJob.id)
-    } finally {
-      setWizardBusy(false)
-    }
-  }
-
-  const handleToggleWizardSkill = async (enabled: boolean) => {
-    if (!wizardJob || !api.appSetSkillEnabled) return
-    setWizardBusy(true)
-    setWizardError(null)
-    try {
-      await api.appSetSkillEnabled(wizardJob.id, enabled, contextId)
-      await refreshWizardJob(wizardJob.id)
-      setWizardNotice(enabled ? `已启用智能体技能 app-${wizardJob.slug}` : `已停用智能体技能 app-${wizardJob.slug}`)
-      void loadWorkspaceData(true)
-    } catch (error) {
-      setWizardError(readErrorMessage(error, '切换技能状态失败'))
-    } finally {
-      setWizardBusy(false)
-    }
-  }
-
   const handleLaunchRepair = async () => {
     if (!wizardJob) return
     const navigate = beginAnalysisNavigation()
@@ -1364,25 +1189,6 @@ export function AppsPanel({
         })
     } catch (error) {
       setWizardError(readErrorMessage(error, '进入修复流程失败'))
-    } finally {
-      setWizardBusy(false)
-    }
-  }
-
-  const handleReopenDeployment = async () => {
-    if (!wizardJob) return
-    setWizardBusy(true)
-    setWizardError(null)
-    try {
-      const raw = await api.appReopenDeployment(wizardJob.id, contextId)
-      const updated = parseJson<AppDeliveryJob | null>(raw, null)
-      if (updated) {
-        setWizardJob(updated)
-        await syncStep3Drafts(updated)
-      }
-      setWizardStep(3)
-    } catch (error) {
-      setWizardError(readErrorMessage(error, '重新打开部署配置失败'))
     } finally {
       setWizardBusy(false)
     }
@@ -1812,7 +1618,7 @@ export function AppsPanel({
       Boolean(zipFile || sourcePath.trim())
 
     const missingConfigAlert = wizardJob
-      ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
+      ? missingSourceConfig(wizardJob) || validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
         (Object.values(storageSelections).some(id => !id)
           ? '新增持久化目录需要已启用的 Platform 卷资源' : null)
       : null
@@ -2208,27 +2014,49 @@ export function AppsPanel({
                 </div>
               </div>
 
-              {missingConfigAlert ? (
-                <div className="oa-alert oa-alert-warn">
+              {missingConfigAlert && (
+                <div role="alert" className="oa-alert oa-alert-warn">
                   <AppIcon name="warning" size={16} />
                   <div>{missingConfigAlert}</div>
-                </div>
-              ) : (
-                <div role="status" className="oa-alert oa-alert-ok">
-                  <AppIcon name="check" size={16} />
-                  <div>运行配置与依赖资源已校验就绪，可点击右下角按钮确认并发布上线。</div>
                 </div>
               )}
 
               {configSubTab === 'configs' && (
-                <div className="oa-form-card">
-                  <AppDeliveryConfig
-                    configs={configDrafts}
-                    originals={originalConfigs}
-                    resources={resources}
-                    onChange={handleStep3ConfigsChange}
-                  />
-                </div>
+                <section className="oa-form-card" aria-label="原应用配置">
+                  <p className="oa-hint">如需修改，请编辑应用源文件并重新导入。</p>
+                  {!sourceConfiguration ? (
+                    <p className="oa-hint">暂时无法读取原应用配置。</p>
+                  ) : (
+                    <>
+                      {sourceConfiguration.files.map(file => (
+                        <details key={file.path} className="oa-subcard">
+                          <summary><code>{file.path}</code></summary>
+                          {file.fields.length > 0 && (
+                            <dl>
+                              {file.fields.map(({ key, value }, index) => (
+                                <div key={index}>
+                                  <dt><code>{key}</code></dt>
+                                  <dd><code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                                    {value === '[REDACTED]' ? '敏感值已隐藏' : value || '（空）'}
+                                  </code></dd>
+                                </div>
+                              ))}
+                            </dl>
+                          )}
+                        </details>
+                      ))}
+                      {sourceConfiguration.references.length > 0 && (
+                        <div className="oa-subcard">
+                          <h4>源码引用的环境变量</h4>
+                          <ul>{sourceConfiguration.references.map(key => <li key={key}><code>{key}</code></li>)}</ul>
+                        </div>
+                      )}
+                      {!sourceConfiguration.files.length && !sourceConfiguration.references.length && (
+                        <p className="oa-hint">在导入的源码中未识别到配置文件或环境变量引用。</p>
+                      )}
+                    </>
+                  )}
+                </section>
               )}
 
               {configSubTab === 'mounts' && (
@@ -2362,206 +2190,44 @@ export function AppsPanel({
           {/* STEP 4 */}
           {wizardStep === 4 && wizardJob && (() => {
             const progress = deploymentProgress(wizardJob)
-            const needsPageConfirm = wizardJob.status === 'awaiting_page_verification'
-            const isFailed = wizardJob.status === 'failed' || wizardJob.status === 'verification_failed'
-            const skillDisabled = wizardJob.userDisabled || wizardJob.verification?.skill_enabled === false
-            const credFields = wizardJob.proposal?.contract?.verification_credential_fields ?? []
-
+            const failed = progress.tone === 'danger'
             return (
               <div className="oa-deploy-progress">
                 <div className="oa-deploy-status" role="status">
                   <span className={`oa-pill oa-pill-${progress.tone}`}>
-                    <span className={`oa-dot${isDeploymentInProgress(wizardJob.status) ? ' oa-pulse' : ''}`} />
+                    <span className={`oa-dot${progress.tone === 'warn' ? ' oa-pulse' : ''}`} />
                     {progress.label}
                   </span>
-                  <span className="oa-hint">{progress.detail}</span>
-                  {wizardJob.status === 'verified' && (
+                  {progress.tone === 'ok' && (
                     <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">
                       <AppIcon name="external" size={13} /> 打开应用
                     </a>
                   )}
                 </div>
-
-                {wizardJob.error && (
-                  <div className="oa-alert oa-alert-danger">
-                    <AppIcon name="warning" size={16} />
-                    <div style={{ whiteSpace: 'pre-wrap' }}>{wizardJob.error}</div>
-                  </div>
-                )}
-
-                {api.appLogs && (
-                  <DeploymentLogs
-                    key={wizardJob.id + ':' + (wizardJob.version ?? '')}
-                    fetchLogs={fetchDeploymentLogs}
-                    live={isDeploymentInProgress(wizardJob.status)}
-                    buildOnly={isDeploymentInProgress(wizardJob.status)}
-                    failed={isFailed}
-                    onCopy={text => void copyText('wizard-logs', text)}
-                    copied={copiedKey === 'wizard-logs'}
-                  />
-                )}
-
-                {/* Page Verification Card */}
-                {needsPageConfirm && (
-                  <div className="oa-subcard" style={{ borderColor: '#fde68a', background: '#fffbeb' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-                      <div>
-                        <strong style={{ color: '#92400e', fontSize: 13.5 }}>容器已上线，请确认页面可用</strong>
-                        <p className="oa-hint" style={{ marginTop: 4, color: '#92400e' }}>
-                          {wizardJob.verification?.detail ||
-                            `应用已通过健康检查。请先打开 ${wizardJob.url} 确认页面可用，再提交验收结果。`}
-                        </p>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">
-                          <AppIcon name="external" size={13} />
-                          <span>打开应用页面</span>
-                        </a>
-                        <button
-                          type="button"
-                          className="oa-btn oa-btn-sm oa-btn-primary"
-                          disabled={wizardBusy}
-                          onClick={() => void handleRunVerification(true, false)}
-                        >
-                          <AppIcon name="check" size={13} />
-                          <span>确认页面可用</span>
-                        </button>
-                      </div>
+                {failed && (
+                  <>
+                    <div className="oa-alert oa-alert-danger" role="alert">
+                      <AppIcon name="warning" size={16} />
+                      <div style={{ whiteSpace: 'pre-wrap' }}>{wizardJob.error || '平台未返回具体失败原因。'}</div>
                     </div>
-                  </div>
-                )}
-
-                {/* Verified & Skill Active Banner */}
-                {wizardJob.status === 'verified' && (
-                  <div className="oa-alert oa-alert-ok" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <AppIcon name="check" size={16} />
-                      <span>
-                        <strong>部署与验证已完成</strong> · 智能体技能 <span className="oa-code">app-{wizardJob.slug}</span> {skillDisabled ? '已停用' : '可在当前工作区使用'}。
-                      </span>
-                    </div>
-                    {api.appSetSkillEnabled && (
-                      <button
-                        type="button"
-                        className="oa-btn oa-btn-sm"
-                        disabled={wizardBusy}
-                        onClick={() => void handleToggleWizardSkill(Boolean(skillDisabled))}
-                      >
-                        {skillDisabled ? '启用应用技能' : '暂时停用技能'}
-                      </button>
+                    {api.appLogs && (
+                      <DeploymentLogs
+                        key={wizardJob.id + ':' + (wizardJob.version ?? '')}
+                        fetchLogs={fetchDeploymentLogs}
+                        live={false}
+                        buildOnly={false}
+                        failed
+                        onCopy={text => void copyText('wizard-logs', text)}
+                        copied={copiedKey === 'wizard-logs'}
+                      />
                     )}
-                  </div>
-                )}
-
-                {/* Verification Check Details */}
-                {wizardJob.verification && wizardJob.verification.checks?.length > 0 && (
-                  <div className="oa-subcard">
-                    <div className="oa-subcard-head">
-                      <span>接口与业务验证结果</span>
-                      <span className={`oa-pill ${wizardJob.verification.checks.every(c => c.passed) ? 'oa-pill-ok' : 'oa-pill-warn'}`}>
-                        {wizardJob.verification.checks.filter(c => c.passed).length} / {wizardJob.verification.checks.length} 通过
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {wizardJob.verification.checks.map((chk, idx) => (
-                        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
-                          <span className={`oa-pill ${chk.passed ? 'oa-pill-ok' : 'oa-pill-danger'}`}>
-                            {chk.passed ? '通过' : '失败'}
-                          </span>
-                          <span className="oa-mono">{chk.operation}</span>
-                          {chk.status !== undefined && <span className="oa-hint">HTTP {chk.status}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Verification Credentials Form */}
-                {!wizardJob.proposal?.contract?.has_embedded_admin && credFields.length > 0 && (isFailed || wizardJob.status === 'verified') && (
-                  <div className="oa-subcard">
-                    <div className="oa-subcard-head">
-                      <span>带鉴权凭据重新验证</span>
-                      <span className="oa-hint">若应用受登录保护，可填写测试账号密码或会话 Token 进行自动验证</span>
-                    </div>
-                    <div className="oa-grid-2" style={{ marginBottom: 10 }}>
-                      {credFields.map(field => (
-                        <div key={field.key} className="oa-field">
-                          <label className="oa-label" htmlFor={`${formId}-credential-${field.key}`}>
-                            {field.key}（{field.kind === 'password' ? '密码' : field.kind === 'session' ? '会话/Token' : '账号'}）
-                          </label>
-                          <input
-                            className="oa-input"
-                            type={field.kind === 'username' ? 'text' : 'password'}
-                            id={`${formId}-credential-${field.key}`}
-                            autoComplete="off"
-                            value={verifyCredentials[field.key] ?? ''}
-                            onChange={e => setVerifyCredentials(prev => ({ ...prev, [field.key]: e.target.value }))}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-                      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#475569' }}>
-                        <input
-                          type="checkbox"
-                          checked={rememberCredentials}
-                          onChange={e => setRememberCredentials(e.target.checked)}
-                        />
-                        <span>在本机加密凭据库记住测试凭据</span>
-                      </label>
-                      <button
-                        type="button"
-                        className="oa-btn oa-btn-sm oa-btn-primary"
-                        disabled={wizardBusy}
-                        onClick={() => void handleRunVerification(false, true)}
-                      >
-                        仅重试业务验证
+                    <div>
+                      <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>
+                        让 AI 分析修复问题
                       </button>
                     </div>
-                  </div>
+                  </>
                 )}
-
-                {/* Failure Recovery Actions */}
-                {isFailed && (
-                  <div className="oa-subcard" style={{ borderColor: '#fecaca' }}>
-                    <div className="oa-subcard-head">
-                      <span style={{ color: '#b91c1c' }}>失败恢复与排查</span>
-                      <span className="oa-hint">可根据错误原因选择修复方式</span>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                      <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>
-                        <AppIcon name="sparkle" size={13} />
-                        <span>让 AI 分析修复问题</span>
-                      </button>
-                      {wizardJob.published && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleReopenDeployment()}>
-                          <AppIcon name="sliders" size={13} />
-                          <span>修改运行配置并重发</span>
-                        </button>
-                      )}
-                      {wizardJob.proposal && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleReturnToReview()}>
-                          返回方案核对
-                        </button>
-                      )}
-                      {wizardJob.published && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRunVerification(false, false, wizardJob.failureStage !== 'verification')}>
-                          <AppIcon name="refresh" size={13} />
-                          <span>{wizardJob.failureStage === 'verification' ? '重新验证业务' : '重新检查健康状态'}</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="oa-btn oa-btn-sm"
-                        disabled={wizardBusy}
-                        onClick={() => startWizardNew(apps.find(app => app.slug === wizardJob.slug && app.can_manage === true) ?? upgradeTarget ?? undefined, wizardJob)}
-                      >
-                        重新导入源码
-                      </button>
-                    </div>
-                  </div>
-                )}
-
               </div>
             )
           })()}
@@ -2631,7 +2297,7 @@ export function AppsPanel({
             </>
           )}
 
-          {wizardStep === 4 && (isDeploymentInProgress(wizardJob?.status) ? (
+          {wizardStep === 4 && (wizardJob && deploymentProgress(wizardJob).tone === 'warn' ? (
             <button type="button" className="oa-btn" disabled>部署处理中…</button>
           ) : (
             <>
