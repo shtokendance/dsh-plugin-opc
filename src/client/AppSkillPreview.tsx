@@ -43,7 +43,7 @@ export function AppSkillPreview({
   const contract = packageData?.contract || job.proposal?.contract
   const apis = contract?.apis || []
   const pages = contract?.pages || []
-  const healthPath = job.proposal?.contract?.health?.path || '/healthz'
+  const healthPath = job.proposal?.contract?.health?.path
   const purposes = [...new Set([...apis.filter(a => a.path !== healthPath), ...pages].map(c => c.purpose).filter(Boolean))]
 
   return (

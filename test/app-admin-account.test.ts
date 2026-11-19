@@ -170,9 +170,12 @@ test('the prepared SQLite can start from the application schema and cannot overw
   try {
     const source = join(home, 'source'), root = join(home, 'job')
     await mkdir(source); await mkdir(root)
-    await writeFile(join(source, 'main.py'), 'print("fixture")\n')
+    await writeFile(join(source, 'main.py'), 'DB_PATH = "data/app.db"\nSCHEMA = "' + schema + '"\n')
     await worker({ action: 'prepare', root, source, url, slug: 'test-admin-app' })
-    const plan = makeProposal(url, { mode: 'create', storage }, ['data'])
+    const plan = makeProposal(url, { mode: 'create', storage, evidence: ['main.py:1-2'] }, ['data'])
+    const fabricatedStorage = makeProposal(url, { mode: 'create', storage: { ...storage, path: 'data/fabricated.db' },
+      evidence: ['main.py:1-2'] }, ['data'])
+    await assert.rejects(worker({ action: 'bundle', root, revision: 'fabricated', proposal: fabricatedStorage, admin_reply: creds }), /数据库路径必须有原应用源码证据/)
     await worker({ action: 'bundle', root, revision: 'fresh', proposal: plan, admin_reply: creds })
     const prepared = join(root, 'fresh/approved/source/data/app.db')
     await mkdir(join(source, 'data'))

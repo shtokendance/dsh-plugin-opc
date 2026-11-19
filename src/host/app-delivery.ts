@@ -438,7 +438,7 @@ export class AppDelivery {
     const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft, confirmationToken: _token, analysisSessions: _analysisSessions, autoPrepared, ...rest } = job
     const hasOrigSet = new Set(job.hasOriginalKeys ?? [])
     const runtimeConfigs = (proposal?.contract?.configs ?? []).map((c: AppDocument) => {
-      const hasOrig = hasOrigSet.has(c.key) || Boolean(c.has_original_value)
+      const hasOrig = hasOrigSet.has(c.key) && Boolean(c.source)
       return {
         key: c.key,
         value: c.secret ? '' : (c.default ?? ''),
@@ -835,11 +835,16 @@ export class AppDelivery {
 
   async configDraft(id: string, expected: string) {
     const scope = this.scope(expected)
-    const { job } = await this.open(scope.directory, id)
-    if (job.status !== 'ready' || !job.configDraft) return null
-    const values = await this.credentials.read(`draft-${id}`)
+    const { root, job } = await this.open(scope.directory, id)
+    if (job.status !== 'ready') return null
+    const sourceConfiguration = await worker({ action: 'source_configuration', root }, scope.signal)
+    const values = job.configDraft ? await this.credentials.read(`draft-${id}`) : {}
     scope.assertCurrent()
-    return { ...job.configDraft, rows: job.configDraft.rows.map(row => ({ ...row, value: values[row.key] ?? '' })) }
+    return {
+      ...job.configDraft,
+      rows: (job.configDraft?.rows ?? []).map(row => ({ ...row, value: values[row.key] ?? '' })),
+      sourceConfiguration,
+    }
   }
 
   async saveConfigDraft(id: string, input: AppDocument, expected: string) {
@@ -1132,7 +1137,7 @@ export class AppDelivery {
     for (const c of declarations) {
       const selected = configs.find(i => i.key === c.key)
       const preservedOnlineSecret = Boolean((job.upgrade || job.published) && selected?.has_value)
-      if (c.required && !selected?.value && !selected?.resource_id && !preservedOnlineSecret) throw new Error(`请填写 ${c.key}`)
+      if (c.required && c.key !== 'PORT' && !selected?.value && !selected?.resource_id && !preservedOnlineSecret) throw new Error(`交付包要求配置 ${c.key}。请在应用源码中确认配置后重新导入，或返回上一步调整改造方案。`)
     }
     const bindings = configs.map(c => ({
       key: c.key,
@@ -1152,6 +1157,7 @@ export class AppDelivery {
     return this.exclusive(id, async () => {
       const { root, job } = await this.open(scope.directory, id)
       if (job.status !== 'ready' || !job.proposal || input.artifactHash !== fingerprint(job.hashes)) throw new Error('交付包已变化，请重新核对')
+      await worker({ action: 'validate_deployment_scope', root, proposal: job.proposal }, scope.signal)
       const { digest } = await this.deploymentConfiguration(job, input, expected)
       const prior = await this.credentials.read(`confirm-${id}`)
       scope.assertCurrent()
@@ -1171,6 +1177,7 @@ export class AppDelivery {
       if (job.status === 'unknown') throw new Error('上次发布结果仍待确认，请先检查部署状态')
       if (job.status !== 'ready' || input.artifactHash !== fingerprint(job.hashes) || !job.proposal || !job.revision) throw new Error('交付包已变化，请重新核对')
       if (job.proposal.contract.runtime?.port !== (job.port ?? 8080)) throw new Error('交付包端口与已确认端口不一致，请重新分析并打包')
+      await worker({ action: 'validate_deployment_scope', root, proposal: job.proposal }, scope.signal)
       await worker({ action: 'validate_credential_references', root, contract: job.proposal.contract }, scope.signal)
       const { bindings, configs, ids, storageMounts, versionNote, digest } = await this.deploymentConfiguration(job, input, expected)
       if (!job.confirmationToken || input.confirmationToken !== job.confirmationToken || (await this.credentials.read(`confirm-${id}`)).digest !== digest) {
@@ -1321,7 +1328,7 @@ export class AppDelivery {
       if (remote.status !== 'running') {
         if (!['failed', 'unhealthy'].includes(remote.status)) return this.public(job, root)
         if (job.version && remote.current_version !== job.version) throw new Error('线上版本发生变化，无法验证此交付任务')
-        this.recordFailureState(job, remote.error_message || '构建或健康检查未通过', remote.build_log?.slice(-8000), job.version)
+        this.recordFailureState(job, remote.error_message || '应用构建或启动失败', remote.build_log?.slice(-8000), job.version)
         await this.save(root, job)
         this.core.emit('skills-changed')
         return this.public(job, root)
@@ -1332,10 +1339,7 @@ export class AppDelivery {
       try {
         await worker({ action: 'validate_verification_contract', root, contract }, scope.signal)
         const credentials = { ...await this.readVersionCredentials(job), ...supplied }
-        const healthPath = contract.health?.path ?? '/healthz'
-        const health = { base_url: job.url, apis: [{ id: 'health', path: healthPath, method: 'GET', effect: 'read', parameters: [], auth: { type: 'none' } }] }
-        const probe = await worker({ action: 'probe', root, contract: health, operation: 'health' }, scope.signal)
-        if (!probeMatches(probe, contract.health?.status ?? 200, contract.health?.json_contains ?? { service: job.slug })) throw new Error('应用健康身份验证失败')
+        const healthPath = contract.health?.path
         const checks: AppDocument[] = []
         for (const test of contract.verification?.cases ?? []) {
           const api = contract.apis.find((a: AppDocument) => a.id === test.operation)
@@ -1376,7 +1380,7 @@ export class AppDelivery {
             job.superseded = undefined
             job.version = remote.current_version
             job.status = 'awaiting_page_verification'
-            job.events.push('容器与健康身份已就绪，请打开应用页面完成人工验收后确认启用')
+            job.events.push('应用已部署，请在应用管理中完成页面验收')
           } else {
             throw new Error('缺少只读业务验证；页面应用需要单独验收，不能自动启用')
           }
@@ -1393,7 +1397,7 @@ export class AppDelivery {
           job.checks = checks
           job.version = remote.current_version
           job.status = 'verified'
-          job.events.push('健康身份和只读业务验证通过；页面尚未验证')
+          job.events.push('只读业务验证通过；页面尚未验证')
         }
       } catch (error) {
         this.recordFailureState(job, String(error), remote.build_log?.slice(-8000), remote.current_version ?? job.version, 'verification')
@@ -1697,15 +1701,10 @@ export class AppDelivery {
             if (Object.keys(saved).length) await this.credentials.write(`version-${opened.job.id}-${targetVersion}`, saved)
           }
           const credentials = await this.readVersionCredentials(opened.job)
-          const health = { base_url: opened.job.url, apis: [{ id: 'health', path: contract.health?.path ?? '/healthz', method: 'GET', effect: 'read', parameters: [], auth: { type: 'none' } }] }
-          const probe = await worker({ action: 'probe', root: opened.root, contract: health, operation: 'health' }, scope.signal)
-          if (!probeMatches(probe, contract.health?.status ?? 200, contract.health?.json_contains ?? { service: slug })) {
-            throw new Error('回滚后健康身份验证失败')
-          }
           const checks: AppDocument[] = []
           for (const test of contract.verification?.cases ?? []) {
             const api = (contract.apis ?? []).find((a: AppDocument) => a.id === test.operation)
-            if (!api || api.path === (contract.health?.path ?? '/healthz') || api.effect !== 'read') {
+            if (!api || api.path === contract.health?.path || api.effect !== 'read') {
               throw new Error('回滚后必须使用有效的只读业务接口验证')
             }
             const res = await worker({ action: 'probe', root: opened.root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials,
@@ -1729,7 +1728,7 @@ export class AppDelivery {
             localSkillVerified = true
             verification = { status: 'verified-rolled-back' }
           } else if (Array.isArray(contract.pages) && contract.pages.length > 0 &&
-              !(contract.apis ?? []).some((a: AppDocument) => a.path !== (contract.health?.path ?? '/healthz'))) {
+              !(contract.apis ?? []).some((a: AppDocument) => a.path !== contract.health?.path)) {
             opened.job.status = 'awaiting_page_verification'
             opened.job.failureStage = undefined
             opened.job.error = undefined

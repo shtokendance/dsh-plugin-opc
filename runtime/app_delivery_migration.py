@@ -2360,7 +2360,7 @@ def enrich_contract_and_discovery_report(source: Path, data: dict, proposal: dic
         "deleted_files": [],
         "dockerfile_summary": discovery_report["foundation_and_container"]["dockerfile_action"],
         "storage_summary": discovery_report["storage_and_database"]["storage_migration_plan"],
-        "health_check": f"GET /healthz (端口 {data.get('port', 8080)}，返回 service={data.get('slug', '')})",
+        "health_check": "平台确认目标版本运行，探测应用现有入口",
         "skill_summary": {
             "skill_name": f"app-{data.get('slug', '')}",
             "page_count": len(existing_pages),

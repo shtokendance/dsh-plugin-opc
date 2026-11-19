@@ -215,7 +215,7 @@ test('worker retains nested YAML configuration references and existing executabl
     const job = join(root, 'job')
     await mkdir(source)
     await mkdir(job)
-    await writeFile(join(source, 'main.py'), 'print("fixture")\n')
+    await writeFile(join(source, 'main.py'), 'import os\nprint(os.getenv("DATABASE_DSN"), os.getenv("SERVICE_ENDPOINT"))\n')
     await writeFile(join(source, 'start.sh'), '#!/bin/sh\nexec python main.py\n')
     await chmod(join(source, 'start.sh'), 0o755)
     await writeFile(join(source, 'config.yaml'), 'databases:\n  app:\n    dsn: postgres://db.example.invalid/app\n')
@@ -665,11 +665,14 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
 test('work-opc full parity: original secret preservation, loopback guard, unconditional storage mounts, single active skill with SKILL.md, local version archive fallback, build failure context, and transient 502 probe retry', async () => {
   const home = await mkdtemp(join(tmpdir(), 'opc-app-parity-'))
   let lookupAttempts = 0
+  let healthRequests = 0
   let expectedCredential = 'orig-secret-123'
   const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json')
     if (req.url === '/healthz') {
-      res.end(JSON.stringify({ service: 'parity-app' }))
+      healthRequests++
+      res.statusCode = 404
+      res.end('{}')
       return
     }
     if (req.headers.authorization !== `Bearer ${expectedCredential}`) {
@@ -691,7 +694,7 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     const source = join(home, 'source')
     await mkdir(join(source, 'data'), { recursive: true })
     await writeFile(join(source, 'data', 'seed.db'), 'sqlite-seed')
-    await writeFile(join(source, 'config.json'), JSON.stringify({ API_SECRET: 'orig-secret-123' }))
+    await writeFile(join(source, 'config.json'), JSON.stringify({ API_SECRET: 'orig-secret-123', DATABASE_URL: 'postgres://localhost:5432/app' }))
     await writeFile(
       join(source, 'main.py'),
       'import os, sqlite3\nDB_PATH = "data/seed.db"\n'
@@ -740,23 +743,20 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
       const p = proposal(url)
       p.contract.slug = 'parity-app'
       p.contract.build_context = ['Dockerfile', 'main.py', 'config.json', 'data/seed.db']
-      p.contract.health.json_contains = { service: 'parity-app' }
       Object.assign(p.contract.apis[0], { auth: { type: 'bearer', env: 'API_SECRET' } })
       p.changes = [
         { path: 'Dockerfile', reason: '容器化', content: 'FROM python:3.11-alpine\nCOPY main.py /app.py\nCMD ["python", "/app.py"]\n' },
-        { path: 'config.json', reason: '移除硬编码密钥并改由环境变量注入', content: JSON.stringify({ API_SECRET: '' }) },
-        { path: 'main.py', reason: '环境变量读取配置', content: 'import os, sqlite3\nAPI_SECRET = os.getenv("API_SECRET", "")\nDB_PATH = os.getenv("APP_DATA_DIR", "data") + "/seed.db"\n' },
+        { path: 'config.json', reason: '测试模型试图改写原配置的拦截', content: JSON.stringify({ API_SECRET: '' }) },
+        { path: 'main.py', reason: '保留原配置与持久化目录', content: 'import os, sqlite3\nDB_PATH = "data/seed.db"\n# Container entry reads the original application files.\n' },
       ]
-      // First attempt without configs[].source for modified secret file must be rejected by secret preservation gate
       p.contract.configs = [
-        { key: 'API_SECRET', default: '', secret: true, required: true, description: '密钥' } as any,
-        { key: 'DATABASE_URL', default: 'postgres://localhost:5432/app', secret: false, required: false, description: '数据库连接' } as any,
+        { key: 'API_SECRET', source: { path: 'config.json', keys: ['API_SECRET'] }, default: '', secret: true, required: true, description: '密钥' },
+        { key: 'DATABASE_URL', source: { path: 'config.json', keys: ['DATABASE_URL'] }, default: '', secret: false, required: false, description: '数据库连接' },
       ]
-      await assert.rejects(delivery.submit(job, directory, p, signal), /原有敏感配置必须保留并通过 source 引用注入/)
-
-      // Now include source locator for API_SECRET
-      p.contract.configs[0] = { key: 'API_SECRET', source: { path: 'config.json', keys: ['API_SECRET'] }, default: '', secret: true, required: true, description: '密钥' } as any
-      await delivery.submit(job, directory, p, signal)
+      const { health: _health, ...contract } = p.contract
+      await assert.rejects(delivery.submit(job, directory, { ...p, contract }, signal), /原应用配置/)
+      p.changes = p.changes.filter(change => change.path !== 'config.json')
+      await delivery.submit(job, directory, { ...p, contract }, signal)
     }
 
     await delivery.startAnalysis(created.id, '', expected)
@@ -839,6 +839,7 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     }
     const verifiedV1 = await delivery.verify(created.id, expected)
     assert.equal(verifiedV1.status, 'verified')
+    assert.equal(healthRequests, 0)
     assert.ok(lookupAttempts >= 2, 'probe should have retried after first 502 response')
     await delivery.setSkillEnabled(created.id, false, expected)
     await assert.rejects(delivery.invoke(created.id, 'lookup', {}, undefined, expected, async () => true), /已停用/)
@@ -972,19 +973,19 @@ test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha2
         action: 'propose_file',
         root: jobRoot,
         id: 'staged-1',
-        path: 'staged.txt',
+        path: 'Dockerfile',
         reason: '测试暂存修改',
-        content: 'draft-content-from-previous-turn',
+        content: 'FROM python:3.11-alpine\n# draft-content-from-previous-turn\n',
       },
       new AbortController().signal,
     )
 
     // Worker read with proposed=true returns staged draft content
     const proposedRead = await worker(
-      { action: 'read', root: jobRoot, path: 'staged.txt', proposed: true },
+      { action: 'read', root: jobRoot, path: 'Dockerfile', proposed: true },
       new AbortController().signal,
     )
-    assert.match(String(proposedRead.text), /拟交付文件 staged\.txt/)
+    assert.match(String(proposedRead.text), /拟交付文件 Dockerfile/)
     assert.match(String(proposedRead.text), /draft-content-from-previous-turn/)
 
     // Simulate an interrupted analysis run -> status=failed -> resume mode preserves draft_files.json
@@ -1007,7 +1008,7 @@ test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha2
         action: 'propose_file',
         root: jobRoot,
         id: 'staged-2',
-        path: 'staged-resume.txt',
+        path: 'main.py',
         reason: '断点恢复暂存',
         content: 'resumed-draft-content',
       },
@@ -1569,5 +1570,120 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
     }])
   } finally {
     await rm(workDir, { recursive: true, force: true })
+  }
+})
+
+test('source configuration inventory reads imported files and masks credentials', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-source-config-'))
+  try {
+    const source = join(root, 'review', 'source')
+    await mkdir(source, { recursive: true })
+    await writeFile(join(source, '.env'), 'APP_MODE=demo\nAPP_PASSWORD=private-value\n')
+    await writeFile(join(source, 'settings.json'), '{"ui":{"title":"Demo"}}')
+    await writeFile(join(source, 'main.js'), 'console.log(process.env.APP_MODE, process.env.APP_REGION)')
+    const result = await worker({ action: 'source_configuration', root })
+    assert.deepEqual(result.files.map((file: AppDocument) => file.path), ['.env', 'settings.json'])
+    assert.deepEqual(result.files[0].fields, [
+      { key: 'APP_MODE', value: 'demo' },
+      { key: 'APP_PASSWORD', value: '[REDACTED]' },
+    ])
+    assert.deepEqual(result.files[1].fields, [{ key: 'ui.title', value: 'Demo' }])
+    assert.deepEqual(result.references, ['APP_MODE', 'APP_REGION'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('source configuration excludes verified historical AI additions in an uploaded upgrade', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'opc-source-history-'))
+  try {
+    const previous = join(workspace, '11111111-1111-4111-8111-111111111111')
+    const current = join(workspace, '22222222-2222-4222-8222-222222222222')
+    const original = join(previous, 'review', 'source')
+    const imported = join(current, 'review', 'source')
+    await mkdir(original, { recursive: true })
+    await mkdir(imported, { recursive: true })
+    const originalApp = 'console.log(process.env.OPC_REGION)\n'
+    const generatedEntrypoint = 'console.log(process.env.OPC_SERVICE_SLUG, process.env.OPC_ADMIN_PASSWORD)\n'
+    const generatedConfig = 'APP_MODE=demo\nOPC_ADMIN_PASSWORD=generated\n'
+    await writeFile(join(original, 'main.js'), originalApp)
+    await writeFile(join(original, '.env'), 'APP_MODE=demo\n')
+    await writeFile(join(imported, 'main.js'), originalApp)
+    await writeFile(join(imported, '.env'), generatedConfig)
+    await writeFile(join(imported, 'health.mjs'), generatedEntrypoint)
+    await writeFile(join(imported, 'settings.json'), '{"local":true}')
+    const changes = [
+      { path: 'health.mjs', content: generatedEntrypoint },
+      { path: '.env', content: generatedConfig },
+    ]
+    await writeFile(join(previous, 'job.json'), JSON.stringify({
+      slug: 'test-app', createdAt: 1, revision: 'prepared',
+      proposal: { changes, contract: { configs: [{ key: 'OPC_ADMIN_PASSWORD' }] } },
+    }))
+    await writeFile(join(current, 'job.json'), JSON.stringify({
+      slug: 'test-app', createdAt: 2,
+      proposal: { contract: { configs: [{ key: 'AI_ONLY', default: 'invented' }] } },
+    }))
+
+    const result = await worker({ action: 'source_configuration', root: current })
+    assert.deepEqual(result, {
+      files: [
+        { path: '.env', fields: [{ key: 'APP_MODE', value: 'demo' }] },
+        { path: 'settings.json', fields: [{ key: 'local', value: 'true' }] },
+      ],
+      references: ['OPC_REGION'],
+    })
+
+    // A matching filename with user-edited content is not sufficient evidence of AI provenance.
+    await writeFile(join(imported, 'health.mjs'), 'console.log(process.env.OPC_SERVICE_SLUG)\n')
+    const edited = await worker({ action: 'source_configuration', root: current })
+    assert.deepEqual(edited.references, ['OPC_REGION', 'OPC_SERVICE_SLUG'])
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('delivery rejects invented files, environment settings and config defaults before packaging', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-delivery-scope-'))
+  try {
+    const source = join(root, 'review/source')
+    await mkdir(source, { recursive: true })
+    await writeFile(join(source, '.env'), 'OPC_REGION=source\n')
+    await writeFile(join(source, 'main.py'), 'import os\nregion = os.getenv("OPC_REGION")\n')
+    const validate = (plan: AppDocument) => worker({ action: 'validate', root, allow_unresolved: true, proposal: plan })
+    const makePlan = () => proposal('http://127.0.0.1:8080') as AppDocument
+    const wrapper = { path: 'scripts/bootstrap-admin.mjs', content: 'console.log("extra")\n', reason: '初始化' }
+    await assert.rejects(worker({ action: 'propose_file', root, ...wrapper }), /新增文件/)
+    const withWrapper = makePlan()
+    withWrapper.changes.push(wrapper)
+    await assert.rejects(validate(withWrapper), /新增文件/)
+    const withEnv = makePlan()
+    withEnv.changes[0].content += 'ENV OPC_SERVICE_SLUG=test-app\n'
+    await assert.rejects(validate(withEnv), /环境变量/)
+    const withHealth = makePlan()
+    withHealth.changes.push({
+      path: 'main.py', reason: '额外部署探针',
+      content: 'import os\nregion = os.getenv("OPC_REGION")\n@app.get("/healthz")\ndef health(): return "ready"\n',
+    })
+    await assert.rejects(validate(withHealth), /不能新增健康检查接口/)
+    const withSourceEnv = makePlan()
+    withSourceEnv.changes.push({
+      path: 'main.py', reason: '增加健康探针',
+      content: 'import os\nregion = os.getenv("OPC_REGION")\nslug = os.getenv("OPC_SERVICE_SLUG", "test-app")\n',
+    })
+    await assert.rejects(validate(withSourceEnv), /环境变量/)
+    const withConfigFile = makePlan()
+    withConfigFile.changes.push({ path: '.env', content: 'OPC_REGION=changed\n', reason: '绑定资源' })
+    await assert.rejects(validate(withConfigFile), /原应用配置/)
+    const withConfig = makePlan()
+    withConfig.contract.configs = [{ key: 'OPC_SERVICE_SLUG', default: '', required: false, secret: false }]
+    await assert.rejects(validate(withConfig), /原应用.*OPC_SERVICE_SLUG/)
+    withConfig.contract.configs = [{ key: 'OPC_REGION', default: 'invented', required: true, secret: false,
+      source: { path: '.env', keys: ['OPC_REGION'] } }]
+    await assert.rejects(validate(withConfig), /默认值/)
+    withConfig.contract.configs[0].default = ''
+    assert.equal((await validate(withConfig)).valid, true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })

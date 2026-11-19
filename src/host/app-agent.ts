@@ -7,7 +7,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
-import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, verificationCredentialFields, worker } from './app-delivery.ts'
+import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, worker } from './app-delivery.ts'
 import { proposalParameters } from './app-proposal-schema.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -61,7 +61,7 @@ function compactPreviousPlan(proposal?: AppDocument): AppDocument | undefined {
   const compactContract: AppDocument = {}
   for (const key of [
     'schema_version', 'slug', 'name', 'description', 'base_url', 'runtime', 'build_context',
-    'health', 'auth_profile', 'auth_profiles', 'auth_rules', 'auth_blockers', 'admin_account', 'configs',
+    'auth_profile', 'auth_profiles', 'auth_rules', 'auth_blockers', 'admin_account',
     'resources', 'storage_mounts', 'verification',
   ]) {
     if (key in prevContract) compactContract[key] = prevContract[key]
@@ -74,9 +74,6 @@ function compactPreviousPlan(proposal?: AppDocument): AppDocument | undefined {
   if (compactContract.auth_profiles) compactContract.auth_profiles = Object.fromEntries(
     Object.entries(compactContract.auth_profiles).map(([id, profile]) => [id, references(profile as AppDocument)]),
   )
-  const authKeys = new Set(verificationCredentialFields(prevContract).map(field => field.key))
-  if (compactContract.configs) compactContract.configs = compactContract.configs.map((config: AppDocument) =>
-    config.secret || authKeys.has(config.key) ? { ...config, default: '' } : config)
   return {
     summary: proposal.summary,
     issues: proposal.issues ?? [],
@@ -103,9 +100,9 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       : ''
     const instructions = `${skill}\n本任务锁定的容器端口为 ${port}。${repairInstructions}`
     const prevPlan = compactPreviousPlan(job.proposal)
-    const taskInstruction = isRepair
-      ? '按失败信息修复本次部署。'
-      : (prevPlan && feedback.trim()) ? '按用户补充修订上一版方案。' : '按三步流程准备应用。'
+    const taskInstruction = '按四步完成本次应用改造。' + (isRepair
+      ? '先用失败制品核实根因。'
+      : (prevPlan && feedback.trim()) ? '结合用户补充复核上一版方案。' : '')
 
     const timeout = new AbortController()
     const abort = AbortSignal.any([signal, timeout.signal])
@@ -192,7 +189,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             }
             return JSON.stringify(await worker({ ...args, root, revision: job.failedRevision || job.revision }, abort))
           } }))
-        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '分项暂存单个新增或修改文件的完整内容（不修改原源码）。提交大文件或多文件时优先逐个调用本工具，再在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
+        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存根目录 Dockerfile 或现有应用代码的必要改动。原配置由用户维护。暂存文件在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
           parameters: {
             id: { type: 'string', required: true },
             path: { type: 'string', required: true },
