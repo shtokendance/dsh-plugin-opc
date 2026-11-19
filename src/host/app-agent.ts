@@ -61,7 +61,7 @@ function compactPreviousPlan(proposal?: AppDocument): AppDocument | undefined {
   const compactContract: AppDocument = {}
   for (const key of [
     'schema_version', 'slug', 'name', 'description', 'base_url', 'runtime', 'build_context',
-    'health', 'auth_profile', 'auth_profiles', 'auth_rules', 'auth_blockers', 'configs',
+    'health', 'auth_profile', 'auth_profiles', 'auth_rules', 'auth_blockers', 'admin_account', 'configs',
     'resources', 'storage_mounts', 'verification',
   ]) {
     if (key in prevContract) compactContract[key] = prevContract[key]
@@ -98,12 +98,12 @@ function buildInstructions(isRepair: boolean): string {
 4. 升级已有应用（taskContext.upgrade=true 或存在 deployed_baseline）时，保留已有 storage_mounts 路径以免生产数据孤立；涉及数据库表结构变更时优先采用仅增量扩展（Expand-Only：CREATE TABLE IF NOT EXISTS / ALTER TABLE ... ADD COLUMN）。若新版本包含 DROP TABLE、DROP COLUMN、RENAME 等破坏性 DDL 或可能影响回滚兼容的变更，必须在 unresolved 中明确提醒用户确认风险与影响，不得静默改库。
 5. 提供完整 Dockerfile、0.0.0.0 监听和同一服务的 /healthz 返回 {service:slug}，并确认拟提交的运行源码里确实包含 /healthz 路由处理（即使原应用已有其他健康端点；仅修改 contract.health 不会生成路由）。沿用已确认的 container_port，保留原启动脚本的执行权限。build_context 包含必要源码，排除构建缓存。
 6. 所有已映射为运行时环境变量的原配置项，请将 configs[].source 设为 read 返回的 Original configuration references 元数据中的精确 {"path":..., "keys":[...]} 引用（系统会在本地安全保留原值并在部署时注入，修改配置文件时严禁丢失原有敏感字段）。
-7. 认证只使用运行配置的环境变量引用（auth_profile / auth_profiles 的 username_env/password_env/token_env，以及 auth_rules 有证据的继承规则），绝不把明文密码、令牌放进报告、契约或技能。scanner 的 auth=unknown 代表尚未分析，绝不能当成公开接口；读取实际登录、会话与角色代码，逐字采用 read 返回的 path 和真实行号。路径不存在时先用 inventory 或工具给出的同名候选重读相关文件。如果某文件已通过 opc_delivery_propose_file 暂存修改，请用 action=read 且 proposed=true 读取拟交付版本并引用其中的真实行号；若拟交付文件遗漏了原认证或业务处理函数，先补全再修正引用。若证据无效，针对相关文件重新读取并修正。常规业务验证所需账号、密码或会话在部署后填写，只有真实阻塞改造的外部授权或角色决定才带 auth_blockers 提问。
+7. 管理员账密登录按契约的 admin_account 提交。已有明文提供真实来源；只有哈希或没有可用明文时让插件在当前对话询问。确认新部署没有管理员才声明 create 和实际存储位置；existing_deployment 为 true 时只能使用已有账号。收到「用户已经提供管理员账号和密码」的状态后，保留该方案并再次提交，OPC 将在打包前写入应用，并把同一套账密直接写进生成的应用技能 SKILL.md。不要自行编造、回显账密或把账密放进摘要、Dockerfile、契约。其他密钥继续使用原有配置引用。认证证据使用实际运行文件与读取工具给出的行号。
 8. 对于要新增或修改的文件，优先使用 opc_delivery_propose_file 逐个暂存完整文件内容，然后在 opc_delivery_submit 的结构化 changes 中按 {id, path, reason, group} 引用。小改动可直接在 changes 中提供完整 content。
 9. 提交时会复核 build_context 内的接口与页面并合并进契约。只纳入实际部署应用的路由，不要补入测试、样例或演示服务的路径。严禁把“接口数量多/扫描截断/添加 healthz/创建 Dockerfile”等内部技术动作放进 unresolved。
 10. verification.cases 为真实只读业务探针（每种受保护认证身份均需覆盖），不能编造业务记录或以健康探针代替。
 11. 有需要用户决定的真实阻塞（如本机 PostgreSQL 连接替换、破坏性库表变更、缺失外部授权）时提交 unresolved，并可在 decisions 中提供 [{id, question, impact, options}]（最多 4 个简短选项）；没有阻塞时 unresolved 设为空数组 [] 并提交完整可校验提案。summary 请按多段【应用定位】、【运行环境】、【接口与页面】、【登录与鉴权】、【数据与存储】、【改造与技能】清晰换行排版。工具校验失败应修正后重提，提交成功后结束本轮。
-12. 工具确认有待答问题时，用普通对话逐项向用户提问，写清楚选项和后果，再结束本轮等待用户从当前会话回复。请勿索要密码、密钥或令牌。收到补充或答案后，沿用当前任务、已有暂存文件与已扫描接口，只修订有影响的部分并重新提交完整方案。用户只询问说明时，提交时保留未解决的问题，并用普通对话回答说明。`
+12. 工具确认有待答问题时，用普通对话逐项向用户提问，写清楚选项和后果，再结束本轮等待用户从当前会话回复。仅在工具列出管理员账密待答事项时，使用聊天框提示用户按两行填写账号和密码。其他密钥或令牌走原配置流程。收到补充或答案后，沿用当前任务、已有暂存文件与已扫描接口，只修订有影响的部分并重新提交完整方案。用户只询问说明时，提交时保留未解决的问题，并用普通对话回答说明。`
 
   if (isRepair) {
     text += `\nDEPLOYMENT REPAIR（部署/验证失败专项修复）：必须先调用 opc_delivery_inspect 的 read_failed 读取上次实际部署包中的出错文件，并与 read 原源码对比。旧修改可能是错误的，不能无依据复用旧提案；针对语法错误、缺模块或启动失败必须修改对应文件并提交完整替换内容。`
@@ -382,6 +382,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         previous_validation_failure: job.analysisFailure ?? '',
         draft_file_changes: draftFileChanges,
         analysis_mode: isRepair ? 'repair' : 'analysis',
+        existing_deployment: Boolean(job.upgrade || job.published),
         previous_plan: prevPlan,
         failed_snapshot: job.failedSnapshot,
         failure_log: job.failureContext ?? '',

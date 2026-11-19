@@ -43,12 +43,17 @@ export function proposalParameters(port: number) {
         token_env: str, login_url: str, login_method: str, token_json_path: str,
       } },
       auth_profiles: { ...object, description: '按 ID 保存登录方式，接口通过 auth.profile 引用' },
+      admin_account: { ...object, description: '按应用源码证据选择 existing 或 create。仅描述账号来源或写入位置，不提交实际账密。', properties: {
+        mode: { ...text, enum: ['existing', 'create'] }, profile: text, evidence: strings,
+        source: { ...object, description: '已有可复用明文的 {username,password} 引用：结构化配置 {path,keys}、源码常量 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。缺任何一项则省略 source。' },
+        storage: { ...object, description: '首次建号仅在交付副本中写入应用真正读取的 SQLite 或 JSON/YAML 文件，具体结构见 references/contract.md。' },
+      } },
       auth_rules: { ...objects, description: '每条规则须二选一填写 path 或 prefix；精确规则优先', items: { ...object, properties: {
         target: { ...text, enum: ['api', 'page'] }, path: str, prefix: str, method: str,
         auth: { ...object, required: true, properties: { type: { ...text, enum: ['none', 'header', 'bearer'] } } },
         evidence: { ...strings, required: true, description: '读取工具返回的源码位置数组，例如 ["server.mjs:42"]' },
       } } },
-      auth_blockers: { ...objects, description: '只填确实阻塞改造的外部授权或角色决定；普通验证凭据在部署后填写', items: { ...object, properties: {
+      auth_blockers: { ...objects, description: '只填确实阻塞改造的外部授权或角色决定；管理员登录通过 admin_account 处理', items: { ...object, properties: {
         question: text, evidence: { ...strings, required: true }, affected: { ...strings, required: true }, action: text,
         reason: { ...text, enum: ['external_authorization', 'missing_credential', 'role_change'] },
       } } },

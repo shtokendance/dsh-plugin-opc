@@ -51,9 +51,12 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
 - secret/required 必须是明确的布尔值，default 是字符串，key 唯一。常见凭据字段（如 API_KEY、PASSWORD、TOKEN、DSN）不能标为非秘密；任何默认值都不能夹带带凭据 URL 或 Password=... 连接串。不要把秘密改个名字或将 secret 改为 false 来绕过。
 - apis/pages 均显式填写数组并完整收录应用内全部后端接口与全部前端页面/业务视图（不得遗漏任何路由或子面板）；至少一个非空。纯页面应用无需伪造 API，但必须提供浏览器验证计划。
 - 每个 API 必须含 purpose、源码 evidence、实际 parameters/request_body/responses、auth、effect。request_body 为 null 或包含 required、description、schema 的对象；完整 schema 与错误说明应保留，工具不声称完整实现 JSON Schema 验证。API 错误可能包含 HTTP 200 下的业务错误码，业务流程必须明确成功判断，不把 HTTP 成功等同业务成功。
-- auth.type 为 none、bearer 或 header；非 none 必须声明 env 环境变量名或引用 auth_profiles 中的 profile，header 还要提供 header。只允许运行时凭据环境变量引用；禁止将明文密码或固定令牌放进契约、技能或模型输出。
+- auth.type 为 none、bearer 或 header；非 none 必须声明 env 环境变量名或引用 auth_profiles 中的 profile，header 还要提供 header。原始账号密码不要填入契约，由打包器写进生成应用技能的 `SKILL.md`。其他密钥和令牌沿用运行时引用。
 - 直接在 API 或页面上声明认证时，用 `auth.evidence` 引用登录、会话或权限代码。共用中间件的证据写在 `auth_rules[].evidence`。每条证据使用读取工具返回的相对路径与实际行号，修改过的文件以拟交付版本为准。
 - 账号密码换会话可用 `auth_profiles.account = {"login_url":"/api/session","username_env":"APP_USER","password_env":"APP_PASSWORD"}`，受保护 API 使用 `{"type":"header","header":"Cookie","profile":"account"}`。这两个环境变量是业务验证输入，无需加入容器配置。读取真实会话与权限检查后引用 `文件:行号`，不能沿用其他源码版本的行号。
+- `admin_account` 声明 `profile`、`mode` 和 `evidence`。`profile` 对应原应用的登录接口，`login_method` 填 `POST` 等 HTTP 动词。管理员接口及验证用例要使用这一个 profile。
+- `mode: existing` 复用已有管理员。确认有可用明文时，填写 `source: {"username":{"path":"admin.json","keys":["username"]},"password":{"path":"admin.json","keys":["password"]}}`。明确的源码字符串常量可用 `{path,line,name}`，SQLite 明文字段可用 `{path,table,column,where}` 引用。`where` 是用于唯一标识记录的字段与值。只有哈希时省略 `source`，OPC 会在 AI 改造会话提示按 `账号：…` 和 `密码：…` 两行回复。
+- `mode: create` 仅用于确认首次安装且管理员存储为空的应用。JSON/YAML 用 `storage: {"kind":"file","path":"data/admin.json","username_keys":["admin","username"],"password_keys":["admin","password"]}`，仅适用于原应用从对应位置读取账密的情况。SQLite 示例为 `storage: {"kind":"sqlite","path":"data/app.db","table":"admin_user","row":{"username":"$username","pw_salt":"$salt","pw_hash":"$hash","created_at":"$now"},"password":{"kind":"scrypt","n":16384,"r":8,"p":1,"dklen":32,"salt_bytes":16}}`。参数、字段和附加值必须匹配应用实际实现。新库缺表时，`create_table` 填实际的单条建表定义。支持应用原有的明文存储时用 `$password`，有摘要时按实际算法填写。把目标文件或目录列入 `build_context`，有持久化卷时核对实际挂载和种子文件。账号在打包前写入隔离副本。
 - 非只读 effect 必须 confirmation_required:true。不能仅按 HTTP 方法判断，POST 搜索也可以明确标为 read；GET 也可能需要确认。
 - pages 每项含 path、purpose、evidence、actions；无页面就填空数组，浏览器操作需要调用方提供浏览器工具。
 - 0.2.0 内置调用器只处理普通 HTTP/JSON 与标量 path/query/header 参数；参数名必须唯一。multipart 上传、二进制下载、流式/WebSocket、同名不同位置的参数及复杂数组参数编码需单独脚本并验证；先报告限制，请用户决定是否扩展，不能默默丢弃 API 或宣称已可调用。

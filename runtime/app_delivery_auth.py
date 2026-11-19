@@ -63,6 +63,9 @@ def validate_auth_evidence(source, proposal):
     }
     entries = [entry.get("evidence") if isinstance(entry, dict) else None
                for entry in [*contract.get("auth_rules", []), *contract.get("auth_blockers", [])]]
+    account = contract.get("admin_account")
+    if account is not None:
+        entries.append(account.get("evidence") if isinstance(account, dict) else None)
     # Older contracts put source citations on the route itself. When an
     # explicit authentication citation is supplied, check that citation.
     for collection in ("apis", "pages"):
