@@ -18,7 +18,7 @@ await page.getByRole('button', { name: '企业微信 / SSO 登录', exact: true 
 const link = page.getByRole('link', { name: '重新打开授权页' })
 await link.waitFor()
 const authorizeUrl = await link.getAttribute('href')
-if (!authorizeUrl || new URL(authorizeUrl).origin !== 'https://shtokendance.benlai.com') throw new Error('Unexpected authorization origin')
+if (!authorizeUrl || new URL(authorizeUrl).origin !== 'https://aiwork.benlai.com') throw new Error('Unexpected authorization origin')
 const authorization = await context.newPage()
 await authorization.goto(authorizeUrl)
 console.log('Authorization page opened:', await authorization.title())

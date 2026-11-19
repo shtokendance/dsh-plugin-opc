@@ -49,7 +49,7 @@ const SLUG_RE = /^[a-z][a-z0-9-]{2,39}$/
 const MAX_ZIP_BYTES = 64 * 1024 * 1024
 const DRAFT_DISMISS_STORAGE_PREFIX = 'opc-apps-dismissed-draft:'
 const DEFAULT_OPC_CONFIG: OpcRuntimeConfig = {
-  appDomainRoot: '10.101.102.116.nip.io:8080',
+  appDomainRoot: 'ai.benlai.com',
   defaultPort: 8080,
   platformBaseUrl: '',
 }

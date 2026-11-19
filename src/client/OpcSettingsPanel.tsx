@@ -209,11 +209,11 @@ export function OpcSettingsPanel({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
-  const [platformBase, setPlatformBase] = useState('https://shtokendance.benlai.com')
+  const [platformBase, setPlatformBase] = useState('https://aiwork.benlai.com')
   const [appDomainRoot, setAppDomainRoot] = useState('')
   const [appDefaultPort, setAppDefaultPort] = useState('8080')
-  const [defaultPlatformBase, setDefaultPlatformBase] = useState('https://shtokendance.benlai.com')
-  const [defaultAppDomainRoot, setDefaultAppDomainRoot] = useState('10.101.102.116.nip.io:8080')
+  const [defaultPlatformBase, setDefaultPlatformBase] = useState('https://aiwork.benlai.com')
+  const [defaultAppDomainRoot, setDefaultAppDomainRoot] = useState('ai.benlai.com')
   const [testResult, setTestResult] = useState<OpcConnectionTestResult | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState<{ kind: 'ok' | 'info'; text: string } | null>(null)
@@ -227,9 +227,9 @@ export function OpcSettingsPanel({
     setError('')
     try {
       const cfg = JSON.parse(await api.opcConfigGet()) as OpcPlatformConfig
-      setDefaultPlatformBase(cfg.default_platform_base || 'https://shtokendance.benlai.com')
-      setDefaultAppDomainRoot(cfg.default_app_domain_root || '10.101.102.116.nip.io:8080')
-      setPlatformBase(cfg.platform_base || cfg.default_platform_base || 'https://shtokendance.benlai.com')
+      setDefaultPlatformBase(cfg.default_platform_base || 'https://aiwork.benlai.com')
+      setDefaultAppDomainRoot(cfg.default_app_domain_root || 'ai.benlai.com')
+      setPlatformBase(cfg.platform_base || cfg.default_platform_base || 'https://aiwork.benlai.com')
       setAppDomainRoot(cfg.app_domain_root ?? '')
       setAppDefaultPort(String(cfg.app_default_port ?? 8080))
     } catch (e) {
