@@ -52,6 +52,7 @@
     "LICENSE-Inter.txt",
     "runtime",
     "README.md",
+    "docs/images/workbench/*.jpg",
     "config/overlay.example.yml"
   ],
   "dsh": {
