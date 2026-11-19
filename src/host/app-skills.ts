@@ -37,7 +37,7 @@ export class AppSkillProvider implements SkillProvider {
     if (job.version !== locator.version) return undefined
     options.signal?.throwIfAborted()
     const contract = job.proposal!.contract
-    const invokeGuide = `使用 opc_app_invoke，job_id=${job.id}。参数 JSON 传 params，正文 JSON 传 body；不要直接读取凭据或使用 shell 调用。非只读操作会请求用户批准，失败时不得重复执行结果未知的写操作。`
+    const invokeGuide = `API 使用 opc_app_invoke，job_id=${job.id}。参数 JSON 传 params，正文 JSON 传 body，工具会按技能中声明的方式登录。页面操作使用浏览器和本技能的应用账号，避免在回复中回显账密。非只读操作需用户批准，失败时不得重复执行结果未知的写操作。`
     const body = job.skillMarkdown?.trim()
       ? `${job.skillMarkdown.trim()}\n\n## DSH 调用方式\n- ${invokeGuide}\n- 应用地址：${job.url}\n`
       : `# ${job.name}\n${contract.description}\n应用地址：${job.url}\n只读业务 API 已验证；页面未验证。\n${invokeGuide}\n接口与页面：\n${JSON.stringify({ apis: contract.apis, pages: contract.pages, workflows: contract.workflows }, null, 2)}`

@@ -23,7 +23,7 @@ import urllib.request
 import uuid
 import zipfile
 
-from .invoke_api import execute, valid_origin
+from .invoke_api import execute, login_method, valid_origin
 from .sqlite_snapshot import is_sqlite, snapshot_database, validate_sidecars, normalize_extracted_databases
 
 VERSION = "0.2.9"
@@ -311,6 +311,8 @@ def validate_credential_references(contract):
         for key in ("username_env", "password_env", "token_env"):
             if key in profile:
                 require(isinstance(profile[key], str) and ENV_NAME.fullmatch(profile[key]), "Credential reference must be an environment variable name")
+        if profile.get("login_url"):
+            login_method(profile)
 
 
 def check_work(work):
@@ -428,9 +430,14 @@ def runtime_environment(contract, env_file=None):
     return {key: value for key, value in values.items() if key not in provided}
 
 
-def render_skill_markdown(contract):
+def render_skill_markdown(contract, admin_login=None):
     md = f"---\nname: app-{contract['slug']}\ndescription: {json.dumps(contract['description'], ensure_ascii=False)}\n---\n\n# {contract['name']}\n\n应用 URL：`{contract['base_url']}`。仅在实际部署验证成功后使用。\n\n"
-    md += "认证凭据通过受保护的运行时环境引用提供，不写入技能。缺少凭据时先连接应用账号；配置不代表业务验证通过。页面操作需要浏览器验证，不能把描述当作已执行结果。\n\n"
+    if admin_login:
+        md += "## 应用管理员登录\n\n用下方账号通过应用自身的登录流程操作。API 调用脚本会直接读取本节。需要使用网页时，用浏览器在本技能声明的应用地址登录，按页面业务流程操作。不要在回复中回显账密。\n\n"
+        md += "<!-- opc-admin-login -->\n```json\n" + json.dumps(admin_login, ensure_ascii=False) + "\n```\n\n"
+    else:
+        md += "其他认证凭据通过运行时环境引用提供。缺少凭据时先连接应用账号。\n\n"
+    md += "配置不代表业务验证通过。页面操作需要浏览器验证，不能把描述当作已执行结果。\n\n"
     apis = contract.get("apis", [])
     pages = contract.get("pages", [])
     md += f"## 应用能力概览\n\n- **收录页面/业务视图总数**：{len(pages)} 个\n- **收录 API 接口总数**：{len(apis)} 个\n\n"
@@ -457,7 +464,7 @@ def render_skill_markdown(contract):
     return md
 
 
-def bundle_work(work, out):
+def bundle_work(work, out, admin_login=None):
     contract, files = check_work(work)
     require(not out.exists(), "output directory already exists")
     out.mkdir(parents=True, mode=0o700)
@@ -478,7 +485,7 @@ def bundle_work(work, out):
             tar.addfile(info, io.BytesIO(data))
     manifest = {"slug": contract["slug"], "app_url": contract["base_url"], "container_port": contract["runtime"]["port"], "configs": [{"key": c["key"], "value": "" if c.get("secret") else c.get("default", ""), "required": bool(c.get("required")), "description": c.get("description", "")} for c in contract.get("configs", [])], "detected_resource_types": [r["type"] for r in contract.get("resources", [])], "storage_mounts": contract.get("storage_mounts", []), "apis": contract["apis"], "pages": contract.get("pages", []), "skill_version": VERSION, "verification_status": "not-verified"}
     save(out / "app-manifest.json", manifest)
-    md = render_skill_markdown(contract)
+    md = render_skill_markdown(contract, admin_login)
     with zipfile.ZipFile(out / "skill.zip", "w", zipfile.ZIP_DEFLATED) as z:
         def member(name, data):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))

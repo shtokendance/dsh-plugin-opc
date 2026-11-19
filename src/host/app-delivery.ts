@@ -36,7 +36,19 @@ export interface DeliveryJob {
 }
 
 export function analysisQuestions(proposal?: AppDocument): string[] {
-  return [...new Set<string>([...(proposal?.unresolved ?? []), ...(proposal?.contract?.unresolved ?? [])])]
+  const pendingAccount = proposal?.adminAccountPending
+    ? [`请${proposal?.contract?.admin_account?.mode === 'create' ? '设置' : '填写已有的'}管理员账号和密码，直接在当前对话按两行回复「账号：…」和「密码：…」。`]
+    : []
+  return [...new Set<string>([...pendingAccount, ...(proposal?.unresolved ?? []), ...(proposal?.contract?.unresolved ?? [])])]
+}
+
+type AdminReply = { profile: string; mode: 'create' | 'existing'; username: string; password: string }
+
+function readAdminReply(plan: AppDocument, text: string): AdminReply | undefined {
+  const username = text.match(/^\s*(?:账号|帐号|用户名|username)\s*[：:=]\s*([^\r\n]+)$/im)?.[1]?.trim()
+  const password = text.match(/^\s*(?:密码|password)\s*[：:=]\s*([^\r\n]+)$/im)?.[1]?.trim()
+  if (!username || !password || username.length > 4096 || password.length > 4096 || /\0/.test(username + password)) return undefined
+  return { profile: plan.profile, mode: plan.mode, username, password }
 }
 
 function appendAnalysisFeedback(job: DeliveryJob, text: string) {
@@ -138,6 +150,7 @@ export interface AppDeliveryOptions {
 export class AppDelivery {
   private busy = new Set<string>()
   private analyses = new Map<string, AbortController>()
+  private adminReplies = new Map<string, AdminReply>()
   analyze?: (
     job: DeliveryJob,
     root: string,
@@ -490,6 +503,7 @@ export class AppDelivery {
           resources: proposal.contract.resources ?? [],
           storage_mounts: proposal.contract.storage_mounts ?? [],
           verification_credential_fields: verificationCredentialFields(proposal.contract),
+          has_embedded_admin: Boolean(job.skillMarkdown?.includes('<!-- opc-admin-login -->')),
           verification: proposal.contract.verification,
           apis: proposal.contract.apis?.map(({ id, purpose, method, path, auth, effect }: AppDocument) => ({ id, purpose, method, path, auth, effect })),
           pages: proposal.contract.pages?.map(({ purpose, path, actions }: AppDocument) => ({ purpose, path, actions })),
@@ -620,6 +634,9 @@ export class AppDelivery {
       if (!['ready', 'awaiting_page_verification', 'failed'].includes(job.status) || !job.proposal) throw new Error('当前状态无法返回改造方案核对')
       job.analysisFailure = undefined
       job.status = 'review'
+      if (job.proposal.contract.admin_account && !job.proposal.contract.admin_account.source && !job.skillMarkdown && !this.adminReplies.has(id)) {
+        job.proposal.adminAccountPending = true
+      }
       job.confirmationToken = undefined
       job.error = undefined
       job.events.push('已返回改造方案核对阶段')
@@ -777,6 +794,7 @@ export class AppDelivery {
         if (!controller.signal.aborted && !job.analysisFailure) job.analysisFailure = msg
       }
       try { await this.save(root, job) } finally {
+        if (job.status !== 'review' || !job.proposal?.adminAccountPending) this.adminReplies.delete(id)
         this.analyses.delete(id)
         this.busy.delete(id)
         this.core.emit('change')
@@ -786,7 +804,11 @@ export class AppDelivery {
   }
   async recordAnalysisReply(job: DeliveryJob, root: string, text: string, signal: AbortSignal) {
     if (job.status !== 'analyzing' && job.status !== 'review') throw new Error('当前应用准备阶段无法接收回复')
-    const reply: string = await worker({ action: 'redact_feedback', root, text: text.slice(0, 20_000) }, signal)
+    const account = job.proposal?.contract?.admin_account
+    const adminReply = job.proposal?.adminAccountPending && account ? readAdminReply(account, text) : undefined
+    const reply: string = adminReply
+      ? '用户已经在当前对话提供管理员账号和密码。保留上一版 admin_account 认证方案与实际存储位置并重新提交，OPC 会把账密写入应用和技能。'
+      : await worker({ action: 'redact_feedback', root, text: text.slice(0, 20_000) }, signal)
     signal.throwIfAborted()
     const next: DeliveryJob = {
       ...job,
@@ -797,6 +819,7 @@ export class AppDelivery {
     }
     appendAnalysisFeedback(next, reply.trim())
     await this.save(root, next)
+    if (adminReply) this.adminReplies.set(job.id, adminReply)
     Object.assign(job, next)
     return reply
   }
@@ -913,6 +936,16 @@ export class AppDelivery {
     if (!Array.isArray(proposal.unresolved) || (proposal.contract.unresolved !== undefined && !Array.isArray(proposal.contract.unresolved))) {
       throw new Error('unresolved 必须为数组')
     }
+    const account = proposal.contract.admin_account
+    const adminReply = this.adminReplies.get(job.id)
+    if (adminReply && (!account || account.profile !== adminReply.profile || account.mode !== adminReply.mode)) {
+      throw new Error('用户已提交管理员账密，请保留原方案的 admin_account 及对应登录方式')
+    }
+    if ((job.upgrade || job.published) && account?.mode === 'create') throw new Error('已有部署请使用应用现有账号，改造副本不能替换线上账号')
+    const previousLogin = job.skillMarkdown?.match(/^<!-- opc-admin-login -->\n```json\n([^\r\n]+)\n```$/m)?.[1]
+    const canReusePrevious = previousLogin && !job.failedSnapshot?.verificationError && job.proposal?.contract?.admin_account?.profile === account?.profile &&
+      job.proposal?.contract?.admin_account?.mode === account?.mode
+    const adminAccountPending = Boolean(account && !account.source && !adminReply && !canReusePrevious)
     const hasQuestions = Boolean(proposal.unresolved.length || proposal.contract.unresolved?.length)
     if (!hasQuestions) {
       const expectedPort = job.port ?? 8080
@@ -926,7 +959,9 @@ export class AppDelivery {
       action: 'validate',
       root,
       proposal,
-      allow_unresolved: hasQuestions,
+      allow_unresolved: hasQuestions || adminAccountPending,
+      admin_reply: adminReply,
+      previous_skill_markdown: canReusePrevious ? job.skillMarkdown : undefined,
       repair: Boolean(job.failedRevision),
       failed_revision: job.failedRevision ?? '',
       failure_feedback: job.failureContext ?? '',
@@ -936,6 +971,8 @@ export class AppDelivery {
     }, signal)
     signal.throwIfAborted(); if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
     job.proposal = validated?.proposal ?? proposal
+    if (adminAccountPending) job.proposal!.adminAccountPending = true
+    else delete job.proposal!.adminAccountPending
     job.discoveryReport = validated?.discovery_report ?? job.discoveryReport
     job.transformationReport = validated?.transformation_report ?? job.transformationReport
     job.diffs = validated?.diffs ?? job.diffs
@@ -973,6 +1010,8 @@ export class AppDelivery {
         root,
         revision,
         proposal: job.proposal,
+        admin_reply: this.adminReplies.get(job.id),
+        previous_skill_markdown: job.skillMarkdown,
         repair: Boolean(job.failedRevision),
         failed_revision: job.failedRevision ?? '',
         failure_feedback: job.failureContext ?? '',
@@ -988,6 +1027,7 @@ export class AppDelivery {
       job.transformationReport = result.transformation_report ?? job.transformationReport
       job.preparationChecks = result.preparation_checks ?? job.preparationChecks
       job.skillMarkdown = result.skill_markdown || job.skillMarkdown
+      this.adminReplies.delete(job.id)
       job.dockerfileContent = result.dockerfile_content || job.dockerfileContent
       job.hasOriginalKeys = result.has_original_keys ?? job.hasOriginalKeys
       job.diffs = result.diffs ?? job.diffs
@@ -1304,7 +1344,8 @@ export class AppDelivery {
             continue
           }
           if (api.effect !== 'read') throw new Error('业务验证只能使用只读接口')
-          const result = await worker({ action: 'probe', root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials }, scope.signal)
+          const result = await worker({ action: 'probe', root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials,
+            skill_markdown: job.skillMarkdown }, scope.signal)
           if (!probeMatches(result, test.status ?? 200, test.json_contains)) throw new Error(`业务验证失败：${test.operation}`)
           checks.push({ operation: test.operation, status: result.status })
         }
@@ -1666,7 +1707,8 @@ export class AppDelivery {
             if (!api || api.path === (contract.health?.path ?? '/healthz') || api.effect !== 'read') {
               throw new Error('回滚后必须使用有效的只读业务接口验证')
             }
-            const res = await worker({ action: 'probe', root: opened.root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials }, scope.signal)
+            const res = await worker({ action: 'probe', root: opened.root, contract, operation: test.operation, params: test.params ?? {}, body: test.body, credentials,
+              skill_markdown: opened.job.skillMarkdown }, scope.signal)
             if (!probeMatches(res, test.status ?? 200, test.json_contains)) {
               throw new Error(`回滚后业务验证失败：${test.operation}`)
             }
@@ -1776,7 +1818,7 @@ export class AppDelivery {
     const invocationSignal = turn ? AbortSignal.any([signal, turn]) : signal
     invocationSignal.throwIfAborted()
     return worker({ action: 'probe', root, contract: job.proposal!.contract, operation, params, body, approved,
-      credentials: await this.readVersionCredentials(job) }, invocationSignal).catch(error => {
+      credentials: await this.readVersionCredentials(job), skill_markdown: job.skillMarkdown }, invocationSignal).catch(error => {
       if (approved) throw new Error('操作结果未知，请先查询实际结果再决定下一步', { cause: error })
       throw error
     })

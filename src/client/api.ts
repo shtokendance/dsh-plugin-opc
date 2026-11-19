@@ -177,6 +177,7 @@ export interface AppDeliveryJob {
       resources?: { id?: string; type?: string; purpose?: string; env?: string[]; current_hint?: string }[]
       storage_mounts?: AppStorageMountDetail[]
       verification_credential_fields?: { key: string; kind: 'username' | 'password' | 'session' }[]
+      has_embedded_admin?: boolean
       verification?: { cases?: { operation: string; status?: number; params?: Record<string, unknown>; body?: unknown; json_contains?: unknown }[] }
       apis?: { id: string; purpose: string; method: string; path: string; effect?: string; auth?: { type?: string; env?: string; header?: string } }[]
       pages?: { path: string; purpose: string; actions?: string[] }[]

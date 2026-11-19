@@ -65,6 +65,43 @@ def validate_basic(value, schema, label):
             validate_basic(item, schema["items"], label + "[]")
 
 
+def read_skill_login(markdown):
+    match = re.search(r"^<!-- opc-admin-login -->\n```json\n([^\r\n]+)\n```$", markdown, re.M)
+    if not match:
+        return None
+    login = json.loads(match[1])
+    if not isinstance(login, dict) or set(login) != {"profile", "username", "password"} or not all(isinstance(v, str) and v for v in login.values()):
+        raise ValueError("技能 Markdown 中的管理员账号格式无效")
+    return login
+
+
+def skill_login_credentials(contract, markdown, operation, credential_env):
+    login = read_skill_login(markdown)
+    if login is None:
+        return credential_env
+    auth = next((api.get("auth", {}) for api in contract["apis"] if api["id"] == operation), {})
+    if auth.get("profile") != login["profile"]:
+        return credential_env
+    profile = contract.get("auth_profiles", {}).get(login["profile"], {})
+    if not profile.get("username_env") or not profile.get("password_env"):
+        raise ValueError("技能 Markdown 中的管理员账号缺少对应登录方式")
+    values = dict(credential_env)
+    for key in (auth.get("env"), profile.get("token_env")):
+        values.pop(key, None)
+    values.update({profile["username_env"]: login["username"], profile["password_env"]: login["password"]})
+    return values
+
+
+def login_method(profile):
+    method = profile.get("login_method") or "POST"
+    # Older delivery packages combined the HTTP verb with the already configured content type.
+    if isinstance(method, str):
+        method = method.strip().upper().removesuffix(" APPLICATION/JSON")
+    if method not in ("POST", "PUT", "PATCH", "GET", "HEAD", "DELETE", "OPTIONS"):
+        raise ValueError("登录请求方式无效，例如请分别填写 POST 和 JSON 请求体")
+    return method
+
+
 def _resolve_contract_auth_credential(contract, auth, credential_env=None):
     """Use a supplied session token or exchange supplied credentials at the app login endpoint."""
     environment = os.environ if credential_env is None else credential_env
@@ -108,7 +145,7 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
                 req_url,
                 data=json.dumps(resolved_body).encode("utf-8"),
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
-                method=str(profile.get("login_method") or "POST").upper(),
+                method=login_method(profile),
             )
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
             with opener.open(req, timeout=10) as resp:
@@ -133,8 +170,12 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
                             return raw[candidate_key].strip()
                         if isinstance(raw.get("data"), dict) and isinstance(raw["data"].get(candidate_key), str):
                             return raw["data"][candidate_key].strip()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise ValueError("应用登录失败，请核对账号权限或更新登录凭据") from exc
+            raise ValueError(f"应用登录接口返回 HTTP {exc.code}，请检查应用日志或登录配置") from exc
         except (urllib.error.URLError, ValueError, OSError) as exc:
-            raise ValueError("application login failed; check the configured account connection (credentials omitted)") from exc
+            raise ValueError("应用登录请求失败，请检查连接和登录配置") from exc
     if username and password and auth.get("type") == "header" and auth.get("header", "").lower() == "authorization":
         import base64
         return "Basic " + base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
@@ -254,7 +295,9 @@ def main():
         contract = json.loads((root / "references/operations.json").read_text())
         params = read_json(args.params, args.params_file)
         body = read_json("null", args.body_file)
-        status, content_type, content = execute(contract, args.operation, params, body, args.approve_write)
+        md = root / "SKILL.md"
+        credentials = skill_login_credentials(contract, md.read_text(encoding="utf-8") if md.is_file() else "", args.operation, os.environ)
+        status, content_type, content = execute(contract, args.operation, params, body, args.approve_write, credentials)
         if len(content) > 100_000_000:
             raise ValueError("response exceeds 100 MB; narrow the query")
         print(content.decode("utf-8", errors="replace"))

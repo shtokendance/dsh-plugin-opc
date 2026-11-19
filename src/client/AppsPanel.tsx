@@ -2450,7 +2450,7 @@ export function AppsPanel({
                 )}
 
                 {/* Verification Credentials Form */}
-                {credFields.length > 0 && (isFailed || wizardJob.status === 'verified') && (
+                {!wizardJob.proposal?.contract?.has_embedded_admin && credFields.length > 0 && (isFailed || wizardJob.status === 'verified') && (
                   <div className="oa-subcard">
                     <div className="oa-subcard-head">
                       <span>带鉴权凭据重新验证</span>

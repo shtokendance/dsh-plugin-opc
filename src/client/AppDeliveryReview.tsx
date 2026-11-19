@@ -401,7 +401,7 @@ export function AppDeliveryReview({
             </div>
             <p className="oa-hint" style={{ margin: '3px 0 0' }}>
               {chatActive
-                ? '在左侧分析会话用文字回复或补充要求。密码和密钥请在部署配置中填写。'
+                ? '请在左侧分析会话的聊天框回复。AI 要求填写管理员账号时，也在这里回复。'
                 : ready
                   ? '交付包检查已完成。服务器构建、启动与业务访问将在部署时验证。'
                   : null}

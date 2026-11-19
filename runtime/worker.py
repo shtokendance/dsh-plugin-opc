@@ -22,7 +22,8 @@ if sys.version_info < (3, 9):
     sys.exit("Requires Python 3.9 or newer")
 
 from app_delivery.scripts import delivery as d
-from app_delivery.scripts.invoke_api import execute
+from app_delivery.scripts.invoke_api import execute, skill_login_credentials
+from app_delivery_admin import apply_account, resolve_account, validate_account_plan
 from app_delivery_auth import resolve_authentication, validate_auth_evidence, validate_auth_probe_coverage, validate_auth_questions
 from app_delivery_config import loopback_connection, original_fields, original_value
 from app_delivery_migration import (
@@ -258,13 +259,15 @@ def resolve_and_enrich_proposal(
         resolve_authentication(contract)
         validate_auth_evidence(source, proposal)
         d.validate_credential_references(contract)
+        validate_account_plan(source, contract)
         if not proposal.get("unresolved") and not contract.get("unresolved"):
             validate_auth_probe_coverage(contract)
 
     return proposal, discovery_report, transformation_report
 
 
-def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback="", expected_port=None, revision_count=1, feedback_text=""):
+def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback="", expected_port=None,
+               revision_count=1, feedback_text="", admin_reply=None, previous_skill_markdown=""):
     original = root / "review"
     d.require(d.inspect_source(original / "source")[0] == d.load(original / "inventory.json")["files"], "Source changed; import again")
     d.require(isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "summary required")
@@ -292,12 +295,14 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
         p.write_text(change["content"], encoding="utf-8")
         p.chmod(0o700 if executable else 0o600)
     contract = proposal["contract"]
+    login = resolve_account(original / "source", contract, admin_reply, previous_skill_markdown)
+    apply_account(target, contract, login)
     d.require(contract["health"]["path"] == "/healthz" and contract["health"]["json_contains"].get("service") == contract["slug"], "Platform requires /healthz with service=slug")
     d.save(target / "app-contract.json", contract)
     d.save(target / "review.json", {"kind": "ai-technical", "scope": "deployment-adaptation", "source": "DSH isolated preparation; deployment requires separate user confirmation", "approved_issue_ids": [c["id"] for c in proposal.get("changes", [])] or ["NO_SOURCE_CHANGES"], "unresolved": []})
     (target / "analysis.md").write_text(proposal["summary"], encoding="utf-8")
     d.check_work(target)
-    return proposal, discovery_report, transformation_report
+    return proposal, discovery_report, transformation_report, login
 
 
 def extract_original_config_values(source: Path, configs: list[dict]) -> tuple[dict[str, str], list[str]]:
@@ -498,7 +503,7 @@ def main(body):
             }
         with tempfile.TemporaryDirectory(dir=root, prefix="check-") as temp:
             temp_path = Path(temp)
-            proposal, discovery_report, transformation_report = apply_plan(
+            proposal, discovery_report, transformation_report, login = apply_plan(
                 root,
                 proposal,
                 temp_path / "approved",
@@ -508,8 +513,10 @@ def main(body):
                 expected_port=body.get("expected_port"),
                 revision_count=rev_count,
                 feedback_text=fb_text,
+                admin_reply=body.get("admin_reply"),
+                previous_skill_markdown=body.get("previous_skill_markdown", ""),
             )
-            d.bundle_work(temp_path / "approved", temp_path / "bundle")
+            d.bundle_work(temp_path / "approved", temp_path / "bundle", login)
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")
         retain_proposal_changes(root, proposal)
         diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
@@ -529,7 +536,7 @@ def main(body):
         d.require(body["revision"].isalnum(), "Invalid revision")
         dest.mkdir(mode=0o700)
         proposal = body["proposal"]
-        proposal, discovery_report, transformation_report = apply_plan(
+        proposal, discovery_report, transformation_report, login = apply_plan(
             root,
             proposal,
             dest / "approved",
@@ -539,8 +546,10 @@ def main(body):
             expected_port=body.get("expected_port"),
             revision_count=int(body.get("revision_count") or 1),
             feedback_text=str(body.get("feedback") or ""),
+            admin_reply=body.get("admin_reply"),
+            previous_skill_markdown=body.get("previous_skill_markdown", ""),
         )
-        result = d.bundle_work(dest / "approved", dest / "bundle")
+        result = d.bundle_work(dest / "approved", dest / "bundle", login)
         syntax_check = check_archive_syntax(dest / "bundle/app.tar")
         skill_markdown = ""
         try:
@@ -601,9 +610,9 @@ def main(body):
         return {"contract": contract, "sha256": actual_sha, "skill_markdown": skill_markdown}
     if action == "probe":
         contract = body["contract"]
-        credentials = body.get("credentials", {})
         approve_write = bool(body.get("approved"))
         operation_id = body["operation"]
+        credentials = skill_login_credentials(contract, body.get("skill_markdown", ""), operation_id, body.get("credentials", {}))
         api_def = next((a for a in (contract.get("apis") or []) if isinstance(a, dict) and a.get("id") == operation_id), {})
         is_readonly = not approve_write and api_def.get("effect", "read") == "read"
         max_attempts = 3 if is_readonly else 1
