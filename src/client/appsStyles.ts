@@ -467,6 +467,17 @@ export const appsCss = `
   min-width: 0;
 }
 .oa-source-form > .oa-form-card { max-width: none; margin: 0; }
+.oa-deploy-review {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+.oa-deploy-review .oa-form-card {
+  max-width: none;
+  margin: 0;
+}
 .oa-source-label { margin: 0; font-size: 13px; font-weight: 600; }
 .oa-source-label > span { color: var(--oa-danger); }
 .oa-source-icon {
