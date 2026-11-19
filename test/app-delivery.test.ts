@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { zipSync, strToU8 } from 'fflate'
-import { AppDelivery, AppRequestError, fingerprint, worker } from '../src/host/app-delivery.ts'
+import { AppDelivery, AppRequestError, fingerprint, worker, type AppDocument } from '../src/host/app-delivery.ts'
 import { attachAppAgent } from '../src/host/app-agent.ts'
 import { AppSkillProvider } from '../src/host/app-skills.ts'
 import { ContextStore, identityHash } from '../src/host/context.ts'
@@ -1496,10 +1496,15 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
     contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
     const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
     const delivery = new AppDelivery(core, workDir, { read: async () => ({}), write: async () => {} })
-    delivery.platform = async () => ({ resources: [] })
+    delivery.platform = async () => ({ resources: [{
+      id: 'redis-main', name: '平台 Redis', type: 'redis', is_default: true,
+      env_keys: ['REDIS_URL'], env_preview: { REDIS_URL: 'fixture-preview' },
+    }] })
 
     const createdSessions: string[] = []
     const injectedNotices: string[] = []
+    let deliveryInstructions = ''
+    let deliveryContext: AppDocument | undefined
     let resumeCalled = false
     const fakeCtx = {
       agents: {
@@ -1508,23 +1513,24 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
           resumeCalled = true
           throw new Error('must not resume disposed session')
         },
-        create: async ({ sessionId }: { sessionId: string }) => {
+        create: async ({ sessionId, setup }: { sessionId: string; setup: (agent: unknown) => void }) => {
           createdSessions.push(sessionId)
-          return {
-            agent: {
-              session: { id: sessionId },
-              tools: { restrict: () => {}, register: () => {} },
-              systemPrompt: { section: () => {} },
-              on: () => {},
-              cancel: () => {},
-              inject: (msg: { source?: { summary?: string } }) => {
-                if (msg.source?.summary) injectedNotices.push(msg.source.summary)
-              },
-              followup: () => {},
-              whenIdle: async () => {},
+          const agent = {
+            session: { id: sessionId },
+            tools: { restrict: () => {}, register: () => {} },
+            systemPrompt: { section: ({ text }: { text: string }) => { deliveryInstructions = text } },
+            on: () => {},
+            cancel: () => {},
+            inject: (msg: { source?: { summary?: string }; content: { text: string }[] }) => {
+              const summary = msg.source?.summary
+              if (summary) injectedNotices.push(summary)
+              if (summary === 'OPC 应用改造任务已载入') deliveryContext = JSON.parse(msg.content[0].text)
             },
-            dispose: async () => {},
+            followup: () => {},
+            whenIdle: async () => {},
           }
+          setup(agent)
+          return { agent, dispose: async () => {} }
         },
       },
       on: () => () => {},
@@ -1555,6 +1561,12 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
     assert.equal(createdSessions.length, 1)
     assert.notEqual(createdSessions[0], 'disposed-session-1')
     assert.ok(injectedNotices.some(s => s.includes('等待确认的问题：管理员账号如何创建？')))
+    assert.match(deliveryInstructions, /## 1\. 读懂应用[\s\S]*## 2\. 决定并实施改造[\s\S]*## 3\. 生成应用技能/)
+    assert.match(deliveryInstructions, /运维.*迁移/)
+    assert.doesNotMatch(deliveryInstructions, /python3 scripts\/delivery\.py smoke/)
+    assert.deepEqual(deliveryContext?.available_resource_metadata, [{
+      id: 'redis-main', name: '平台 Redis', type: 'redis', is_default: true, env_keys: ['REDIS_URL'],
+    }])
   } finally {
     await rm(workDir, { recursive: true, force: true })
   }
