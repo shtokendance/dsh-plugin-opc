@@ -21,7 +21,7 @@ import { appsCss } from './appsStyles.ts'
 
 type ViewMode = 'list' | 'wizard' | 'detail'
 type WizardStep = 1 | 2 | 3 | 4
-type ConfigSubTab = 'configs' | 'skill' | 'artifacts'
+type ConfigSubTab = 'configs' | 'skill' | 'artifacts' | 'mounts'
 type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
 
@@ -2146,7 +2146,7 @@ export function AppsPanel({
 
           {/* STEP 3 */}
           {wizardStep === 3 && wizardJob && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div className="oa-deploy-review">
               <div className="oa-form-card">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                   <div>
@@ -2187,6 +2187,13 @@ export function AppsPanel({
                     >
                       改造与检查
                     </button>
+                    <button
+                      type="button"
+                      className={`oa-segmented-btn ${configSubTab === 'mounts' ? 'active' : ''}`}
+                      onClick={() => setConfigSubTab('mounts')}
+                    >
+                      挂载信息
+                    </button>
                   </div>
                 </div>
 
@@ -2215,46 +2222,66 @@ export function AppsPanel({
 
               {configSubTab === 'configs' && (
                 <div className="oa-form-card">
-                  {volumeMounts.length > 0 && (
-                    <div className="oa-subcard">
-                      <div className="oa-subcard-head">持久化目录与存储资源</div>
-                      {volumeMounts.map(mount => {
-                        const existing = existingStorage.find(old => old.container_path === mount.container_path)
-                        const options = volumeOptions(mount)
-                        return (
-                          <div key={mount.container_path} className="oa-hint">
-                            <label>
-                              <code>{mount.container_path}</code> {mount.purpose || ''}
-                              {existing ? <span> · 复用 {existing.storage_location || existing.host_path || existing.volume_name || '现有挂载'}</span> : (
-                                <select aria-label={`存储资源 ${mount.container_path}`}
-                                  value={storageSelections[mount.container_path]}
-                                  disabled={wizardBusy || options.length === 0}
-                                  onChange={event => {
-                                    const next = { ...storageBindings, [mount.container_path]: event.target.value }
-                                    setStorageBindings(next)
-                                    scheduleDraftSave(wizardJob, configDrafts, versionNote, next)
-                                  }}>
-                                  {options.length === 0 && <option value="">{mount.kind === 'sqlite' ? '等待管理员配置本地磁盘卷' : '等待管理员配置存储'}</option>}
-                                  {options.map(resource => (
-                                    <option key={resource.id} value={resource.id}>
-                                      {resource.name} · {resource.type === 'aliyun-oss-volume' ? '阿里云 OSS' : '本地磁盘'}
-                                      {resource.is_default ? '（默认）' : ''}
-                                    </option>
-                                  ))}
-                                </select>
-                              )}
-                            </label>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
                   <AppDeliveryConfig
                     configs={configDrafts}
                     originals={originalConfigs}
                     resources={resources}
                     onChange={handleStep3ConfigsChange}
                   />
+                </div>
+              )}
+
+              {configSubTab === 'mounts' && (
+                <div className="oa-form-card">
+                  {volumeMounts.length === 0 ? (
+                    <div className="oa-hint">此应用没有目录挂载。</div>
+                  ) : (
+                    <div className="oa-subcard">
+                      <div className="oa-subcard-head">
+                        <span>持久化目录与存储资源</span>
+                        <span className="oa-pill oa-pill-ok">{volumeMounts.length} 项</span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {volumeMounts.map(mount => {
+                          const existing = existingStorage.find(old => old.container_path === mount.container_path)
+                          const options = volumeOptions(mount)
+                          return (
+                            <div key={mount.container_path} className="oa-hint">
+                              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                                <span>
+                                  <code>{mount.container_path}</code> {mount.purpose || ''}
+                                </span>
+                                {existing ? (
+                                  <span>复用 {existing.storage_location || existing.host_path || existing.volume_name || '现有挂载'}</span>
+                                ) : (
+                                  <select
+                                    aria-label={`存储资源 ${mount.container_path}`}
+                                    value={storageSelections[mount.container_path]}
+                                    disabled={wizardBusy || options.length === 0}
+                                    onChange={event => {
+                                      const next = { ...storageBindings, [mount.container_path]: event.target.value }
+                                      setStorageBindings(next)
+                                      scheduleDraftSave(wizardJob, configDrafts, versionNote, next)
+                                    }}
+                                  >
+                                    {options.length === 0 && (
+                                      <option value="">{mount.kind === 'sqlite' ? '等待管理员配置本地磁盘卷' : '等待管理员配置存储'}</option>
+                                    )}
+                                    {options.map(resource => (
+                                      <option key={resource.id} value={resource.id}>
+                                        {resource.name} · {resource.type === 'aliyun-oss-volume' ? '阿里云 OSS' : '本地磁盘'}
+                                        {resource.is_default ? '（默认）' : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                              </label>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
