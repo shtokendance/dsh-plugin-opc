@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import type { OpcCore } from './core.ts'
 import { identityHash } from './context.ts'
+import { DEFAULT_APP_DOMAIN_ROOT } from './opc-config.ts'
 
 export const ROLLBACK_NOTICE = '回滚恢复代码与运行配置，不自动回退数据库/卷中的业务数据；旧代码和新数据兼容性仍需验证。'
 export type AppDocument = Record<string, any>
@@ -428,7 +429,7 @@ export class AppDelivery {
       ? this.options.appDefaultPort!
       : 8080
     return {
-      appDomainRoot: appDomainRoot || '10.101.102.116.nip.io:8080',
+      appDomainRoot: appDomainRoot || DEFAULT_APP_DOMAIN_ROOT,
       defaultPort,
       platformBaseUrl: this.core.auth?.http?.base?.toString()?.replace(/\/+$/, '') ?? '',
     }

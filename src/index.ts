@@ -21,7 +21,7 @@ import { AppSkillProvider, registerAppTools } from './host/app-skills.ts'
 export const name = 'dsh-plugin-opc'
 export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert', 'llm']
 export interface Config { platformBaseUrl: string; clientId: string; dataHome: string; appDomainRoot?: string; appDefaultPort?: number }
-export const Config = z.object({ platformBaseUrl: z.string().default('https://shtokendance.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default(''), appDomainRoot: z.string().default(''), appDefaultPort: z.number().default(8080) })
+export const Config = z.object({ platformBaseUrl: z.string().default('https://aiwork.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default(''), appDomainRoot: z.string().default(''), appDefaultPort: z.number().default(8080) })
 export function apply(ctx: Context, config: Config): void {
   const key = credentialKey(name, 'enterprise')
   const home = config.dataHome || resolveDshHome()

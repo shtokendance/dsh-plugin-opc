@@ -23,7 +23,7 @@ from app_delivery.scripts import delivery
 
 def fetch_platform_dockerfile_template(platform_url: str, language: str, version: str = "") -> dict:
     """Step 2 helper: fetch Dockerfile template for (language, version) from platform-opc deploy-opc DB."""
-    base = (platform_url or "https://shtokendance.benlai.com").rstrip("/")
+    base = (platform_url or "https://aiwork.benlai.com").rstrip("/")
     query = urllib.parse.urlencode({"language": language.strip(), "version": version.strip()})
     url = f"{base}/api/v1/apps/dockerfile-templates?{query}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")

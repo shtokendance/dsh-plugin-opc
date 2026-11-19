@@ -4,8 +4,8 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parsePlatformBaseUrl } from './http.ts'
 
-export const DEFAULT_PLATFORM_BASE = 'https://shtokendance.benlai.com'
-export const DEFAULT_APP_DOMAIN_ROOT = '10.101.102.116.nip.io:8080'
+export const DEFAULT_PLATFORM_BASE = 'https://aiwork.benlai.com'
+export const DEFAULT_APP_DOMAIN_ROOT = 'ai.benlai.com'
 export const DEFAULT_APP_DEFAULT_PORT = 8080
 
 export interface StoredOpcConfig {
@@ -37,7 +37,7 @@ export function normalizePlatformBaseUrl(raw: unknown): string {
 export function sanitizeDomainRoot(raw: unknown): string {
   const trimmed = String(raw ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').trim()
   if (trimmed && /[\s/?#]/.test(trimmed)) {
-    throw new Error('应用内网根域名后缀格式无效，请填写如 10.101.102.116.nip.io:8080')
+    throw new Error('应用内网根域名后缀格式无效，请填写如 ai.benlai.com')
   }
   return trimmed
 }

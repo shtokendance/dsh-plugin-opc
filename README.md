@@ -125,7 +125,7 @@
 
 ## 给管理员和开发者
 
-插件通过公开接口接入 DSH。企业认证使用独立凭据命名空间，OPC 服务地址由 `platformBaseUrl` 配置。默认域名是 `https://shtokendance.benlai.com`。参见[配置示例](config/overlay.example.yml)、[一期验收记录](docs/acceptance-matrix.md)。
+插件通过公开接口接入 DSH。企业认证使用独立凭据命名空间，OPC 服务地址由 `platformBaseUrl` 配置。默认域名是 `https://aiwork.benlai.com`。参见[配置示例](config/overlay.example.yml)、[一期验收记录](docs/acceptance-matrix.md)。
 
 ## 本地开发
 
@@ -141,4 +141,4 @@ npx tsc -p tsconfig.client.json
 npm run build
 ```
 
-链接和类型配置都生成在插件目录内。重新执行 `npm ci` 后需要重新链接。开发时可通过 DSH CLI 的 `web --patch` 加载外部 YAML，把插件入口指向构建后的 `lib/index.js`。OPC 服务域名由 `platformBaseUrl` 配置，默认是 `https://shtokendance.benlai.com`。参见[配置示例](config/overlay.example.yml)和[一期验收记录](docs/acceptance-matrix.md)。
+链接和类型配置都生成在插件目录内。重新执行 `npm ci` 后需要重新链接。开发时可通过 DSH CLI 的 `web --patch` 加载外部 YAML，把插件入口指向构建后的 `lib/index.js`。OPC 服务域名由 `platformBaseUrl` 配置，默认是 `https://aiwork.benlai.com`。参见[配置示例](config/overlay.example.yml)和[一期验收记录](docs/acceptance-matrix.md)。
