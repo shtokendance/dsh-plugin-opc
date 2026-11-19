@@ -14,6 +14,33 @@ export interface PublicAuthState {
   context: EnterpriseContext | null
 }
 function text(value: unknown): string { return typeof value === 'string' ? value : '' }
+
+const LOGIN_ERROR_MESSAGES: Record<string, string> = {
+  SUBJECT_NOT_PROVISIONED: '当前账号未同步到 OPC 平台或已被禁用，请联系管理员在统一账户中心启用账号并执行全量同步后重试。',
+  SUBJECT_CONFLICT: '当前账号存在身份绑定冲突，请联系管理员在统一账户中心核对账号信息。',
+  WECOM_EXCHANGE_FAILED: '企业微信身份校验失败，请重试；如持续失败请联系管理员检查企业微信应用配置。',
+  ACCOUNT_CENTER_UNAVAILABLE: '统一账户中心暂不可用，请稍后重试；如持续失败请联系管理员。',
+  AUTH_STATE_MISMATCH: '登录会话已失效或状态不匹配，请返回 DSH 重新发起企业登录。',
+  AUTH_CODE_REPLAYED: '授权码已失效或已被使用，请返回 DSH 重新发起企业登录。',
+  INTERNAL_ERROR: 'OPC 平台认证服务异常，请稍后重试或联系管理员。',
+  AUTHORIZATION_DENIED: '企业授权未完成或未返回授权码，请重试。',
+  access_denied: '企业授权已取消或未通过，请重试。',
+  INVALID_TOKEN_RESPONSE: '平台返回的登录令牌格式无效，请重试或联系管理员。',
+  INVALID_SESSION_RESPONSE: '平台返回的会话信息无效，请重试或联系管理员。',
+  PLATFORM_REQUEST_FAILED: '平台登录请求失败，请检查平台网关配置后重试。',
+}
+
+function normalizeCallbackErrorCode(rawError: string | null): string {
+  const trimmed = rawError?.trim() ?? ''
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : 'AUTHORIZATION_DENIED'
+}
+
+function describeLoginError(code: string): string {
+  return LOGIN_ERROR_MESSAGES[code]
+    ?? LOGIN_ERROR_MESSAGES[code.toUpperCase()]
+    ?? (code === 'LOGIN_FAILED' ? '企业登录未完成，请重试。' : `企业登录未完成（${code}），请重试。`)
+}
+
 function check(response: PlatformResponse): Record<string, unknown> {
   if (response.status >= 400) {
     const error = response.body.error as { code?: string } | undefined
@@ -151,17 +178,24 @@ export class AuthManager extends EventEmitter {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
       if (request.method !== 'GET' || url.pathname !== '/callback' || url.searchParams.get('state') !== state || consumed) { response.writeHead(400).end('Invalid callback'); return }
       consumed = true
-      const code = url.searchParams.get('code')
+      const code = url.searchParams.get('code')?.trim()
+      const callbackError = url.searchParams.get('error')
       void (async () => {
         try {
-          if (!code) throw new OpcError('AUTHORIZATION_DENIED')
+          if (callbackError !== null && callbackError.trim() !== '') {
+            const errorCode = normalizeCallbackErrorCode(callbackError)
+            throw new OpcError(errorCode, describeLoginError(errorCode))
+          }
+          if (!code) throw new OpcError('AUTHORIZATION_DENIED', describeLoginError('AUTHORIZATION_DENIED'))
           const result = check(await this.http.request('/integration/v1/auth/token', { signal: controller.signal, body: { grant_type: 'authorization_code', client_id: this.clientId, code, code_verifier: verifier, device: this.device, audience: 'work' } }))
           if (controller.signal.aborted) throw new OpcError('LOGIN_CANCELLED')
           await this.accept(result, revision, true)
           response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }).end('登录成功，请返回 DSH。')
         } catch (error) {
-          if (revision === this.#revision) this.#error = { code: error instanceof OpcError ? error.code : 'LOGIN_FAILED', message: '企业登录未完成，请重试。' }
-          response.writeHead(400).end('Login failed')
+          const errorCode = error instanceof OpcError ? error.code : 'LOGIN_FAILED'
+          const message = describeLoginError(errorCode)
+          if (revision === this.#revision) this.#error = { code: errorCode, message }
+          response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }).end(`登录失败：${message}（${errorCode}）请返回 DSH。`)
         } finally { if (this.#login?.server === server) this.cancelLogin() }
       })()
     })

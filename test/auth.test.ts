@@ -86,3 +86,51 @@ test('credential write failure removes the consumed refresh grant', async () => 
   assert.equal(grants.value, undefined); assert.equal(auth.state.signedIn, false)
   await auth.dispose()
 })
+test('callback error query surfaces specific code and Chinese guidance', async () => {
+  const cases = [
+    { query: 'error=SUBJECT_NOT_PROVISIONED', code: 'SUBJECT_NOT_PROVISIONED', snippet: '统一账户中心启用账号并执行全量同步' },
+    { query: 'error=SUBJECT_CONFLICT', code: 'SUBJECT_CONFLICT', snippet: '身份绑定冲突' },
+    { query: 'error=CUSTOM_UPSTREAM_ERR', code: 'CUSTOM_UPSTREAM_ERR', snippet: 'CUSTOM_UPSTREAM_ERR' },
+    { query: 'error=%3Cscript%3Ealert(1)%3C%2Fscript%3E', code: 'AUTHORIZATION_DENIED', snippet: '未返回授权码' },
+    { query: '', code: 'AUTHORIZATION_DENIED', snippet: '未返回授权码' },
+  ]
+  for (const item of cases) {
+    let authorization: Record<string, unknown> = {}
+    const { auth } = setup(async (path, body) => {
+      if (path.endsWith('/authorize')) { authorization = body; return Response.json({ authorize_url: 'http://127.0.0.1:3002/login' }) }
+      throw new Error(`Unexpected token exchange for error callback ${item.query}`)
+    })
+    try {
+      await auth.startLogin()
+      const sep = item.query ? `${item.query}&` : ''
+      const res = await fetch(`${authorization.redirect_uri}?${sep}state=${authorization.state}`)
+      const body = await res.text()
+      assert.equal(res.status, 400)
+      assert.match(res.headers.get('content-type') ?? '', /text\/plain;\s*charset=utf-8/i)
+      assert.equal(res.headers.get('cache-control'), 'no-store')
+      assert.equal(auth.state.signedIn, false)
+      assert.equal(auth.state.loginInProgress, false)
+      assert.equal(auth.state.loginError?.code, item.code)
+      assert.match(auth.state.loginError?.message ?? '', new RegExp(item.snippet))
+      assert.match(body, new RegExp(item.snippet))
+      assert.match(body, new RegExp(item.code))
+    } finally { await auth.dispose() }
+  }
+})
+test('token exchange error surfaces specific code and Chinese guidance', async () => {
+  let authorization: Record<string, unknown> = {}
+  const { auth } = setup(async (path, body) => {
+    if (path.endsWith('/authorize')) { authorization = body; return Response.json({ authorize_url: 'http://127.0.0.1:3002/login' }) }
+    return Response.json({ error: { code: 'SUBJECT_NOT_PROVISIONED' } }, { status: 403 })
+  })
+  try {
+    await auth.startLogin()
+    const res = await fetch(`${authorization.redirect_uri}?code=one&state=${authorization.state}`)
+    const body = await res.text()
+    assert.equal(res.status, 400)
+    assert.equal(auth.state.signedIn, false)
+    assert.equal(auth.state.loginError?.code, 'SUBJECT_NOT_PROVISIONED')
+    assert.match(auth.state.loginError?.message ?? '', /全量同步/)
+    assert.match(body, /SUBJECT_NOT_PROVISIONED/)
+  } finally { await auth.dispose() }
+})
