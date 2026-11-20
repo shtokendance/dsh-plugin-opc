@@ -2196,6 +2196,7 @@ export function AppsPanel({
           {wizardStep === 4 && wizardJob && (() => {
             const progress = deploymentProgress(wizardJob)
             const failed = progress.tone === 'danger'
+            const liveLogs = isDeploymentInProgress(wizardJob.status)
             return (
               <div className="oa-deploy-progress">
                 <div className="oa-deploy-status" role="status">
@@ -2209,6 +2210,17 @@ export function AppsPanel({
                     </a>
                   )}
                 </div>
+                {api.appLogs && (
+                  <DeploymentLogs
+                    key={wizardJob.id}
+                    fetchLogs={fetchDeploymentLogs}
+                    live={liveLogs}
+                    buildOnly={liveLogs}
+                    failed={failed}
+                    onCopy={text => void copyText('wizard-logs', text)}
+                    copied={copiedKey === 'wizard-logs'}
+                  />
+                )}
                 {failed && (
                   <>
                     <div className="oa-alert oa-alert-danger" role="alert">
@@ -2217,17 +2229,6 @@ export function AppsPanel({
                         ? '服务器上一轮构建还在进行。等构建结束后，可核对并重新发布原交付包。'
                         : wizardJob.error || '平台未返回具体失败原因。'}</div>
                     </div>
-                    {api.appLogs && (
-                      <DeploymentLogs
-                        key={wizardJob.id + ':' + (wizardJob.version ?? '')}
-                        fetchLogs={fetchDeploymentLogs}
-                        live={false}
-                        buildOnly={false}
-                        failed
-                        onCopy={text => void copyText('wizard-logs', text)}
-                        copied={copiedKey === 'wizard-logs'}
-                      />
-                    )}
                     <div>
                       {blockedByPreviousBuild(wizardJob) ? (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>
