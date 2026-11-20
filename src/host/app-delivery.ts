@@ -257,6 +257,7 @@ export class AppDelivery {
   private busy = new Set<string>()
   private analyses = new Map<string, AbortController>()
   private adminReplies = new Map<string, AdminReply>()
+  private preparedProposals = new Map<string, { revision: string; proposalHash: string; result: AppDocument }>()
   analyze?: (
     job: DeliveryJob,
     root: string,
@@ -911,6 +912,9 @@ export class AppDelivery {
         if (!controller.signal.aborted && !job.analysisFailure) job.analysisFailure = msg
       }
       try { await this.save(root, job) } finally {
+        const unused = this.preparedProposals.get(id)
+        this.preparedProposals.delete(id)
+        if (unused) await rm(join(root, unused.revision), { recursive: true, force: true }).catch(() => {})
         if (job.status !== 'review' || !job.proposal?.adminAccountPending) this.adminReplies.delete(id)
         this.analyses.delete(id)
         this.busy.delete(id)
@@ -923,6 +927,21 @@ export class AppDelivery {
     if (job.status !== 'analyzing' && job.status !== 'review') throw new Error('当前应用准备阶段无法接收回复')
     const account = job.proposal?.contract?.admin_account
     const adminReply = job.proposal?.adminAccountPending && account ? readAdminReply(account, text) : undefined
+    const proposalWithAccount = adminReply && job.proposal
+      ? { ...job.proposal, adminAccountPending: false } : undefined
+    if (job.status === 'review' && adminReply && proposalWithAccount && !analysisQuestions(proposalWithAccount).length) {
+      const next: DeliveryJob = {
+        ...job, proposal: proposalWithAccount, analysisFailure: undefined,
+        events: [...job.events, '已收到管理员账密，继续生成交付包'],
+      }
+      signal.throwIfAborted()
+      // Credentials live in memory until packaging. If the host restarts
+      // before then, the saved review can still ask for them again.
+      await this.save(root, { ...next, proposal: job.proposal })
+      this.adminReplies.set(job.id, adminReply)
+      Object.assign(job, next)
+      return ''
+    }
     const reply: string = adminReply
       ? '用户已经在当前对话提供管理员账号和密码。保留上一版 admin_account 认证方案与实际存储位置并重新提交，OPC 会把账密写入应用和技能。'
       : await worker({ action: 'redact_feedback', root, text: text.slice(0, 20_000) }, signal)
@@ -1065,7 +1084,7 @@ export class AppDelivery {
     } }, scope.signal)
   }
 
-  async submit(job: DeliveryJob, root: string, proposal: AppDocument, signal: AbortSignal) {
+  async submit(job: DeliveryJob, root: string, proposal: AppDocument, signal: AbortSignal, options?: { dockerfileOnly: boolean }) {
     if (proposal.contract?.slug !== job.slug || proposal.contract?.base_url !== job.url) throw new Error('应用标识或地址与导入时不一致')
     if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
     if (!Array.isArray(proposal.unresolved) || (proposal.contract.unresolved !== undefined && !Array.isArray(proposal.contract.unresolved))) {
@@ -1096,11 +1115,17 @@ export class AppDelivery {
       }
       if (!job.portAuto && actualPort !== expectedPort) throw new Error(`${field} 填了 ${actualPort}，与已锁定的容器端口 ${expectedPort} 不一致。模型不能静默改变用户选择的容器端口`)
     }
+    const allowUnresolved = hasQuestions || adminAccountPending
+    // A complete AI proposal can keep its validated artifacts for the review
+    // step. Blocked proposals need only validation until the user can continue.
+    const preparedRevision = options?.dockerfileOnly && !allowUnresolved ? randomUUID().replaceAll('-', '') : undefined
     const validated = await worker({
-      action: 'validate',
+      action: preparedRevision ? 'bundle' : 'validate',
+      revision: preparedRevision,
       root,
       proposal,
-      allow_unresolved: hasQuestions || adminAccountPending,
+      allow_unresolved: allowUnresolved,
+      dockerfile_only: options?.dockerfileOnly === true,
       reuse_source_admin: !job.upgrade && !job.published && !adminReply && !canReusePrevious,
       admin_reply: adminReply,
       previous_skill_markdown: canReusePrevious ? job.skillMarkdown : undefined,
@@ -1110,7 +1135,13 @@ export class AppDelivery {
       revision_count: job.revisionCount ?? 1,
       feedback: job.feedbackHistory ?? '',
       expected_port: job.portAuto ? null : (job.port ?? 8080),
-    }, signal)
+    }, signal).catch(async error => {
+      if (preparedRevision) await rm(join(root, preparedRevision), { recursive: true, force: true }).catch(() => {})
+      throw error
+    })
+    if (preparedRevision) {
+      this.preparedProposals.set(job.id, { revision: preparedRevision, proposalHash: fingerprint(validated.proposal), result: validated })
+    }
     signal.throwIfAborted(); if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
     job.proposal = validated?.proposal ?? proposal
     const validatedPort = job.proposal?.contract?.runtime?.port
@@ -1150,8 +1181,10 @@ export class AppDelivery {
     job.events.push('正在生成并检查交付包')
     await this.save(root, job)
     try {
-      const revision = randomUUID().replaceAll('-', '')
-      const result = await worker({
+      const prepared = this.preparedProposals.get(job.id)
+      const reusable = prepared && prepared.proposalHash === fingerprint(job.proposal) ? prepared : undefined
+      const revision = reusable?.revision ?? randomUUID().replaceAll('-', '')
+      const result = reusable?.result ?? await worker({
         action: 'bundle',
         root,
         revision,
@@ -1166,6 +1199,7 @@ export class AppDelivery {
         feedback: job.feedbackHistory ?? '',
       }, signal)
       signal.throwIfAborted(); assertCurrent()
+      if (reusable) this.preparedProposals.delete(job.id)
       job.revision = revision
       job.hashes = result.summary.files
       job.proposal = result.proposal ?? job.proposal

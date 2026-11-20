@@ -75,7 +75,7 @@ def load_json_if_exists(path: Path, default):
     return default
 
 
-def validate_file_change(source: Path, change: dict):
+def validate_file_change(source: Path, change: dict, dockerfile_only=False):
     d.require(isinstance(change, dict), "修改项必须是对象")
     d.require(isinstance(change.get("group", ""), str) and len(change.get("group", "")) <= 160, "修改分组必须是简短文字")
     path = change.get("path")
@@ -87,6 +87,8 @@ def validate_file_change(source: Path, change: dict):
     if not isinstance(change.get("path"), str) or not change["path"] or not isinstance(change.get("reason", "适配修改"), str) or not isinstance(change.get("content"), str):
         raise ValueError("修改项必须有路径、原因和完整文件内容")
     dockerfile = target.relative_to(source).as_posix() == "Dockerfile"
+    d.require(not dockerfile_only or dockerfile,
+              "AI 只能修改根目录 Dockerfile。确需修改应用代码时，请指出原文件位置和原因，由用户在源工程处理：" + path)
     exists = target.is_file()
     d.require(exists or dockerfile, "AI 只可新增根目录 Dockerfile；其余新增文件请由用户提供：" + path)
     if not dockerfile:
@@ -162,6 +164,7 @@ def resolve_and_enrich_proposal(
     feedback_text: str = "",
     expected_port: int | None = None,
     reuse_source_admin: bool = False,
+    dockerfile_only: bool = False,
 ) -> tuple[dict, dict | None, dict | None]:
     d.require(isinstance(proposal, dict) and isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "提案缺少摘要")
     for field in ("issues", "changes", "unresolved"):
@@ -195,7 +198,7 @@ def resolve_and_enrich_proposal(
                 change = {**change, "id": change.get("path") or f"change-{idx + 1}"}
             if isinstance(change, dict) and not change.get("reason"):
                 change = {**change, "reason": "容器化与部署适配"}
-            validate_file_change(source, change)
+            validate_file_change(source, change, dockerfile_only)
             resolved_changes.append(change)
         except ValueError as exc:
             change_errors.append(str(exc))
@@ -341,7 +344,8 @@ def resolve_and_enrich_proposal(
 
 
 def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback="", expected_port=None,
-               revision_count=1, feedback_text="", admin_reply=None, previous_skill_markdown="", reuse_source_admin=False):
+               revision_count=1, feedback_text="", admin_reply=None, previous_skill_markdown="", reuse_source_admin=False,
+               dockerfile_only=False):
     original = root / "review"
     d.require(d.inspect_source(original / "source")[0] == d.load(original / "inventory.json")["files"], "Source changed; import again")
     d.require(isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "summary required")
@@ -355,6 +359,7 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
         revision_count=revision_count,
         feedback_text=feedback_text,
         reuse_source_admin=reuse_source_admin,
+        dockerfile_only=dockerfile_only,
     )
     d.require(not (proposal.get("unresolved") or proposal["contract"].get("unresolved")), "Resolve outstanding questions before preparation")
     shutil.copytree(original, target)
@@ -714,8 +719,8 @@ def main(body):
         d.save(root / "routes_scanned.json", {"scanned": True})
         res["_auto_contract_enrichment"] = (
             "提交方案时，系统会按同一规则复核 build_context 内的接口与页面并合并进契约。"
-            "只提交需覆盖或补充的正式路由，不要把测试路径、演示入口和样例重新加进契约。"
-            "认证方式必须根据正式入口及中间件确认，扫描待核对项不用向用户提问。"
+            "只提交需覆盖或补充的正式路由。按扫描给出的文件和行号核对正式入口与共用中间件即可。"
+            "共用鉴权写一条含 auth.profile 的规则，公开入口按路径及方法声明例外。"
         )
         return res
     if action == "inspect_local_storage":
@@ -744,7 +749,7 @@ def main(body):
             "executable": bool(body.get("executable", False)),
             "group": str(body.get("group") or ""),
         }
-        validate_file_change(root / "review/source", change)
+        validate_file_change(root / "review/source", change, body.get("dockerfile_only") is True)
         draft_path = root / "draft_files.json"
         drafts = load_json_if_exists(draft_path, {})
         cid = change["id"]
@@ -772,6 +777,7 @@ def main(body):
                 feedback_text=fb_text,
                 expected_port=body.get("expected_port"),
                 reuse_source_admin=body.get("reuse_source_admin") is True,
+                dockerfile_only=body.get("dockerfile_only") is True,
             )
             diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
             _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
@@ -799,6 +805,7 @@ def main(body):
                 admin_reply=body.get("admin_reply"),
                 previous_skill_markdown=body.get("previous_skill_markdown", ""),
                 reuse_source_admin=body.get("reuse_source_admin") is True,
+                dockerfile_only=body.get("dockerfile_only") is True,
             )
             d.bundle_work(temp_path / "approved", temp_path / "bundle", login)
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")
@@ -832,6 +839,8 @@ def main(body):
             feedback_text=str(body.get("feedback") or ""),
             admin_reply=body.get("admin_reply"),
             previous_skill_markdown=body.get("previous_skill_markdown", ""),
+            reuse_source_admin=body.get("reuse_source_admin") is True,
+            dockerfile_only=body.get("dockerfile_only") is True,
         )
         result = d.bundle_work(dest / "approved", dest / "bundle", login)
         syntax_check = check_archive_syntax(dest / "bundle/app.tar")

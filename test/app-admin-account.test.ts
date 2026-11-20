@@ -57,7 +57,7 @@ test('chat credentials populate the delivery SQLite and power the generated Mark
       const { stdout } = await run('python3', ['-c', 'import json, sqlite3; print(json.dumps(sqlite3.connect("data/app.db").execute("select username, salt, digest from admins").fetchone()))'], { cwd: extracted })
       const [user, salt, digest] = JSON.parse(stdout)
       const { scryptSync } = await import('node:crypto')
-      if (body.username !== user || scryptSync(body.password, Buffer.from(salt, 'hex'), 32).toString('hex') !== digest) { res.writeHead(401).end('{}'); return }
+      if (body.email !== user || scryptSync(body.secret, Buffer.from(salt, 'hex'), 32).toString('hex') !== digest) { res.writeHead(401).end('{}'); return }
       logins++
       res.end('{"token":"fixture-session"}'); return
     }
@@ -73,6 +73,9 @@ test('chat credentials populate the delivery SQLite and power the generated Mark
     const original = await readFile(join(source, 'data/app.db'))
     const plan = makeProposal(url, { mode: 'create', storage: { kind: 'sqlite', path: 'data/app.db', table: 'admins',
       row: { username: '$username', salt: '$salt', digest: '$hash' }, password: { kind: 'scrypt', n: 16384, r: 8, p: 1, dklen: 32, salt_bytes: 16 } } }, ['data'])
+    Object.assign(plan.contract.auth_profiles.admin, {
+      login_body_template: { email: '${username}', secret: '${password}' },
+    })
     let ready: AppDocument
     delivery.platform = async path => {
       if (path === '/check-slug') return { available: true, app_url: url }
@@ -86,8 +89,9 @@ test('chat credentials populate the delivery SQLite and power the generated Mark
       await session('aadc3eaa-feeb-4e52-993d-8c172a95d019')
       await delivery.submit(job, root, plan, signal)
       await reply.promise
-      await delivery.recordAnalysisReply(job, root, `账号：${username}\n密码：${password}`, signal)
-      await delivery.submit(job, root, plan, signal)
+      const feedback = await delivery.recordAnalysisReply(job, root, `账号：${username}\n密码：${password}`, signal)
+      assert.equal(feedback, '')
+      assert.equal(job.proposal?.adminAccountPending, false)
     }
     const waitFor = async (done: (job: AppDocument) => boolean) => {
       for (let index = 0; index < 260; index++) {
@@ -260,5 +264,40 @@ test('existing account source extracts literals from object properties, fallback
       worker({ action: 'bundle', root, revision: 'dynamic', proposal: dynamicPlan }),
       /原始账号引用必须指向一个明确的字符串常量/,
     )
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('a shared auth rule preserves the route login and only one protected read is needed to package', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-admin-shared-auth-'))
+  const url = 'http://127.0.0.1:8080'
+  try {
+    const source = join(home, 'source'), root = join(home, 'job')
+    await mkdir(source); await mkdir(root)
+    await writeFile(join(source, 'main.py'), 'print("fixture")\n')
+    await writeFile(join(source, 'account.json'), JSON.stringify({ username, password }))
+    await worker({ action: 'prepare', root, source, url, slug: 'test-admin-app' })
+    const plan = makeProposal(url, { mode: 'existing', source: {
+      username: { path: 'account.json', keys: ['username'] },
+      password: { path: 'account.json', keys: ['password'] },
+    } }, ['account.json'])
+    const lookup = plan.contract.apis[0]
+    const adminLookup = { ...lookup, path: '/api/lookup', auth: { ...lookup.auth, roles: ['admin'] } }
+    const auditorReport = { ...lookup, id: 'report', path: '/api/report', auth: { ...lookup.auth, roles: ['auditor'] } }
+    plan.contract.apis = [
+      adminLookup,
+      auditorReport,
+      { ...lookup, id: 'health', path: '/healthz', auth: { type: 'none', profile: '', header: '' } },
+    ]
+    Object.assign(plan.contract, { auth_rules: [{
+      target: 'api', prefix: '/api/', evidence: ['main.py:1'],
+      auth: { type: 'header', header: 'X-Admin-Token' },
+    }] })
+    const result = await worker({ action: 'bundle', root, revision: 'ready', proposal: plan })
+    assert.deepEqual(result.proposal.contract.apis.slice(0, 2).map((api: AppDocument) => api.auth.profile), ['admin', 'admin'])
+    assert.deepEqual(result.proposal.contract.apis[1].auth.roles, ['auditor'])
+    assert.ok(result.summary.files['skill.zip'])
+
+    plan.contract.verification.cases = [{ operation: 'health', json_contains: { ok: true } }]
+    await assert.rejects(worker({ action: 'validate', root, proposal: plan }), /verification\.cases.*lookup.*GET \/api\/lookup/)
   } finally { await rm(home, { recursive: true, force: true }) }
 })

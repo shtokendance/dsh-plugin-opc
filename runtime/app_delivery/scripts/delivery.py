@@ -328,7 +328,7 @@ EMBEDDED_CREDENTIAL_FIELDS = {
     "username", "admin_username", "password", "admin_password",
     "default_username", "default_password", "default_token",
     "auth_token", "token", "api_key", "cookie", "default_credential",
-    "login_body", "login_body_template",
+    "login_body",
 }
 
 
@@ -338,6 +338,13 @@ def validate_credential_references(contract):
     for profile in [contract.get("auth_profile", {})] + list(profiles.values()):
         require(isinstance(profile, dict), "credential profile must be an object")
         require(not any(profile.get(key) for key in EMBEDDED_CREDENTIAL_FIELDS), "Use runtime credential references, not embedded credentials")
+        if "login_body_template" in profile:
+            template = profile["login_body_template"]
+            require(isinstance(template, dict) and bool(template)
+                    and all(isinstance(key, str) and key and isinstance(value, str)
+                            and value in {"${username}", "${password}"} for key, value in template.items())
+                    and set(template.values()) == {"${username}", "${password}"},
+                    "login_body_template must map fields to username and password placeholders only")
         for key in ("username_env", "password_env", "token_env"):
             if key in profile:
                 require(isinstance(profile[key], str) and ENV_NAME.fullmatch(profile[key]), "Credential reference must be an environment variable name")
