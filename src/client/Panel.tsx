@@ -511,6 +511,27 @@ const css = `
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.25);
 }
+.s2-upload-link {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #1e293b;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.s2-upload-link:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
 
 /* 结果卡片与小按钮 */
 .kb-results-card {
@@ -1324,6 +1345,16 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             >
               未安装 ({uninstalledCount})
             </button>
+            <a
+              href={`${(state.opcConfig?.platformBaseUrl || 'https://aiwork.benlai.com').replace(/\/+$/, '')}/platform/toolbox/skills`}
+              target="_blank"
+              rel="noreferrer"
+              className="s2-upload-link"
+              title="前往 OPC 平台工具箱添加或上传技能"
+            >
+              <span>上传技能</span>
+              <AppIcon name="external" size={12} />
+            </a>
           </div>
 
           <div className="cards-grid">
