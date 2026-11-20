@@ -12,6 +12,61 @@ import { OpcConfigStore } from './opc-config.ts'
 
 const execFileAsync = promisify(execFile)
 
+export type PickSourceFolderResult = { path?: string; cancelled?: boolean; unsupported?: boolean }
+export type ExecFileFn = (
+  file: string,
+  args: string[],
+  options: { timeout: number; windowsHide?: boolean },
+) => Promise<{ stdout: string }>
+
+const WIN32_FOLDER_PICKER_SCRIPT = [
+  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+  'Add-Type -AssemblyName System.Windows.Forms',
+  '$owner = New-Object System.Windows.Forms.Form',
+  '$owner.TopMost = $true',
+  '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+  "$dialog.Description = '选择应用源码目录'",
+  '$dialog.ShowNewFolderButton = $false',
+  'if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+  '$owner.Dispose()',
+  '$dialog.Dispose()',
+].join('; ')
+
+/** Prompts for a local source folder using the host OS native dialog. */
+export async function pickSourceFolder(
+  platform: NodeJS.Platform = process.platform,
+  exec: ExecFileFn = execFileAsync,
+): Promise<PickSourceFolderResult> {
+  if (platform === 'darwin') {
+    try {
+      const { stdout } = await exec(
+        'osascript',
+        ['-e', 'POSIX path of (choose folder with prompt "选择应用源码目录")'],
+        { timeout: 120_000 },
+      )
+      const path = stdout.trim().replace(/\/+$/, '') || '/'
+      return { path }
+    } catch {
+      return { cancelled: true }
+    }
+  }
+  if (platform === 'win32') {
+    try {
+      const { stdout } = await exec(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-STA', '-Command', WIN32_FOLDER_PICKER_SCRIPT],
+        { timeout: 120_000, windowsHide: true },
+      )
+      const path = stdout.trim()
+      return path ? { path } : { cancelled: true }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { cancelled: true, unsupported: true }
+      return { cancelled: true }
+    }
+  }
+  return { cancelled: true, unsupported: true }
+}
+
 declare module '@deepseek-ai/cordis' { interface Context { opc: OpcRemoteService } }
 
 /** Business documents are JSON strings on the wire; credentials never enter this service. */
@@ -63,14 +118,7 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appPickSourceFolder(expectedContextId: string): Promise<string> {
     this.core.auth.contexts.captureApplication(expectedContextId)
-    if (process.platform !== 'darwin') return JSON.stringify({ cancelled: true, unsupported: true })
-    try {
-      const { stdout } = await execFileAsync('osascript', ['-e', 'POSIX path of (choose folder with prompt "选择应用源码目录")'], { timeout: 120_000 })
-      const path = stdout.trim().replace(/\/+$/, '') || '/'
-      return JSON.stringify({ path })
-    } catch {
-      return JSON.stringify({ cancelled: true })
-    }
+    return JSON.stringify(await pickSourceFolder())
   }
   @Remote
   async appModels(expectedContextId: string): Promise<string> {
