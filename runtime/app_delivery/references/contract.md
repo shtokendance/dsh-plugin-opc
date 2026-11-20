@@ -52,6 +52,7 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
 - 每个 API 必须含 purpose、源码 evidence、实际 parameters/request_body/responses、auth、effect。request_body 为 null 或包含 required、description、schema 的对象；完整 schema 与错误说明应保留，工具不声称完整实现 JSON Schema 验证。API 错误可能包含 HTTP 200 下的业务错误码，业务流程必须明确成功判断，不把 HTTP 成功等同业务成功。
 - auth.type 为 none、bearer 或 header；非 none 必须声明 env 环境变量名或引用 auth_profiles 中的 profile，header 还要提供 header。原始账号密码不要填入契约，由打包器写进生成应用技能的 `SKILL.md`。其他密钥和令牌沿用运行时引用。
 - 直接在 API 或页面上声明认证时，用 `auth.evidence` 引用登录、会话或权限代码。共用中间件的证据写在 `auth_rules[].evidence`。每条证据使用读取工具返回的相对路径与实际行号，修改过的文件以拟交付版本为准。
+- 共用鉴权写一条前缀规则，例如 `{"target":"api","prefix":"/api/","auth":{"type":"header","header":"Cookie","profile":"account"},"evidence":["server.mjs:42"]}`。公开登录入口用精确的 `path`、`method` 和 `auth.type: none` 声明例外。
 - 账号密码换会话可用 `auth_profiles.account = {"login_url":"/api/session","login_method":"POST","username_env":"APP_USER","password_env":"APP_PASSWORD"}`。调用器向同源地址发送 JSON。非默认字段用 `login_body_template`，例如 `{"email":"${username}","secret":"${password}"}`。登录返回 `Set-Cookie` 时，受保护 API 声明 `{"type":"header","header":"Cookie","profile":"account"}`。返回 Token 时按实际响应声明 `token_json_path` 及接口要求的 Bearer 或请求头。凭据引用用于业务验证，无需加入容器配置。表单、重定向和 SSO 流程需要浏览器或专用调用方式。
 - `admin_account` 声明 `profile`、`mode` 和 `evidence`。`profile` 对应原应用的登录接口，`login_method` 填 `POST` 等 HTTP 动词。管理员接口及验证用例要使用这一个 profile。
 - `mode: existing` 复用已有管理员。确认有可用明文时，填写 `source: {"username":{"path":"admin.json","keys":["username"]},"password":{"path":"admin.json","keys":["password"]}}`。明确的源码字符串常量可用 `{path,line,name}`，SQLite 明文字段可用 `{path,table,column,where}` 引用。`where` 是用于唯一标识记录的字段与值。只能定位到哈希、密文或远端账号记录时，省略 `source`，OPC 会在 AI 改造会话提示按 `账号：…` 和 `密码：…` 两行回复已有可登录的账密。
@@ -59,7 +60,7 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
 - 非只读 effect 必须 confirmation_required:true。不能仅按 HTTP 方法判断，POST 搜索也可以明确标为 read；GET 也可能需要确认。
 - pages 每项含 path、purpose、evidence、actions；无页面就填空数组，浏览器操作需要调用方提供浏览器工具。
 - 0.2.0 内置调用器只处理普通 HTTP/JSON 与标量 path/query/header 参数；参数名必须唯一。multipart 上传、二进制下载、流式/WebSocket、同名不同位置的参数及复杂数组参数编码需单独脚本并验证；先报告限制，请用户决定是否扩展，不能默默丢弃 API 或宣称已可调用。
-- verification.cases 是已核实无副作用的业务探针，包含 operation、params、可选 body、预期 status 和 json_contains。测试数据只能来自明确的测试环境，不擅自生成真实业务记录。
+- verification.cases 是已核实无副作用的业务探针，包含 operation、params、可选 body、预期 status 和非空 json_contains。一个代表性用例即可。有受保护的只读业务接口时选其中一个验证实际鉴权，保留各接口原有角色限制。已有健康入口可用可选 health.path 标识。测试数据只能来自明确的测试环境，不擅自生成真实业务记录。
 - json_contains 对象按字段递归匹配；非空期望数组逐项匹配实际数组中的记录，顺序可不同；空期望只匹配空数组。空结果、不同条数或错误类型不能通过。多行顺序不稳定时先用获准条件过滤唯一测试记录，或提供专用验证。
 - verification.browser_cases 是页面操作验证计划，例如 `[{"page":"/orders","steps":["输入查询条件","执行只读搜索"],"expected":"显示符合条件的真实订单"}]`。page 必须在 pages 中；该计划不是执行证据。没有 API 探针时必须填写浏览器计划。
 

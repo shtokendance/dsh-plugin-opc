@@ -18,7 +18,7 @@ declare module '@deepseek-ai/dsh-llm' {
 
 const ANALYSIS_TIMEOUT_MS = 15 * 60_000
 const REPLY_TIMEOUT_MS = 30 * 60_000
-const MAX_VALIDATION_ERRORS = 10
+const MAX_VALIDATION_ERRORS = 3
 
 function loadBundledSkillText(relativePath: string): string {
   const fromSrc = fileURLToPath(new URL(`../../runtime/app_delivery/${relativePath}`, import.meta.url))
@@ -105,7 +105,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       : `容器端口策略：优先识别并沿用应用自身默认监听端口（从源码、现有 Dockerfile 或真实配置文件核实）；若应用无默认端口（或依赖外部注入 PORT 且无兜底值），则使用 OPC 默认端口 ${port}。${job.upgrade ? `本次为升级部署，如新版未变更端口优先沿用线上当前端口 ${port}。` : ''}容器内必须监听 0.0.0.0（禁止监听 127.0.0.1），且契约 configs 中的 PORT 必须与 runtime.port 一致，不要引用 *.example 示例文件中冲突的 PORT 或占位密钥。`
     const instructions = `${skill}\n${portInstructions}${repairInstructions}`
     const prevPlan = compactPreviousPlan(job.proposal)
-    const taskInstruction = '按四步完成本次应用改造。' + (isRepair
+    const taskInstruction = '按三步完成本次应用改造。' + (isRepair
       ? '先用失败制品核实根因。'
       : (prevPlan && feedback.trim()) ? '结合用户补充复核上一版方案。' : '')
 
@@ -155,7 +155,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             rejectedProposals.clear()
             repeatedProposal = false
             replyCount++
-            messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
+            if (safeText) messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
             wakeReply?.()
           }
           return messages.length ? { ...decision, messages } : { kind: 'reject' }
@@ -194,7 +194,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             }
             return JSON.stringify(await worker({ ...args, root, revision: job.failedRevision || job.revision }, abort))
           } }))
-        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存根目录 Dockerfile 或现有应用代码的必要改动。禁止新增或改写 ENV 环境变量默认值，禁止新增健康检查接口。原配置由用户维护。暂存文件在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
+        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存根目录 Dockerfile 的必要改动。应用源码和配置由用户维护。暂存文件在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
           parameters: {
             id: { type: 'string', required: true },
             path: { type: 'string', required: true },
@@ -207,7 +207,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
             job.events.push(formatToolStep('propose_file', args.path))
             delivery.core.emit('change')
-            const res = await worker({ action: 'propose_file', root, ...args }, abort)
+            const res = await worker({ action: 'propose_file', root, ...args, dockerfile_only: true }, abort)
             return JSON.stringify(res)
           } }))
         child.tools.register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
@@ -225,10 +225,11 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               if (candidate && typeof candidate.contract === 'object' && candidate.contract !== null) {
                 candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
               }
-              await delivery.submit(job, root, candidate!, abort)
+              await delivery.submit(job, root, candidate!, abort, { dockerfileOnly: true })
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error)
               const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 2000) }, abort)
+              const duplicateError = validationErrors.includes(detail)
               validationErrors.push(detail)
               job.analysisFailure = detail
               if (candidate) {
@@ -246,7 +247,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
                 }
                 rejectedProposals.add(rej)
               }
-              job.events.push(`提案校验未通过：${detail}`)
+              if (!duplicateError) job.events.push(`提案校验未通过：${detail}`)
               delivery.core.emit('change')
               if (validationErrors.length === MAX_VALIDATION_ERRORS) cancel()
               throw new Error(detail)
@@ -254,7 +255,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             const questions = analysisQuestions(job.proposal)
             return questions.length
               ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
-              : '完整方案已通过校验。请简要说明结果并结束本轮，OPC 将自动生成交付包。'
+              : '方案通过。只用几句话说明端口、必要改造和技能范围，然后结束本轮。OPC 将自动生成交付包。'
           } }))
       },
     }
@@ -409,6 +410,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             signal.throwIfAborted()
             if (abort.aborted && replyCount === repliesBeforeTurn) return
             abort.throwIfAborted()
+            if (job.status === 'review' && !analysisQuestions(job.proposal).length) return
             setDeadline(ANALYSIS_TIMEOUT_MS)
           } else {
             abort.throwIfAborted()
@@ -456,7 +458,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           : networkError ? `🔄 AI 服务暂时中断，正在继续准备（${attempt + 1}/2）`
           : `🔄 正在修正应用准备检查（${attempt + 1}/2）`)
         delivery.core.emit('change')
-        prompt = `修正校验反馈后按技能要求重提方案：${reason}`
+        prompt = `复用已确认的信息，只修正以下反馈涉及的字段后提交。需要补证据时只重读对应位置：${reason}`
       }
     } finally {
       sessionReady.resolve(false)

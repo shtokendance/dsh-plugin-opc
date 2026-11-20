@@ -251,6 +251,12 @@ function deploymentProgress(job: AppDeliveryJob) {
   return { label: '正在构建部署…', tone: 'warn' }
 }
 
+function blockedByPreviousBuild(job: AppDeliveryJob) {
+  const deploymentError = (job.error ?? '').split('; previous version recovery failed:', 1)[0]
+  return job.failureStage === 'deployment' && /1108/.test(deploymentError) &&
+    /Build in-progress for /i.test(deploymentError)
+}
+
 const isDeploymentInProgress = (status?: string) =>
   status === 'publishing' || status === 'building' || status === 'verifying' || status === 'unknown'
 
@@ -1147,6 +1153,22 @@ export function AppsPanel({
         })
     } catch (error) {
       setWizardError(readErrorMessage(error, '进入修复流程失败'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleRetryDeployment = async () => {
+    if (!wizardJob) return
+    setWizardBusy(true)
+    setWizardError(null)
+    try {
+      const raw = await api.appReopenDeployment(wizardJob.id, contextId)
+      const reopened = parseJson<AppDeliveryJob | null>(raw, null)
+      if (!reopened) throw new Error('无法恢复原交付包')
+      await resumeWizardJob(reopened, 3)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '恢复原交付包失败'))
     } finally {
       setWizardBusy(false)
     }
@@ -2192,7 +2214,9 @@ export function AppsPanel({
                   <>
                     <div className="oa-alert oa-alert-danger" role="alert">
                       <AppIcon name="warning" size={16} />
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{wizardJob.error || '平台未返回具体失败原因。'}</div>
+                      <div style={{ whiteSpace: 'pre-wrap' }}>{blockedByPreviousBuild(wizardJob)
+                        ? '服务器上一轮构建还在进行。等构建结束后，可核对并重新发布原交付包。'
+                        : wizardJob.error || '平台未返回具体失败原因。'}</div>
                     </div>
                     {api.appLogs && (
                       <DeploymentLogs
@@ -2206,9 +2230,15 @@ export function AppsPanel({
                       />
                     )}
                     <div>
-                      <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>
-                        让 AI 分析修复问题
-                      </button>
+                      {blockedByPreviousBuild(wizardJob) ? (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>
+                          核对并重新部署
+                        </button>
+                      ) : (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>
+                          让 AI 分析修复问题
+                        </button>
+                      )}
                     </div>
                   </>
                 )}

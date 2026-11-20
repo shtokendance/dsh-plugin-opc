@@ -69,7 +69,17 @@ test('analysis replies preserve the bound task and only a complete proposal is b
       await delivery.submit(job, root, { ...blocked, contract: { ...blocked.contract, unresolved: [question] } }, signal)
       await allowReply.promise
       await delivery.recordAnalysisReply(job, root, '保留现在使用的数据源。\nPASSWORD="chat-test-secret"', signal)
-      await delivery.submit(job, root, proposal(url), signal)
+      const submitted = proposal(url)
+      await assert.rejects(
+        delivery.submit(job, root, { ...submitted, changes: [{
+          path: 'main.py', reason: '替换原业务', content: 'print("replacement")\n',
+        }] }, signal, { dockerfileOnly: true }),
+        /只能修改根目录 Dockerfile/,
+      )
+      await delivery.submit(job, root, submitted, signal, { dockerfileOnly: true })
+      const revisions = (await readdir(root)).filter(name => /^[a-f0-9]{32}$/.test(name))
+      assert.equal(revisions.length, 1)
+      assert.ok(await stat(join(root, revisions[0], 'bundle', 'app.tar')))
     }
     await delivery.startAnalysis(created.id, '', expected)
     const waiting = await waitFor(job => job.status === 'review')
@@ -1562,7 +1572,11 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
     assert.equal(createdSessions.length, 1)
     assert.notEqual(createdSessions[0], 'disposed-session-1')
     assert.ok(injectedNotices.some(s => s.includes('等待确认的问题：管理员账号如何创建？')))
-    assert.match(deliveryInstructions, /## 1\. 读懂应用[\s\S]*## 2\. 决定并实施改造[\s\S]*## 3\. 生成应用技能/)
+    assert.deepEqual(deliveryInstructions.match(/^## \d+\..+$/gm), [
+      '## 1. 获取应用信息',
+      '## 2. 做部署所需的改造',
+      '## 3. 生成技能并提交',
+    ])
     assert.match(deliveryInstructions, /运维.*迁移/)
     assert.doesNotMatch(deliveryInstructions, /python3 scripts\/delivery\.py smoke/)
     assert.deepEqual(deliveryContext?.available_resource_metadata, [{

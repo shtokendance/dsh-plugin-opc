@@ -60,7 +60,19 @@ def resolve_authentication(contract):
                 if any(rank(r) == rank(best) and r.get('auth') != best.get('auth') for r in ranked[1:]):
                     errors.append('存在互相冲突的认证规则：' + item['path'])
                     continue
-                item['auth'] = {**copy.deepcopy(best.get('auth', {})), 'evidence': best['evidence']}
+                auth = copy.deepcopy(best['auth'])
+                explicit = item.get('auth') or {}
+                # A shared guard describes the transport. Keep a route's explicit
+                # login reference when that guard uses the same transport and has
+                # not selected credentials of its own.
+                if (best.get('prefix') and auth['type'] in {'header', 'bearer'}
+                        and explicit.get('type') == auth['type']
+                        and str(explicit.get('header', '')).lower() == str(auth.get('header', '')).lower()):
+                    if not (auth.get('profile') or auth.get('env')):
+                        auth.update({key: explicit[key] for key in ('profile', 'env') if explicit.get(key)})
+                    if 'roles' in explicit and 'roles' not in auth:
+                        auth['roles'] = explicit['roles']
+                item['auth'] = {**auth, 'evidence': best['evidence']}
             auth = item.get('auth', {'type': 'unknown'})
             if auth.get('type') == 'unknown':
                 evidence = item.get('evidence')
@@ -184,16 +196,15 @@ def validate_auth_questions(proposal):
 
 
 def validate_auth_probe_coverage(contract):
-    """New auth plans must exercise every protected API identity with a read-only case."""
+    """Exercise a protected business read when the application has one."""
     if not contract.get('auth_rules') and not contract.get('auth_profiles'):
         return  # Existing packaged skills keep their original verification contract.
-    def identity(api):
-        auth = api.get('auth', {})
-        return (auth.get('profile', 'default'), auth.get('type'), auth.get('header', ''), auth.get('env', ''), tuple(auth.get('roles', [])))
-    protected = [a for a in contract.get('apis', []) if a.get('auth', {}).get('type') in {'header', 'bearer'}]
-    operations = {c.get('operation') for c in contract.get('verification', {}).get('cases', [])}
-    covered = {identity(a) for a in protected if a.get('id') in operations and a.get('effect') == 'read'
-               and a.get('path') != contract.get('health', {}).get('path')}
-    missing = {identity(a) for a in protected} - covered
-    if missing:
-        raise ValueError('认证验证计划不完整：每种认证身份/权限范围需要只读业务用例；不能用公开健康接口代替。请自动补齐验证计划。')
+    health_path = (contract.get('health') or {}).get('path')
+    protected_reads = [api for api in contract.get('apis', [])
+                       if api.get('auth', {}).get('type') in {'header', 'bearer'}
+                       and api.get('effect') == 'read' and api.get('path') != health_path]
+    operations = {case.get('operation') for case in contract.get('verification', {}).get('cases', [])
+                  if case.get('json_contains')}
+    if protected_reads and not any(api['id'] in operations for api in protected_reads):
+        examples = '、'.join(f"{api['id']}（{api['method']} {api['path']}）" for api in protected_reads[:3])
+        raise ValueError(f'请在 verification.cases 中选择一个受保护的只读业务接口，填写可核实的响应字段。可选：{examples}。')

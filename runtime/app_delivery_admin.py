@@ -131,7 +131,9 @@ def validate_account_plan(source, contract, reuse_source_admin=False):
                    and profile["username_env"] != profile["password_env"]),
               "管理员账密必须绑定已有登录方式。请在 auth_profiles 的对应对象内直接声明 login_url、username_env、password_env。")
     routes = [*contract.get("apis", []), *contract.get("pages", [])]
-    d.require(any(item.get("auth", {}).get("profile") == plan["profile"] for item in routes), "请将管理员登录方式绑定到实际受保护的接口或页面")
+    d.require(any(item.get("auth", {}).get("profile") == profile_id
+                  and item["auth"].get("type") in {"header", "bearer"} for item in routes),
+              f"没有受保护的接口或页面引用登录方式 {profile_id}。请在真实鉴权路由的 auth 或匹配的 auth_rules[].auth 中填写 profile；公开登录入口不计。")
     if plan.get("mode") == "existing":
         d.require("storage" not in plan, "使用已有管理员时不修改账号存储")
         if "source" in plan:
