@@ -1988,7 +1988,6 @@ export function AppsPanel({
                     originals={originalConfigs}
                     resources={resources}
                     lockedPort={wizardJob.port ?? opcConfig.defaultPort}
-                    onReturnToPortStep={() => void handleReturnToReview()}
                     onChange={handleStep3ConfigsChange}
                   />
 

@@ -49,10 +49,10 @@ export function proposalParameters(port: number, portLocked = true) {
         page_auth_required: bool, api_auth_required: bool, username_env: str, password_env: str,
         token_env: str, login_url: str, login_method: str, token_json_path: str,
       } },
-      auth_profiles: { ...object, description: '按 ID 保存登录方式，接口通过 auth.profile 引用' },
+      auth_profiles: { ...object, description: '按 ID 保存登录方式。例：{"account":{"login_url":"/api/session","login_method":"POST","username_env":"APP_USER","password_env":"APP_PASSWORD"}}。profile ID 只出现一层，接口通过 auth.profile 引用。' },
       admin_account: { ...object, description: '按应用源码证据选择 existing 或 create。仅描述账号来源或写入位置，不提交实际账密。', properties: {
         mode: { ...text, enum: ['existing', 'create'] }, profile: text, evidence: strings,
-        source: { ...object, description: '已有可复用明文的 {username,password} 引用：结构化配置 {path,keys}、源码常量/对象属性/默认值/哈希函数字符串字面量参数 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。缺任何一项则省略 source。' },
+        source: { ...object, description: '为已有可复用账密提供 {username,password} 引用：结构化配置 {path,keys}、源码 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。源码 name 填字段名（如 username、passwordHash），line 填定义该字段的行号，禁止填真实密码。只有源码和真实配置均缺少可复用账密时才省略 source。' },
         storage: { ...object, description: '首次建号仅在交付副本中写入应用真正读取的 SQLite 或 JSON/YAML 文件，具体结构见 references/contract.md。' },
       } },
       auth_rules: { ...objects, description: '每条规则须二选一填写 path 或 prefix；evidence 是规则顶层必填数组（与 auth 平级，不要放在 auth 内部）；同权限页面可用 target="page" 且 prefix="/" 统一覆盖', items: { ...object, properties: {

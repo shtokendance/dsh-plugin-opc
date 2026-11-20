@@ -1101,6 +1101,7 @@ export class AppDelivery {
       root,
       proposal,
       allow_unresolved: hasQuestions || adminAccountPending,
+      reuse_source_admin: !job.upgrade && !job.published && !adminReply && !canReusePrevious,
       admin_reply: adminReply,
       previous_skill_markdown: canReusePrevious ? job.skillMarkdown : undefined,
       repair: Boolean(job.failedRevision),
@@ -1116,7 +1117,7 @@ export class AppDelivery {
     if (job.portAuto && Number.isInteger(validatedPort) && validatedPort >= 1 && validatedPort <= 65535) {
       job.port = validatedPort
     }
-    if (adminAccountPending) job.proposal!.adminAccountPending = true
+    if (adminAccountPending && !job.proposal!.contract.admin_account?.source) job.proposal!.adminAccountPending = true
     else delete job.proposal!.adminAccountPending
     job.discoveryReport = validated?.discovery_report ?? job.discoveryReport
     job.transformationReport = validated?.transformation_report ?? job.transformationReport

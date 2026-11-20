@@ -110,7 +110,7 @@ export function mergeJobConfigs(
       return {
         ...c,
         value: String(effectivePort),
-        original_value: origVal ?? (appDefault || String(effectivePort)),
+        original_value: origVal ?? '',
         app_default: appDefault,
         secret: false,
         has_value: true,
@@ -219,7 +219,7 @@ export function mergeJobConfigs(
   })
 
   for (const extra of rowMap.values()) {
-    if (!extra.key) continue
+    if (!extra.key || extra.key.trim() === 'PORT') continue
     merged.push({
       key: extra.key,
       value: extra.resource_id ? '' : extra.value ?? '',

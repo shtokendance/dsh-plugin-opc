@@ -76,14 +76,60 @@ def original_account_field(source, reference):
     return value
 
 
-def validate_account_plan(source, contract):
+def initial_admin_source(source, evidence):
+    """Find one administrator seed object in the cited original code."""
+    locations = {}
+    for citation in evidence if isinstance(evidence, list) else []:
+        if not isinstance(citation, str):
+            continue
+        match = re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", citation)
+        if match:
+            locations.setdefault(match[1], []).append((int(match[2]), int(match[3] or match[2])))
+    candidates = []
+    for name, spans in locations.items():
+        path = d.relative(source, name)
+        if path.suffix not in {".js", ".mjs", ".cjs", ".ts"} or not path.is_file():
+            continue
+        text = d.text_of(path) or ""
+        offset, line_number = 0, 1
+        for obj in re.finditer(r"\{[^{}]*\}", text):
+            lines = obj[0].splitlines()[1:-1]
+            line_number += text.count("\n", offset, obj.start())
+            offset = obj.start()
+            first = line_number + 1
+            if not any(start <= first + len(lines) - 1 and end >= first for start, end in spans):
+                continue
+            if not any(_extract_literal_rhs(line, "role") in ('"admin"', "'admin'") for line in lines):
+                continue
+            refs = {}
+            for kind, fields in (("username", ("username",)), ("password", ("password", "passwordHash"))):
+                matches = [
+                    {"path": name, "line": number, "name": field}
+                    for number, line in enumerate(lines, first)
+                    for field in fields if _extract_literal_rhs(line, field)
+                ]
+                if len(matches) == 1:
+                    refs[kind] = matches[0]
+            if len(refs) == 2 and all(original_account_field(source, ref) for ref in refs.values()):
+                candidates.append(refs)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def validate_account_plan(source, contract, reuse_source_admin=False):
     plan = contract.get("admin_account")
     if plan is None:
         return
     d.require(isinstance(plan, dict) and set(plan) <= {"mode", "profile", "evidence", "source", "storage"}, "管理员方案只能声明位置与格式")
-    profile = contract.get("auth_profiles", {}).get(plan.get("profile", ""))
-    d.require(bool(profile and profile.get("login_url") and profile.get("username_env") and profile.get("password_env")
-                   and profile["username_env"] != profile["password_env"]), "管理员账密必须绑定已有登录方式")
+    profiles = contract.get("auth_profiles", {})
+    profile_id = plan.get("profile", "")
+    profile = profiles.get(profile_id) if isinstance(profiles, dict) and isinstance(profile_id, str) else None
+    login_fields = ("login_url", "username_env", "password_env")
+    if isinstance(profile, dict) and isinstance(profile.get(profile_id), dict) and not any(key in profile for key in login_fields):
+        nested = profile.pop(profile_id)
+        profiles[profile_id] = profile = {**profile, **nested}
+    d.require(bool(isinstance(profile, dict) and all(profile.get(key) for key in login_fields)
+                   and profile["username_env"] != profile["password_env"]),
+              "管理员账密必须绑定已有登录方式。请在 auth_profiles 的对应对象内直接声明 login_url、username_env、password_env。")
     routes = [*contract.get("apis", []), *contract.get("pages", [])]
     d.require(any(item.get("auth", {}).get("profile") == plan["profile"] for item in routes), "请将管理员登录方式绑定到实际受保护的接口或页面")
     if plan.get("mode") == "existing":
@@ -91,7 +137,17 @@ def validate_account_plan(source, contract):
         if "source" in plan:
             references = plan["source"]
             d.require(isinstance(references, dict) and set(references) == {"username", "password"}, "请提供账号和密码的原始位置")
-            d.require(all(original_account_field(source, ref) for ref in references.values()), "原配置没有完整的账密，请从改造会话询问")
+            try:
+                d.require(all(original_account_field(source, ref) for ref in references.values()), "原配置没有完整的账密")
+                return
+            except ValueError:
+                code_refs = all(isinstance(ref, dict) and "line" in ref for ref in references.values())
+                if reuse_source_admin and code_refs and (found := initial_admin_source(source, plan.get("evidence"))):
+                    plan["source"] = found
+                    return
+                raise ValueError("请核对 admin_account.source 引用的准确行号，name 填源码字段名，避免填写字段的值。") from None
+        if reuse_source_admin and (found := initial_admin_source(source, plan.get("evidence"))):
+            plan["source"] = found
         return
     d.require(plan.get("mode") == "create" and "source" not in plan, "管理员方案必须选择 existing 或 create")
     target = plan.get("storage")
