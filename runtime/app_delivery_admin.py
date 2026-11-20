@@ -23,6 +23,32 @@ def sql_name(name):
     return '"' + name + '"'
 
 
+_STRING_LITERAL = r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\''
+_LITERAL_TAIL = r'\s*(?:[,;]\s*)?(?:(?://|#).*)?$'
+_LITERAL_EXTRACTORS = (
+    re.compile(rf"^(?P<lit>{_STRING_LITERAL}){_LITERAL_TAIL}"),
+    re.compile(rf"(?:\|\||\?\?|\bor\b)\s*(?P<lit>{_STRING_LITERAL}){_LITERAL_TAIL}"),
+    re.compile(rf"^[A-Za-z_][A-Za-z0-9_.]*(?:getenv|get)\(\s*(?:{_STRING_LITERAL})\s*,\s*(?P<lit>{_STRING_LITERAL})\s*\){_LITERAL_TAIL}"),
+    re.compile(rf"^[A-Za-z_][A-Za-z0-9_.]*\(\s*(?P<lit>{_STRING_LITERAL})\s*\){_LITERAL_TAIL}"),
+)
+
+
+def _extract_literal_rhs(line, name):
+    escaped = re.escape(name)
+    match = (
+        re.fullmatch(r"\s*(?:export\s+)?(?:(?:const|let|var)\s+)?" + escaped + r"\s*(?::\s*[^=]+)?=\s*(.+?)\s*", line)
+        or re.fullmatch(r"\s*(?:[\"'])?" + escaped + r"(?:[\"'])?\s*:\s*(.+?)\s*", line)
+    )
+    if not match:
+        return None
+    rhs = match[1]
+    for pattern in _LITERAL_EXTRACTORS:
+        lit_match = pattern.search(rhs)
+        if lit_match:
+            return lit_match.group("lit")
+    return None
+
+
 def original_account_field(source, reference):
     if "keys" in reference:
         return original_value(source, reference)
@@ -40,10 +66,10 @@ def original_account_field(source, reference):
     line_number, name = reference.get("line"), reference.get("name")
     lines = (d.text_of(path) or "").splitlines()
     d.require(type(line_number) is int and 1 <= line_number <= len(lines) and isinstance(name, str), "原始账号常量位置无效")
-    match = re.fullmatch(r"\s*(?:(?:const|let|var)\s+)?" + re.escape(name) + r"\s*=\s*(.+?)\s*;?\s*", lines[line_number - 1])
-    d.require(bool(match), "原始账号引用必须指向一个明确的字符串常量")
+    lit = _extract_literal_rhs(lines[line_number - 1], name)
+    d.require(bool(lit), "原始账号引用必须指向一个明确的字符串常量")
     try:
-        value = ast.literal_eval(match[1])
+        value = ast.literal_eval(lit)
     except (ValueError, SyntaxError):
         raise ValueError("原始账号引用必须指向一个明确的字符串常量") from None
     d.require(isinstance(value, str), "原始账号引用必须指向字符串")

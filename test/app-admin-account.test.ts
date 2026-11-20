@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { promisify } from 'node:util'
 import { unzipSync } from 'fflate'
-import { AppDelivery, worker, type AppDocument } from '../src/host/app-delivery.ts'
+import { AppDelivery, readAdminReply, worker, type AppDocument } from '../src/host/app-delivery.ts'
 import { ContextStore } from '../src/host/context.ts'
 import type { OpcCore } from '../src/host/core.ts'
 
@@ -190,5 +190,75 @@ test('the prepared SQLite can start from the application schema and cannot overw
     } }, ['data'])
     const result = await worker({ action: 'bundle', root: other, revision: 'reused', proposal: reused })
     assert.match(result.skill_markdown, new RegExp(password))
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('readAdminReply parses two-line, single-line, and reversed credential messages', () => {
+  const plan = { profile: 'admin', mode: 'existing' }
+  assert.deepEqual(readAdminReply(plan, '账号：admin\n密码：pass with spaces'), {
+    profile: 'admin', mode: 'existing', username: 'admin', password: 'pass with spaces',
+  })
+  assert.deepEqual(readAdminReply(plan, '账号：admin 密码：ChangeMe123!'), {
+    profile: 'admin', mode: 'existing', username: 'admin', password: 'ChangeMe123!',
+  })
+  assert.deepEqual(readAdminReply(plan, '账号: admin，密码: ChangeMe123!'), {
+    profile: 'admin', mode: 'existing', username: 'admin', password: 'ChangeMe123!',
+  })
+  assert.deepEqual(readAdminReply(plan, '密码：ChangeMe123!; 账号：admin\n请继续'), {
+    profile: 'admin', mode: 'existing', username: 'admin', password: 'ChangeMe123!',
+  })
+  assert.equal(readAdminReply(plan, '请继续部署，没有密码'), undefined)
+})
+
+test('existing account source extracts literals from object properties, fallback defaults, and hash wrappers', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-admin-source-'))
+  const url = 'http://127.0.0.1:8080'
+  try {
+    const source = join(home, 'source'), root = join(home, 'job')
+    await mkdir(source); await mkdir(root)
+    await writeFile(join(source, 'main.py'), 'print("fixture")\n')
+    await writeFile(join(source, 'server.mjs'), [
+      'const SEED_ADMIN = {',
+      "  username: 'admin',",
+      "  passwordHash: hashPassword('ChangeMe123!'),",
+      '};',
+      "const ADMIN_PASS = process.env.ADMIN_PASS || 'FallbackPass#1';",
+      'const DYNAMIC_PASS = loadSecret();',
+      '',
+    ].join('\n'))
+    await worker({ action: 'prepare', root, source, url, slug: 'test-admin-app' })
+
+    const propPlan = makeProposal(url, {
+      mode: 'existing',
+      source: {
+        username: { path: 'server.mjs', line: 2, name: 'username' },
+        password: { path: 'server.mjs', line: 3, name: 'passwordHash' },
+      },
+    }, ['server.mjs'])
+    const propResult = await worker({ action: 'bundle', root, revision: 'prop', proposal: propPlan })
+    assert.match(propResult.skill_markdown, /admin/)
+    assert.match(propResult.skill_markdown, /ChangeMe123!/)
+
+    const fallbackPlan = makeProposal(url, {
+      mode: 'existing',
+      source: {
+        username: { path: 'server.mjs', line: 2, name: 'username' },
+        password: { path: 'server.mjs', line: 5, name: 'ADMIN_PASS' },
+      },
+    }, ['server.mjs'])
+    const fallbackResult = await worker({ action: 'bundle', root, revision: 'fallback', proposal: fallbackPlan })
+    assert.match(fallbackResult.skill_markdown, /FallbackPass#1/)
+
+    const dynamicPlan = makeProposal(url, {
+      mode: 'existing',
+      source: {
+        username: { path: 'server.mjs', line: 2, name: 'username' },
+        password: { path: 'server.mjs', line: 6, name: 'DYNAMIC_PASS' },
+      },
+    }, ['server.mjs'])
+    await assert.rejects(
+      worker({ action: 'bundle', root, revision: 'dynamic', proposal: dynamicPlan }),
+      /原始账号引用必须指向一个明确的字符串常量/,
+    )
   } finally { await rm(home, { recursive: true, force: true }) }
 })

@@ -45,7 +45,7 @@ export function proposalParameters(port: number) {
       auth_profiles: { ...object, description: '按 ID 保存登录方式，接口通过 auth.profile 引用' },
       admin_account: { ...object, description: '按应用源码证据选择 existing 或 create。仅描述账号来源或写入位置，不提交实际账密。', properties: {
         mode: { ...text, enum: ['existing', 'create'] }, profile: text, evidence: strings,
-        source: { ...object, description: '已有可复用明文的 {username,password} 引用：结构化配置 {path,keys}、源码常量 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。缺任何一项则省略 source。' },
+        source: { ...object, description: '已有可复用明文的 {username,password} 引用：结构化配置 {path,keys}、源码常量/对象属性/默认值/哈希函数字符串字面量参数 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。缺任何一项则省略 source。' },
         storage: { ...object, description: '首次建号仅在交付副本中写入应用真正读取的 SQLite 或 JSON/YAML 文件，具体结构见 references/contract.md。' },
       } },
       auth_rules: { ...objects, description: '每条规则须二选一填写 path 或 prefix；evidence 是规则顶层必填数组（与 auth 平级，不要放在 auth 内部）；同权限页面可用 target="page" 且 prefix="/" 统一覆盖', items: { ...object, properties: {
