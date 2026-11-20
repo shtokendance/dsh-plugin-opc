@@ -270,17 +270,12 @@ export function WorkbenchHome({ onSelect }: { onSelect: (kind: ModuleKind) => vo
   return (
     <section className="opc-workbench-home" aria-labelledby={heading}>
       <div className="opc-home-intro">
-        <div className="opc-home-intro-head">
-          <div className="opc-home-intro-copy">
-            <div className="opc-home-intro-title-row">
-              <h2 id={heading}>欢迎使用 OPC 企业工作台</h2>
-              {PLUGIN_VERSION && <span className="opc-home-version">v{PLUGIN_VERSION}</span>}
-            </div>
-            <p>在 DeepSeek Harness 中无缝连接企业级能力：查文档、调技能、连业务工具，以及将本地应用源码一键 AI 改造并部署上线。</p>
+        <div className="opc-home-intro-copy">
+          <div className="opc-home-intro-title-row">
+            <h2 id={heading}>欢迎使用 OPC 企业工作台</h2>
+            {PLUGIN_VERSION && <span className="opc-home-version">v{PLUGIN_VERSION}</span>}
           </div>
-          <button type="button" className="opc-home-intro-btn" onClick={() => openGuide('quickstart')}>
-            对话指令速查
-          </button>
+          <p>在 DeepSeek Harness 中无缝连接企业级能力：查文档、调技能、连业务工具，以及将本地应用源码一键 AI 改造并部署上线。</p>
         </div>
       </div>
 
