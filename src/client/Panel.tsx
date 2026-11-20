@@ -830,6 +830,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   const [services, setServices] = useState<Record<string, unknown>[]>([])
   const [appsRefreshTrigger, setAppsRefreshTrigger] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
+  const [knowledgeFilter, setKnowledgeFilter] = useState<'all' | 'owned' | 'shared'>('all')
+  const [includesSharedKnowledge, setIncludesSharedKnowledge] = useState<boolean | null>(null)
+  const knowledgeItems = items.filter(item => {
+    const shared = item.source_tenant_id && item.source_tenant_id !== item.tenant_id
+    return knowledgeFilter === 'all' || (knowledgeFilter === 'shared' ? shared : !shared)
+  })
   const [kbSearchMode, setKbSearchMode] = useState<'doc' | 'kb'>('doc')
   const [docQuery, setDocQuery] = useState('')
   const [hasSearchedDoc, setHasSearchedDoc] = useState(false)
@@ -877,14 +883,20 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
     if (kind === 'mcp') {
       const body = JSON.parse(await api.listMcpServices())
       if (version === epoch.current) setServices(body.data?.services ?? body.services ?? [])
-    } else {
-      const rows = JSON.parse(await (kind === 'skills' ? api.listSkillsCatalog(query) : api.listKnowledgeBases(query)))
+    } else if (kind === 'skills') {
+      const rows = JSON.parse(await api.listSkillsCatalog(query))
       if (version === epoch.current) setItems(rows)
+    } else {
+      const directory = JSON.parse(await api.listKnowledgeBases(query))
+      if (version === epoch.current) {
+        setItems(Array.isArray(directory) ? directory : directory.items)
+        setIncludesSharedKnowledge(directory.includesShared === true)
+      }
     }
   }, [api, kind, q])
 
   useEffect(() => {
-    epoch.current++; setItems([]); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setFilter('all'); setBusy(false); setError('')
+    epoch.current++; setItems([]); setKnowledgeFilter('all'); setIncludesSharedKnowledge(null); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setFilter('all'); setBusy(false); setError('')
     if (state.signedIn) void run(load)
   }, [state.context?.contextId, sessionId, kind])
 
@@ -1062,7 +1074,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               value={kb}
               onChange={e => setKb(e.target.value)}
             >
-              <option value="">当前空间全部知识库</option>
+              <option value="">当前空间全部可用知识库</option>
               {items.map(item => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}
             </select>
             <input
@@ -1121,7 +1133,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         {/* Empty Doc Search Feedback */}
         {hasSearchedDoc && hits.length === 0 && !busy && (
           <div className="notice" style={{ background: '#f8fafc', borderColor: '#94a3b8', color: '#64748b', fontSize: 12, margin: '8px 0' }}>
-            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或在上方选择「当前空间全部知识库」。
+            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或在上方选择「当前空间全部可用知识库」。
           </div>
         )}
 
@@ -1187,7 +1199,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         <div className="kb-section-header">
           <div className="kb-section-title">
             <span>📚 知识库列表</span>
-            <span className="badge">{items.length}</span>
+            <span className="badge">{knowledgeItems.length}</span>
+            {includesSharedKnowledge && <select aria-label="知识库来源" value={knowledgeFilter} onChange={e => setKnowledgeFilter(e.target.value as typeof knowledgeFilter)}>
+              <option value="all">全部可用</option>
+              <option value="owned">本空间</option>
+              <option value="shared">共享给我</option>
+            </select>}
           </div>
           {q ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1199,9 +1216,10 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           )}
         </div>
 
-        {/* Knowledge Base Cards Grid */}
+        {includesSharedKnowledge === false && <div className="notice">当前平台版本仅提供本空间知识库目录。</div>}
+        {items.length > 0 && knowledgeItems.length === 0 && <div className="notice">此来源下没有可用知识库。</div>}
         <div className="cards-grid">
-          {items.map(item => (
+          {knowledgeItems.map(item => (
             <div key={item.knowledge_base_id} className="resource-card">
               <div>
                 <div className="card-header">
@@ -1213,6 +1231,9 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     {item.availability === 'available' ? '已就绪' : '未就绪'}
                   </span>
                 </div>
+                {item.source_tenant_id && item.source_tenant_id !== item.tenant_id && (
+                  <span className="badge">共享自 {item.source_tenant_name ?? item.source_tenant_id}{item.permission === 'viewer' ? ' · 只读' : ''}</span>
+                )}
                 <p className="card-desc">{item.description || '暂无知识库描述'}</p>
               </div>
               <div className="card-actions">

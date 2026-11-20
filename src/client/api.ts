@@ -281,4 +281,4 @@ export interface AuthState {
   opcConfig?: { platformBaseUrl: string; appDomainRoot: string; rawAppDomainRoot?: string; defaultPort: number }
   context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; applicationContextId?: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
 }
-export interface Resource { name: string; description?: string; tenant_id: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }
+export interface Resource { name: string; description?: string; tenant_id: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }
