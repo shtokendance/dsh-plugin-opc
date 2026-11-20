@@ -46,8 +46,8 @@ Work 自动技术准备记录 `kind: ai-technical`、`scope: deployment-adaptati
 
 - URL 由用户在分析前确定，与 prepare 输入严格一致；不含凭据、路径前缀、query 或 fragment。内网 HTTP/HTTPS 按目标环境选择，不绑定 Cloudflare。
 - build_context 是应用文件/目录白名单，包含真实锁文件、构建与运行资产，以及应用需要的原配置（包括 `.env`）、JSON、SQLite、账户与业务数据。由本机原样复制，不因含凭据而拒绝；不含 VCS、无关原 ZIP 或分析报告。业务技能内的管理员账密按 `admin_account` 规则由打包器写入。业务数据和其他秘密保留在原存储或运行时配置中，模型输出只引用位置。
-- `configs` 只声明确有需要的原应用配置，键必须能在导入源码中找到。文件配置通过 `source: {"path":"config.yaml","keys":["service","url"]}` 引用原值；沿用原配置及读取方式。容器端口来自已确认的 `runtime.port`。
-- `secret` 和 `required` 为布尔值，`key` 唯一，`default` 留空。常见凭据字段（如 API_KEY、PASSWORD、TOKEN、DSN）标为秘密。缺值时请用户在原应用维护。
+- `configs` 只声明确有需要的原应用配置，键必须能在导入源码中找到。文件配置通过 `source: {"path":"config.yaml","keys":["service","url"]}` 引用原值；沿用原配置及读取方式；`*.example` / `*.sample` / `*.template` 仅作模板参考，勿绑定与 `runtime.port` 冲突的 `PORT` 或占位密钥。容器端口 `runtime.port` 优先沿用应用默认端口，无默认端口时使用 OPC 默认端口。
+- `secret` 和 `required` 为布尔值，`key` 唯一，`default` 留空；非敏感源码兜底默认值可填写在 `app_default` 供第 3 步参考展示（不自动注入）。常见凭据字段（如 API_KEY、PASSWORD、TOKEN、DSN）标为秘密。第 3 步允许用户在发布前核对或修改运行时环境变量。
 - 最终 `apis` / `pages` 收录应用实际部署的接口、页面与业务视图，至少一个数组非空。DSH 提交时可用 `[]` 或只补充、覆盖扫描项，插件合并完整清单。纯页面应用填写浏览器验证计划。
 - 每个 API 必须含 purpose、源码 evidence、实际 parameters/request_body/responses、auth、effect。request_body 为 null 或包含 required、description、schema 的对象；完整 schema 与错误说明应保留，工具不声称完整实现 JSON Schema 验证。API 错误可能包含 HTTP 200 下的业务错误码，业务流程必须明确成功判断，不把 HTTP 成功等同业务成功。
 - auth.type 为 none、bearer 或 header；非 none 必须声明 env 环境变量名或引用 auth_profiles 中的 profile，header 还要提供 header。原始账号密码不要填入契约，由打包器写进生成应用技能的 `SKILL.md`。其他密钥和令牌沿用运行时引用。

@@ -40,6 +40,19 @@ def _fingerprint(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+SENSITIVE_KEY_RE = re.compile(r"password|passwd|secret|token|credential|api.?key|private.?key|dsn|connection.?string", re.I)
+PLACEHOLDER_VALUE_RE = re.compile(r"(?i)^(?:<[^>]+>|\$\{[^}]+\}|your[-_\s].*|changeme|replace[-_\s]?me|example[-_\s]?.*|dummy[-_\s]?.*|todo[-_\s]?.*|xxx+|placeholder)$")
+
+
+def is_example_config_path(rel_path: str) -> bool:
+    name = Path(rel_path).name.lower()
+    stem = Path(rel_path).stem.lower()
+    return bool(
+        re.search(r"(?:^|[._-])(?:example|sample|template)$", name)
+        or re.search(r"(?:^|[._-])(?:example|sample|template)$", stem)
+    )
+
+
 def redact(text: str, name: str = "") -> str:
     hidden = set(d.secret_lines(text, name))
     config = Path(name).suffix.lower() in {".yaml", ".yml", ".ini", ".toml", ".properties"} or Path(name).name.startswith(".env")
@@ -194,8 +207,13 @@ def resolve_and_enrich_proposal(
     discovery_report = None
     transformation_report = None
     contract = proposal.get("contract")
-    if expected_port is not None and not (proposal.get("unresolved") or contract.get("unresolved")) and contract.get("runtime", {}).get("port") != expected_port:
-        raise ValueError("模型不能静默改变用户选择的容器端口")
+    if not (proposal.get("unresolved") or (isinstance(contract, dict) and contract.get("unresolved"))):
+        runtime = contract.get("runtime") if isinstance(contract, dict) else None
+        runtime_port = runtime.get("port") if isinstance(runtime, dict) else None
+        if type(runtime_port) is not int or not (1 <= runtime_port <= 65535):
+            raise ValueError("交付契约 runtime.port 必须是 1 至 65535 的整数")
+        if expected_port is not None and runtime_port != expected_port:
+            raise ValueError("模型不能静默改变用户选择的容器端口")
     if isinstance(contract, dict) and source.is_dir():
         job_meta = {
             "slug": contract.get("slug", ""),
@@ -249,6 +267,15 @@ def resolve_and_enrich_proposal(
                     errors.append("配置必须声明 secret、required 和字符串默认值")
                 elif config["secret"] and config.get("default"):
                     errors.append(f"秘密配置 {config['key']} 不能包含默认值。原值仅通过 source 引用。")
+                if "app_default" in config and config["app_default"] is not None:
+                    if not isinstance(config["app_default"], str):
+                        errors.append("配置项 app_default 必须是字符串")
+                    elif config["app_default"] and (
+                        config.get("secret") is True
+                        or SENSITIVE_KEY_RE.search(config["key"])
+                        or d.secret_lines(f"{config['key']}={config['app_default']}", ".env")
+                    ):
+                        errors.append(f"敏感配置 {config['key']} 不能填写 app_default")
                 if config.get("source") is not None:
                     try:
                         original_value(source, config["source"])
@@ -357,6 +384,17 @@ def extract_original_config_values(source: Path, configs: list[dict]) -> tuple[d
         if isinstance(cfg, dict) and cfg.get("source"):
             try:
                 val = original_value(source, cfg["source"])
+                src_path = str(cfg["source"].get("path", ""))
+                if is_example_config_path(src_path):
+                    if cfg.get("key") == "PORT":
+                        continue
+                    if (
+                        cfg.get("secret")
+                        or SENSITIVE_KEY_RE.search(str(cfg.get("key", "")))
+                        or PLACEHOLDER_VALUE_RE.match(val.strip())
+                        or d.secret_lines(f"{cfg.get('key')}={val}", src_path)
+                    ):
+                        continue
                 if val:
                     values[cfg["key"]] = val
                     has_original_keys.append(cfg["key"])
@@ -487,11 +525,14 @@ def source_configuration(root: Path, origins=None) -> dict:
                             continue
                     except ValueError:
                         continue
-                sensitive = re.search(r"password|passwd|secret|token|credential|api.?key|private.?key|dsn|connection.?string", key, re.I)
+                sensitive = SENSITIVE_KEY_RE.search(key)
                 if value and (sensitive or d.secret_lines(json.dumps(key) + ": " + json.dumps(value), name)):
                     value = "[REDACTED]"
                 fields.append({"key": key, "value": value})
-            files.append({"path": name, "fields": fields})
+            entry = {"path": name, "fields": fields}
+            if is_example_config_path(name):
+                entry["is_example"] = True
+            files.append(entry)
         if suffix in ENV_REFERENCE_SUFFIXES or path.name == "Dockerfile":
             references.update(environment_references(path, source_text(path) or ""))
     return {"files": files, "references": sorted(references - generated_keys)}
@@ -505,6 +546,7 @@ def validate_config_origins(root: Path, contract: dict):
     origins = historical_config_origins(root, source)
     generated_keys, _ = origins
     references = set(source_configuration(root, origins)["references"])
+    runtime_port = (contract.get("runtime") or {}).get("port") if isinstance(contract.get("runtime"), dict) else None
     errors = []
     for config in configs:
         key = config["key"]
@@ -514,11 +556,16 @@ def validate_config_origins(root: Path, contract: dict):
         original_key = False
         if ref is not None:
             try:
-                original_value(source, ref)
+                val = original_value(source, ref)
                 original_key = ref["keys"][-1] == key
             except ValueError as exc:
                 errors.append(str(exc))
                 continue
+            if key == "PORT" and type(runtime_port) is int and val.strip() and val.strip() != str(runtime_port):
+                errors.append(
+                    f"配置项 PORT 引用的 {ref['path']} 值为 {val.strip()}，与契约容器端口 {runtime_port} 不一致。"
+                    "请优先将 runtime.port 改为应用实际默认端口，或移除示例文件对 PORT 的 source 引用"
+                )
         if key in generated_keys or not (original_key or key in references):
             errors.append("原应用没有可核实的配置键：" + key)
     if errors:
@@ -597,7 +644,11 @@ def main(body):
                 cfg = source_configuration(root)
                 result["source_configuration"] = {
                     "config_files": [
-                        {"path": f["path"], "keys": [field["key"] for field in f.get("fields", [])]}
+                        {
+                            "path": f["path"],
+                            "keys": [field["key"] for field in f.get("fields", [])],
+                            **({"is_example": True} if f.get("is_example") else {}),
+                        }
                         for f in cfg.get("files", [])
                     ],
                     "env_references": cfg.get("references", []),

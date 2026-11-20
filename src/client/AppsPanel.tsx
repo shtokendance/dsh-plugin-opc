@@ -11,7 +11,14 @@ import type {
   ResourceSummary,
 } from './api.ts'
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
-import { AppDeliveryConfig, needsConnectionDecision } from './AppDeliveryConfig.tsx'
+import {
+  mergeJobConfigs,
+  sanitizeConfigRowsForApi,
+  validateConfigsForPublish,
+  type ConfigDraftSnapshot,
+  type SourceConfiguration,
+} from './app-config-helpers.ts'
+import { AppDeliveryConfig } from './AppDeliveryConfig.tsx'
 import { AppDeliveryReview } from './AppDeliveryReview.tsx'
 import type { PrepareAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { AppIcon } from './AppIcon.tsx'
@@ -29,17 +36,6 @@ interface OpcRuntimeConfig {
   appDomainRoot: string
   defaultPort: number
   platformBaseUrl: string
-}
-
-interface SourceConfiguration {
-  files: { path: string; fields: { key: string; value: string }[] }[]
-  references: string[]
-}
-
-interface ConfigDraftSnapshot {
-  versionNote?: string
-  storageBindings?: Record<string, string>
-  sourceConfiguration: SourceConfiguration
 }
 
 const SLUG_RE = /^[a-z][a-z0-9-]{2,39}$/
@@ -351,54 +347,6 @@ function inferStepForJob(job: AppDeliveryJob): WizardStep {
   }
 }
 
-function sanitizeConfigRowsForApi(configs: AppConfigItem[]): Array<{
-  key: string
-  value: string
-  resource_id?: string
-  has_value?: boolean
-  local_connection_confirmed?: boolean
-}> {
-  return configs
-    .map(c => ({
-      key: (c.key || '').trim(),
-      value: c.resource_id ? '' : (c.value ?? ''),
-      resource_id: c.resource_id || undefined,
-      has_value: !c.resource_id && !(c.value ?? '') && c.has_value === true ? true : undefined,
-      local_connection_confirmed: c.local_connection_confirmed === true ? true : undefined,
-    }))
-    .filter(c => c.key.length > 0)
-}
-
-function missingSourceConfig(job: AppDeliveryJob): string | null {
-  const missing = (job.runtime_configs ?? []).find(config =>
-    config.required && config.key !== 'PORT' && config.value_source !== 'original')
-  return missing
-    ? `交付包要求配置 ${missing.key}。请在应用源码中确认配置后重新导入，或返回上一步调整改造方案。`
-    : null
-}
-
-function validateConfigsForPublish(configs: AppConfigItem[], expectedPort?: number): string | null {
-  const seen = new Set<string>()
-  for (const item of configs) {
-    const key = (item.key || '').trim()
-    if (!key) return '存在未填写变量名的配置项，请填写或删除空白行'
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return `配置变量名格式无效：${key}`
-    if (seen.has(key)) return `存在重复的配置变量名：${key}`
-    seen.add(key)
-
-    if (key === 'PORT' && (item.resource_id || (item.value && expectedPort && item.value !== String(expectedPort)))) {
-      return `PORT 必须与已确认的容器端口（${expectedPort}）一致，如需修改请返回上一步调整`
-    }
-    if (!item.resource_id && needsConnectionDecision(item)) {
-      return `配置项 ${key} 当前指向本地回环地址（localhost / 127.0.0.1），请选用平台托管资源、填写可达主机地址，或明确勾选确认同容器运行`
-    }
-    if (item.required && !item.resource_id && !item.value && !item.has_value && !item.has_original_value) {
-      return `请填写必填配置项：${key}`
-    }
-  }
-  return null
-}
-
 export function AppsPanel({
   api,
   sessionId,
@@ -496,6 +444,7 @@ export function AppsPanel({
       return [mount.container_path, (selected ?? options.find(resource => resource.is_default) ?? options[0])?.id ?? '']
     }))
 
+  const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
   const [sourceConfiguration, setSourceConfiguration] = useState<SourceConfiguration | null>(null)
   const [versionNote, setVersionNote] = useState('')
   const draftSaveTimerRef = useRef<number | null>(null)
@@ -685,14 +634,15 @@ export function AppsPanel({
       ])
       const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw ?? 'null', null)
       const detail = parseJson<DeployedApp | null>(detailsRaw ?? 'null', null)
+      const { configs, originals } = mergeJobConfigs(job, draft, opcConfig.defaultPort)
       setSourceConfiguration(draft?.sourceConfiguration ?? null)
-      setConfigDrafts((job.runtime_configs ?? []).filter(config => config.value_source === 'original')
-        .map(config => ({ ...config, value: '' })))
+      setOriginalConfigs(originals)
+      setConfigDrafts(configs)
       setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
       setStorageBindings(draft?.storageBindings ?? {})
       setExistingStorage(detail?.storage_mounts ?? [])
     },
-    [api, contextId],
+    [api, contextId, opcConfig.defaultPort],
   )
 
   const progressJobId = wizardJob?.id
@@ -1070,6 +1020,11 @@ export function AppsPanel({
     } finally { setWizardBusy(false) }
   }
 
+  const handleStep3ConfigsChange = (nextConfigs: AppConfigItem[]) => {
+    setConfigDrafts(nextConfigs)
+    if (wizardJob) scheduleDraftSave(wizardJob, nextConfigs, versionNote, storageBindings)
+  }
+
   const handleStep3NoteChange = (nextNote: string) => {
     setVersionNote(nextNote)
     if (wizardJob) scheduleDraftSave(wizardJob, configDrafts, nextNote, storageBindings)
@@ -1097,7 +1052,7 @@ export function AppsPanel({
   const handlePublishApp = async () => {
     if (!wizardJob) return
     setWizardError(null)
-    const validationErr = missingSourceConfig(wizardJob) || validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
+    const validationErr = validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
     if (validationErr) {
       setWizardError(validationErr)
       setConfigSubTab('configs')
@@ -1116,7 +1071,10 @@ export function AppsPanel({
     setWizardBusy(true)
     try {
       await flushDraft()
-      const cleanConfigs = sanitizeConfigRowsForApi(configDrafts)
+      const cleanConfigs = sanitizeConfigRowsForApi(configDrafts, {
+        forPublish: true,
+        lockedPort: wizardJob.port ?? opcConfig.defaultPort,
+      })
       const confirmRaw = await api.appConfirmDeployment(
         wizardJob.id,
         JSON.stringify({
@@ -1618,7 +1576,7 @@ export function AppsPanel({
       Boolean(zipFile || sourcePath.trim())
 
     const missingConfigAlert = wizardJob
-      ? missingSourceConfig(wizardJob) || validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
+      ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
         (Object.values(storageSelections).some(id => !id)
           ? '新增持久化目录需要已启用的 Platform 卷资源' : null)
       : null
@@ -1785,7 +1743,9 @@ export function AppsPanel({
                       )}
                     </div>
                     <span style={{ fontSize: 11.5, color: '#64748b', flexShrink: 0 }}>
-                      (容器端口: {effectiveStep1Port})
+                      {upgradingStep1
+                        ? `(容器端口: 沿用 ${effectiveStep1Port})`
+                        : `(容器端口: 自动识别，默认 ${effectiveStep1Port})`}
                     </span>
                   </div>
                   {!upgradingStep1 && slugCheck.error && (
@@ -2022,40 +1982,65 @@ export function AppsPanel({
               )}
 
               {configSubTab === 'configs' && (
-                <section className="oa-form-card" aria-label="原应用配置">
-                  <p className="oa-hint">如需修改，请编辑应用源文件并重新导入。</p>
-                  {!sourceConfiguration ? (
-                    <p className="oa-hint">暂时无法读取原应用配置。</p>
-                  ) : (
-                    <>
-                      {sourceConfiguration.files.map(file => (
-                        <details key={file.path} className="oa-subcard">
-                          <summary><code>{file.path}</code></summary>
-                          {file.fields.length > 0 && (
-                            <dl>
-                              {file.fields.map(({ key, value }, index) => (
-                                <div key={index}>
-                                  <dt><code>{key}</code></dt>
-                                  <dd><code style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                                    {value === '[REDACTED]' ? '敏感值已隐藏' : value || '（空）'}
-                                  </code></dd>
-                                </div>
+                <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="运行时环境变量配置">
+                  <AppDeliveryConfig
+                    configs={configDrafts}
+                    originals={originalConfigs}
+                    resources={resources}
+                    lockedPort={wizardJob.port ?? opcConfig.defaultPort}
+                    onReturnToPortStep={() => void handleReturnToReview()}
+                    onChange={handleStep3ConfigsChange}
+                  />
+
+                  <details className="oa-subcard oa-cfg-ref-details">
+                    <summary>
+                      <span>
+                        查看原项目配置文件参考
+                        {sourceConfiguration?.files?.length
+                          ? `（${sourceConfiguration.files.length} 个文件）`
+                          : ''}
+                      </span>
+                      <span className="oa-hint">仅只读参考；完整源文件需在本地编辑后重新导入</span>
+                    </summary>
+                    {!sourceConfiguration ? (
+                      <p className="oa-hint" style={{ margin: '8px 0 0' }}>暂时无法读取原应用配置文件。</p>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                        {sourceConfiguration.files.map(file => (
+                          <details key={file.path} className="oa-cfg-ref-file">
+                            <summary>
+                              <code>{file.path}</code>
+                              {file.is_example && <span className="oa-pill">示例模板</span>}
+                              <span className="oa-hint">{file.fields.length} 项</span>
+                            </summary>
+                            {file.fields.length > 0 && (
+                              <dl className="oa-cfg-ref-dl">
+                                {file.fields.map(({ key, value }, index) => (
+                                  <React.Fragment key={`${key}-${index}`}>
+                                    <dt><code>{key}</code></dt>
+                                    <dd><code>{value === '[REDACTED]' ? '敏感值已隐藏' : value || '（空）'}</code></dd>
+                                  </React.Fragment>
+                                ))}
+                              </dl>
+                            )}
+                          </details>
+                        ))}
+                        {sourceConfiguration.references.length > 0 && (
+                          <div className="oa-cfg-ref-file">
+                            <div className="oa-hint" style={{ fontWeight: 600, marginBottom: 4 }}>源码引用的环境变量</div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                              {sourceConfiguration.references.map(key => (
+                                <code key={key} className="oa-code">{key}</code>
                               ))}
-                            </dl>
-                          )}
-                        </details>
-                      ))}
-                      {sourceConfiguration.references.length > 0 && (
-                        <div className="oa-subcard">
-                          <h4>源码引用的环境变量</h4>
-                          <ul>{sourceConfiguration.references.map(key => <li key={key}><code>{key}</code></li>)}</ul>
-                        </div>
-                      )}
-                      {!sourceConfiguration.files.length && !sourceConfiguration.references.length && (
-                        <p className="oa-hint">在导入的源码中未识别到配置文件或环境变量引用。</p>
-                      )}
-                    </>
-                  )}
+                            </div>
+                          </div>
+                        )}
+                        {!sourceConfiguration.files.length && !sourceConfiguration.references.length && (
+                          <p className="oa-hint" style={{ margin: '6px 0 0' }}>在导入的源码中未识别到配置文件或环境变量引用。</p>
+                        )}
+                      </div>
+                    )}
+                  </details>
                 </section>
               )}
 
