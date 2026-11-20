@@ -161,6 +161,7 @@ def resolve_and_enrich_proposal(
     revision_count: int = 1,
     feedback_text: str = "",
     expected_port: int | None = None,
+    reuse_source_admin: bool = False,
 ) -> tuple[dict, dict | None, dict | None]:
     d.require(isinstance(proposal, dict) and isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "提案缺少摘要")
     for field in ("issues", "changes", "unresolved"):
@@ -315,8 +316,8 @@ def resolve_and_enrich_proposal(
             lambda: validate_auth_questions(proposal),
             lambda: resolve_authentication(contract),
             lambda: validate_auth_evidence(source, proposal),
+            lambda: validate_account_plan(source, contract, reuse_source_admin),
             lambda: d.validate_credential_references(contract),
-            lambda: validate_account_plan(source, contract),
         ]
         if not proposal.get("unresolved") and not contract.get("unresolved"):
             checks.append(lambda: validate_auth_probe_coverage(contract))
@@ -340,7 +341,7 @@ def resolve_and_enrich_proposal(
 
 
 def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback="", expected_port=None,
-               revision_count=1, feedback_text="", admin_reply=None, previous_skill_markdown=""):
+               revision_count=1, feedback_text="", admin_reply=None, previous_skill_markdown="", reuse_source_admin=False):
     original = root / "review"
     d.require(d.inspect_source(original / "source")[0] == d.load(original / "inventory.json")["files"], "Source changed; import again")
     d.require(isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "summary required")
@@ -353,6 +354,7 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
         expected_port=expected_port,
         revision_count=revision_count,
         feedback_text=feedback_text,
+        reuse_source_admin=reuse_source_admin,
     )
     d.require(not (proposal.get("unresolved") or proposal["contract"].get("unresolved")), "Resolve outstanding questions before preparation")
     shutil.copytree(original, target)
@@ -769,6 +771,7 @@ def main(body):
                 revision_count=rev_count,
                 feedback_text=fb_text,
                 expected_port=body.get("expected_port"),
+                reuse_source_admin=body.get("reuse_source_admin") is True,
             )
             diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
             _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
@@ -795,6 +798,7 @@ def main(body):
                 feedback_text=fb_text,
                 admin_reply=body.get("admin_reply"),
                 previous_skill_markdown=body.get("previous_skill_markdown", ""),
+                reuse_source_admin=body.get("reuse_source_admin") is True,
             )
             d.bundle_work(temp_path / "approved", temp_path / "bundle", login)
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")

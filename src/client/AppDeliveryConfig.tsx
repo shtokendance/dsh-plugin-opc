@@ -102,7 +102,6 @@ export function AppDeliveryConfig({
   onChange,
   compact = false,
   lockedPort,
-  onReturnToPortStep,
   readOnly = false,
 }: {
   configs: AppConfigItem[]
@@ -110,7 +109,6 @@ export function AppDeliveryConfig({
   resources: ResourceSummary[]
   compact?: boolean
   lockedPort?: number
-  onReturnToPortStep?: () => void
   readOnly?: boolean
   onChange: (items: AppConfigItem[]) => void
 }) {
@@ -314,11 +312,6 @@ export function AppDeliveryConfig({
                   value={portValue}
                   className="oa-input oa-mono oa-cfg-readonly"
                 />
-                {onReturnToPortStep && !readOnly && (
-                  <button type="button" className="oa-btn oa-btn-xs" onClick={onReturnToPortStep}>
-                    返回调整端口
-                  </button>
-                )}
               </div>
             ) : selected ? (
               <input
