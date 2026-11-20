@@ -73,13 +73,15 @@ def atomic_replace(tmp_path, target):
 def save(path, data):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=target.name + "-", suffix=".tmp", mode="w", encoding="utf-8", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        tmp.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=target.name + "-", suffix=".tmp", mode="w", encoding="utf-8", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         atomic_replace(tmp_path, target)
     finally:
-        tmp_path.unlink(missing_ok=True)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def sha(data):

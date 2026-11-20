@@ -125,6 +125,9 @@ async function serializeByRoot<T>(rootKey: string | undefined, signal: AbortSign
   const gate = new Promise<void>(resolveGate => { release = resolveGate })
   const tail = previous.catch(() => {}).then(() => gate)
   workerQueues.set(key, tail)
+  void tail.finally(() => {
+    if (workerQueues.get(key) === tail) workerQueues.delete(key)
+  })
   try {
     if (signal) {
       signal.throwIfAborted()
@@ -147,7 +150,6 @@ async function serializeByRoot<T>(rootKey: string | undefined, signal: AbortSign
     return await fn()
   } finally {
     release()
-    if (workerQueues.get(key) === tail) workerQueues.delete(key)
   }
 }
 
@@ -185,6 +187,8 @@ export async function worker(input: AppDocument, signal?: AbortSignal): Promise<
         windowsHide: true,
       })
       let stdout = '', stderr = '', exceeded = false
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
       child.stdout.on('data', data => { stdout += data; if (stdout.length > 8_000_000) { exceeded = true; child.kill() } })
       child.stderr.on('data', data => { if (stderr.length < 2000) stderr += data })
       child.on('error', error => {

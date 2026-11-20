@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import test from 'node:test'
 import { worker } from '../src/host/app-delivery.ts'
 import {
@@ -13,10 +13,11 @@ import {
   type PythonCommand,
 } from '../src/host/python-runtime.ts'
 
-test('workerEnv preserves essential Windows OS vars while stripping secrets and proxies', () => {
+test('workerEnv preserves essential Windows OS vars without case duplicates and strips secrets/proxies', () => {
   const env = workerEnv('win32', {
     Path: 'C:\\Windows\\System32;D:\\Python312',
     SystemRoot: 'C:\\Windows',
+    SYSTEMROOT: 'C:\\Windows',
     USERPROFILE: 'C:\\Users\\alice',
     LOCALAPPDATA: 'C:\\Users\\alice\\AppData\\Local',
     TEMP: 'C:\\Users\\alice\\AppData\\Local\\Temp',
@@ -28,6 +29,7 @@ test('workerEnv preserves essential Windows OS vars while stripping secrets and 
 
   assert.equal(env.PATH, 'C:\\Windows\\System32;D:\\Python312')
   assert.equal(env.SystemRoot, 'C:\\Windows')
+  assert.equal(env.SYSTEMROOT, undefined)
   assert.equal(env.USERPROFILE, 'C:\\Users\\alice')
   assert.equal(env.LOCALAPPDATA, 'C:\\Users\\alice\\AppData\\Local')
   assert.equal(env.TEMP, 'C:\\Users\\alice\\AppData\\Local\\Temp')
@@ -36,6 +38,9 @@ test('workerEnv preserves essential Windows OS vars while stripping secrets and 
   assert.equal(env.DEEPSEEK_API_KEY, undefined)
   assert.equal(env.HTTP_PROXY, undefined)
   assert.equal(env.PYTHONPATH, undefined)
+
+  const liveKeys = Object.keys(workerEnv()).map(k => k.toLowerCase())
+  assert.equal(new Set(liveKeys).size, liveKeys.length)
 })
 
 test('bundledPythonCandidates resolves Windows and macOS DSH runtime paths', () => {
@@ -127,17 +132,18 @@ test('resolvePythonInterpreter discovers Python via py.exe launcher, install dir
   })
   assert.deepEqual(viaLauncher, { command: customExe, prefixArgs: [] })
 
-  // Case 2: Standard install dir (prefers newest Python312 over Python310)
+  // Case 2: Standard install dir (prefers Python312 > Python310 > Python39 > Python39-32)
+  const dir39_32 = 'C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python39-32\\python.exe'
+  const dir39 = 'C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python39\\python.exe'
   const dir310 = 'C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python310\\python.exe'
   const dir312 = 'C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'
   const dirCandidates = windowsInstallDirCandidates({
     env: { LOCALAPPDATA: 'C:\\Users\\alice\\AppData\\Local', USERPROFILE: 'C:\\Users\\alice' },
     homeDir: 'C:\\Users\\alice',
-    readDir: dir => (dir.toLowerCase().endsWith('\\programs\\python') ? ['Python310', 'Python312'] : []),
-    exists: p => [dir310.toLowerCase(), dir312.toLowerCase()].includes(p.toLowerCase()),
+    readDir: dir => (dir.toLowerCase().endsWith('\\programs\\python') ? ['Python39-32', 'Python39', 'Python310', 'Python312'] : []),
+    exists: p => [dir39_32, dir39, dir310, dir312].map(v => v.toLowerCase()).includes(p.toLowerCase()),
   })
-  assert.equal(dirCandidates[0]?.command, dir312)
-  assert.equal(dirCandidates[1]?.command, dir310)
+  assert.deepEqual(dirCandidates.map(c => c.command), [dir312, dir310, dir39, dir39_32])
 
   // Case 3: PEP 514 Registry fallback (custom drive, no PATH, no py.exe)
   const viaRegistry = await resolvePythonInterpreter({
@@ -171,9 +177,9 @@ test('parseWindowsRegistryPythonPaths parses ExecutablePath and localized Defaul
 
   const parsed = parseWindowsRegistryPythonPaths(sample)
   assert.deepEqual(parsed, [
-    join('C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python39\\', 'python.exe'),
+    win32.join('C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python39\\', 'python.exe'),
     'C:\\Users\\alice\\AppData\\Local\\Programs\\Python\\Python39\\python.exe',
-    join('D:\\Anaconda3', 'python.exe'),
+    win32.join('D:\\Anaconda3', 'python.exe'),
   ])
 })
 
