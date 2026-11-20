@@ -152,16 +152,8 @@ export const workbenchStyles = faces + `
   padding: 16px;
   box-shadow: var(--opc-shadow);
   display: grid;
-  gap: 14px;
 }
-.opc-home-intro-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.opc-home-intro-copy { display: grid; gap: 4px; flex: 1 1 280px; }
+.opc-home-intro-copy { display: grid; gap: 4px; }
 .opc-home-intro-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .opc-home-intro-copy h2 {
   margin: 0;
@@ -183,17 +175,6 @@ export const workbenchStyles = faces + `
   font-size: 12px;
   line-height: 1.55;
 }
-.opc-panel .opc-home-intro-btn {
-  padding: 7px 12px;
-  border-radius: var(--opc-control-radius);
-  border: 1px solid var(--opc-blue);
-  background: var(--opc-blue);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.opc-panel .opc-home-intro-btn:hover { background: var(--opc-blue-hover); border-color: var(--opc-blue-hover); }
 .opc-home-section-head {
   display: flex;
   flex-wrap: wrap;
