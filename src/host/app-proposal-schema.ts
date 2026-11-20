@@ -10,7 +10,7 @@ const routeAuth = { ...object, properties: {
   evidence: { ...strings, description: '该路由的认证源码位置，使用源码读取工具返回的文件路径和行号' },
 } } as const
 
-export function proposalParameters(port: number) {
+export function proposalParameters(port: number, portLocked = true) {
   // Keep fields optional at the top level for the legacy proposal string.
   return {
     summary: { ...str, description: '中文改造摘要；使用结构化参数时必填' },
@@ -28,12 +28,19 @@ export function proposalParameters(port: number) {
       slug: str, name: text, description: text, base_url: str,
       runtime: { ...object, required: true, properties: {
         language: text, version: text,
-        port: { type: 'integer', required: true, description: `必须是向导已锁定的数字 ${port}，不是字符串或宿主机端口` },
+        port: {
+          type: 'integer',
+          required: true,
+          description: portLocked
+            ? `必须是向导已锁定的数字 ${port}，不是字符串或宿主机端口`
+            : `优先填写应用自身默认监听端口（整数 1-65535）；若应用无默认端口，填写 OPC 默认端口 ${port}`,
+        },
       } },
       build_context: { ...strings, required: true },
       health: { ...object, required: true, properties: { path: text, status: { type: 'integer', required: true }, json_contains: { ...object, required: true } } },
-      configs: { ...objects, description: '仅填写源码真实存在的配置键（参考 inventory.source_configuration）；default 必须为空字符串 ""；source 仅支持 YAML/JSON/TOML/.env/properties 文件，不支持代码文件', items: { ...object, properties: {
+      configs: { ...objects, description: '仅填写源码真实存在的配置键（参考 inventory.source_configuration）；default 必须为空字符串 ""；source 仅支持 YAML/JSON/TOML/.env/properties 文件，不支持代码文件；不要将 *.example/*.sample/*.template 示例文件里的 PORT 或占位密钥作为真实运行值绑定；如应用存在代码兜底默认值（仅非敏感），可写入 app_default 供第 3 步参考展示', items: { ...object, properties: {
         key: text, default: text, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
+        app_default: { ...str, description: '仅非敏感配置可填写源码中的兜底默认值（只读展示参考，不会自动注入）' },
         source: { ...object, description: '使用 path 和 keys 引用源配置，禁止写入真实秘密值' },
       } } },
       resources: objects,

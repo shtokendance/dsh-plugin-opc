@@ -95,11 +95,15 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const appCtxId = delivery.core.auth.contexts.applicationContextId!
     const isRepair = Boolean(job.failedRevision || job.failedSnapshot || job.failureContext || job.analysisMode === 'repair')
     const port = job.port ?? 8080
+    const portLocked = job.portAuto !== true
     const skill = loadBundledSkillText('SKILL.md')
     const repairInstructions = isRepair
       ? '\n修复失败部署时，先核对失败阶段和日志，用 read_failed 读取实际失败制品并与原源码比对。只修正根因，提交完整替换文件。'
       : ''
-    const instructions = `${skill}\n本任务锁定的容器端口为 ${port}。${repairInstructions}`
+    const portInstructions = portLocked
+      ? `本任务锁定的容器端口为 ${port}。`
+      : `容器端口策略：优先识别并沿用应用自身默认监听端口（从源码、现有 Dockerfile 或真实配置文件核实）；若应用无默认端口（或依赖外部注入 PORT 且无兜底值），则使用 OPC 默认端口 ${port}。${job.upgrade ? `本次为升级部署，如新版未变更端口优先沿用线上当前端口 ${port}。` : ''}容器内必须监听 0.0.0.0（禁止监听 127.0.0.1），且契约 configs 中的 PORT 必须与 runtime.port 一致，不要引用 *.example 示例文件中冲突的 PORT 或占位密钥。`
+    const instructions = `${skill}\n${portInstructions}${repairInstructions}`
     const prevPlan = compactPreviousPlan(job.proposal)
     const taskInstruction = '按四步完成本次应用改造。' + (isRepair
       ? '先用失败制品核实根因。'
@@ -207,7 +211,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             return JSON.stringify(res)
           } }))
         child.tools.register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
-          parameters: proposalParameters(port), output,
+          parameters: proposalParameters(port, portLocked), output,
           async execute(args) {
             if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
             if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) throw new Error('技术方案连续校验未通过，已停止自动重试')
@@ -350,6 +354,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         slug: job.slug,
         base_url: job.url,
         container_port: port,
+        port_policy: portLocked ? 'locked' : 'prefer_app_default_else_opc_default',
+        default_container_port: port,
         upgrade: Boolean(job.upgrade),
         deployed_baseline: deployedBaseline,
         available_resource_metadata: (filteredRes?.resources ?? []).map((resource: AppDocument) => ({

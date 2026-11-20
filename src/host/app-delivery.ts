@@ -19,7 +19,7 @@ export interface DeliveryJob {
   analysisSessionId?: string
   analysisSessions?: string[]
   autoPrepared?: boolean
-  port?: number; description?: string; upgrade?: boolean; versionNote?: string
+  port?: number; portAuto?: boolean; description?: string; upgrade?: boolean; versionNote?: string
   status: 'importing' | 'draft' | 'analyzing' | 'review' | 'preparing' | 'ready' | 'publishing' | 'building' | 'verifying' | 'awaiting_page_verification' | 'verified' | 'failed' | 'unknown' | 'cancelled'
   events: string[]; error?: string; proposal?: AppDocument; revision?: string; failedRevision?: string
   revisionCount?: number; feedbackHistory?: string; analysisMode?: 'analysis' | 'repair'
@@ -33,7 +33,7 @@ export interface DeliveryJob {
   modelSelection?: { provider: string; model: string; reasoningEffort?: string }
   confirmationToken?: string
   checks?: AppDocument[]; published?: boolean; failureContext?: string; configFingerprint?: string
-  configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; local_connection_confirmed?: boolean }[]; versionNote: string; storageBindings?: Record<string, string> }
+  configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; local_connection_confirmed?: boolean; value_source?: string; secret?: boolean }[]; versionNote: string; storageBindings?: Record<string, string> }
   configKeys?: string[]; resourceIds?: string[]; failedSnapshot?: AppDocument; pagesVerified?: boolean; superseded?: boolean; createdAt?: number
 }
 
@@ -114,6 +114,19 @@ export function loopbackConnection(key: string, value: string): boolean {
     return false
   }
   return /(?:^|:\/\/|@|tcp\(|(?:host|server)\s*=)(?:localhost|127\.\d+\.\d+\.\d+|\[::1\])(?=[:/,;)]|$)/i.test(value.trim())
+}
+
+function isExampleConfigPath(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, '/')
+  const base = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase()
+  const dot = base.lastIndexOf('.')
+  const stem = dot > 0 ? base.slice(0, dot) : base
+  const suffixRe = /(?:^|[._-])(?:example|sample|template)$/
+  return suffixRe.test(base) || suffixRe.test(stem)
+}
+
+function isSensitiveConfigKey(key: string): boolean {
+  return /password|passwd|secret|token|credential|api.?key|private.?key|dsn|connection.?string/i.test(key)
 }
 
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
@@ -536,15 +549,19 @@ export class AppDelivery {
     const hasOrigSet = new Set(job.hasOriginalKeys ?? [])
     const runtimeConfigs = (proposal?.contract?.configs ?? []).map((c: AppDocument) => {
       const hasOrig = hasOrigSet.has(c.key) && Boolean(c.source)
+      const isExample = typeof c.source?.path === 'string' && isExampleConfigPath(c.source.path)
       return {
         key: c.key,
         value: c.secret ? '' : (c.default ?? ''),
+        app_default: c.secret ? '' : (typeof c.app_default === 'string' ? c.app_default : ''),
         description: c.description ?? '',
         required: Boolean(c.required),
         secret: Boolean(c.secret),
         has_value: hasOrig || Boolean(c.default),
+        has_original_value: hasOrig,
+        ...(isExample ? { is_example_source: true } : {}),
         value_source: hasOrig ? 'original' : 'manual',
-        source_label: c.source?.path ? `来自原项目 ${c.source.path}` : undefined,
+        source_label: c.source?.path ? `${isExample ? '示例模板参考' : '来自原项目'} ${c.source.path}` : undefined,
       }
     })
     const artifactFiles = job.hashes && job.revision && /^[a-z0-9]+$/i.test(job.revision)
@@ -654,7 +671,8 @@ export class AppDelivery {
     const defaultPort = Number.isInteger(this.options.appDefaultPort) && this.options.appDefaultPort! >= 1 && this.options.appDefaultPort! <= 65535
       ? this.options.appDefaultPort!
       : 8080
-    let targetPort = input.container_port === undefined ? defaultPort : input.container_port
+    const portAuto = input.container_port === undefined
+    let targetPort = portAuto ? defaultPort : input.container_port
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error('容器端口必须为 1 至 65535 的整数')
     let targetDesc = typeof input.description === 'string' ? input.description.trim() : ''
     let defaultVersionNote = ''
@@ -686,6 +704,7 @@ export class AppDelivery {
       slug: input.slug,
       url: targetUrl,
       port: targetPort,
+      portAuto,
       description: targetDesc,
       upgrade: isUpgrade,
       versionNote: defaultVersionNote,
@@ -936,10 +955,16 @@ export class AppDelivery {
     if (job.status !== 'ready') return null
     const sourceConfiguration = await worker({ action: 'source_configuration', root }, scope.signal)
     const values = job.configDraft ? await this.credentials.read(`draft-${id}`) : {}
+    const origAll = await this.credentials.read(`orig-${id}`)
     scope.assertCurrent()
+    const secretKeys = new Set(((job.proposal?.contract?.configs ?? []) as AppDocument[]).filter(c => c.secret).map(c => c.key))
+    const originalValues = Object.fromEntries(
+      Object.entries(origAll).filter(([k, v]) => !secretKeys.has(k) && !isSensitiveConfigKey(k) && typeof v === 'string'),
+    )
     return {
       ...job.configDraft,
       rows: (job.configDraft?.rows ?? []).map(row => ({ ...row, value: values[row.key] ?? '' })),
+      originalValues,
       sourceConfiguration,
     }
   }
@@ -957,7 +982,14 @@ export class AppDelivery {
       scope.assertCurrent()
       job.configDraft = {
         artifactHash: input.artifactHash,
-        rows: rows.map(row => ({ key: row.key, resource_id: row.resource_id, local_connection_confirmed: row.local_connection_confirmed === true })),
+        rows: rows.map(row => ({
+          key: row.key,
+          resource_id: row.resource_id,
+          local_connection_confirmed: row.local_connection_confirmed === true,
+          ...(row.value_source === 'original' || row.value_source === 'manual' || row.value_source === 'resource'
+            ? { value_source: row.value_source } : {}),
+          ...(row.secret === true ? { secret: true } : {}),
+        })),
         storageBindings: readStorageBindings(input.storageBindings),
         versionNote: typeof input.versionNote === 'string' ? input.versionNote.slice(0, 1024) : '',
       }
@@ -1054,9 +1086,15 @@ export class AppDelivery {
       const expectedPort = job.port ?? 8080
       const actualPort = proposal.contract.runtime?.port
       const field = '交付契约 runtime.port'
-      if (actualPort == null) throw new Error(`${field} 缺失。请补全 runtime 并填写已锁定的数字 ${expectedPort}`)
-      if (!Number.isInteger(actualPort)) throw new Error(`${field} 必须是已锁定的整数 ${expectedPort}，不能提交字符串或其他类型`)
-      if (actualPort !== expectedPort) throw new Error(`${field} 填了 ${actualPort}，与已锁定的容器端口 ${expectedPort} 不一致。模型不能静默改变用户选择的容器端口`)
+      if (actualPort == null) {
+        throw new Error(job.portAuto
+          ? `${field} 缺失。请补全 runtime.port（1–65535 整数，优先填应用默认端口，无默认端口时填 ${expectedPort}）`
+          : `${field} 缺失。请补全 runtime 并填写已锁定的数字 ${expectedPort}`)
+      }
+      if (!Number.isInteger(actualPort) || actualPort < 1 || actualPort > 65535) {
+        throw new Error(`${field} 必须是 1 至 65535 的整数`)
+      }
+      if (!job.portAuto && actualPort !== expectedPort) throw new Error(`${field} 填了 ${actualPort}，与已锁定的容器端口 ${expectedPort} 不一致。模型不能静默改变用户选择的容器端口`)
     }
     const validated = await worker({
       action: 'validate',
@@ -1070,10 +1108,14 @@ export class AppDelivery {
       failure_feedback: job.failureContext ?? '',
       revision_count: job.revisionCount ?? 1,
       feedback: job.feedbackHistory ?? '',
-      expected_port: job.port ?? 8080,
+      expected_port: job.portAuto ? null : (job.port ?? 8080),
     }, signal)
     signal.throwIfAborted(); if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
     job.proposal = validated?.proposal ?? proposal
+    const validatedPort = job.proposal?.contract?.runtime?.port
+    if (job.portAuto && Number.isInteger(validatedPort) && validatedPort >= 1 && validatedPort <= 65535) {
+      job.port = validatedPort
+    }
     if (adminAccountPending) job.proposal!.adminAccountPending = true
     else delete job.proposal!.adminAccountPending
     job.discoveryReport = validated?.discovery_report ?? job.discoveryReport
@@ -1118,7 +1160,7 @@ export class AppDelivery {
         repair: Boolean(job.failedRevision),
         failed_revision: job.failedRevision ?? '',
         failure_feedback: job.failureContext ?? '',
-        expected_port: job.port ?? 8080,
+        expected_port: job.portAuto ? null : (job.port ?? 8080),
         revision_count: job.revisionCount ?? 1,
         feedback: job.feedbackHistory ?? '',
       }, signal)
@@ -1126,6 +1168,10 @@ export class AppDelivery {
       job.revision = revision
       job.hashes = result.summary.files
       job.proposal = result.proposal ?? job.proposal
+      const bundledPort = job.proposal?.contract?.runtime?.port
+      if (Number.isInteger(bundledPort) && bundledPort >= 1 && bundledPort <= 65535) {
+        job.port = bundledPort
+      }
       job.discoveryReport = result.discovery_report ?? job.discoveryReport
       job.transformationReport = result.transformation_report ?? job.transformationReport
       job.preparationChecks = result.preparation_checks ?? job.preparationChecks
@@ -1174,11 +1220,11 @@ export class AppDelivery {
     await this.save(root, job)
   }
   private async deploymentConfiguration(job: DeliveryJob, input: AppDocument, expected: string) {
-    const rawConfigs = input.config as { key: string; value: string; resource_id?: string; local_connection_confirmed?: boolean; has_value?: boolean }[]
+    const rawConfigs = input.config as { key: string; value: string; resource_id?: string; local_connection_confirmed?: boolean; has_value?: boolean; value_source?: string }[]
     if (!Array.isArray(rawConfigs) || rawConfigs.some(c => !c || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(c.key) || typeof c.value !== 'string' || (c.resource_id !== undefined && typeof c.resource_id !== 'string')) || new Set(rawConfigs.map(c => c.key)).size !== rawConfigs.length) throw new Error('配置格式无效')
     const origValues = await this.credentials.read(`orig-${job.id}`)
     const configs = rawConfigs.map(c => {
-      if (!c.resource_id && !c.value && origValues[c.key]) return { ...c, value: origValues[c.key], value_source: 'original' }
+      if (!c.resource_id && !c.value && c.value_source !== 'manual' && origValues[c.key]) return { ...c, value: origValues[c.key], value_source: 'original' }
       return { ...c, value_source: c.resource_id ? 'resource' : 'manual' }
     })
     const storageBindings = readStorageBindings(input.storageBindings)
@@ -1234,7 +1280,7 @@ export class AppDelivery {
     for (const c of declarations) {
       const selected = configs.find(i => i.key === c.key)
       const preservedOnlineSecret = Boolean((job.upgrade || job.published) && selected?.has_value)
-      if (c.required && c.key !== 'PORT' && !selected?.value && !selected?.resource_id && !preservedOnlineSecret) throw new Error(`交付包要求配置 ${c.key}。请在应用源码中确认配置后重新导入，或返回上一步调整改造方案。`)
+      if (c.required && c.key !== 'PORT' && !selected?.value && !selected?.resource_id && !preservedOnlineSecret) throw new Error(`请填写必填配置 ${c.key}，或选择匹配的平台托管资源。`)
     }
     const bindings = configs.map(c => ({
       key: c.key,
