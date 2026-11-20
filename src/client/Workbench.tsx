@@ -169,12 +169,72 @@ const QUICK_COMMANDS = [
   },
 ] as const
 
-const APP_STEPS = [
-  { step: '1. 选择应用与源码', desc: '填写应用名称与访问子域名，选择本地源码文件夹或 ZIP 压缩包，发起 AI 分析。' },
-  { step: '2. 与 AI 改造应用', desc: '在独立源码副本上生成 Dockerfile、契约与技能；如有待确认项（如管理员账密），在左侧会话回复即可。' },
-  { step: '3. 核对并发布上线', desc: '核对容器端口、持久化数据卷、运行配置和环境变量，点击「确认配置并发布上线」。' },
-  { step: '4. 部署验证与运维', desc: '查看构建日志与健康检查，启用 /app-<标识> 技能；支持版本回滚、配置更新与卷备份下载。' },
-] as const
+const MODULE_GUIDES: Record<ModuleKind, {
+  heading: string
+  actionLabel: string
+  steps: readonly { num: string; title: string; desc: string }[]
+  exampleTitle: string
+  exampleCmd: string
+  tipTitle: string
+  tipText: string
+}> = {
+  knowledge: {
+    heading: '企业知识库使用方式',
+    actionLabel: '前往知识库 →',
+    steps: [
+      { num: '01', title: '核对企业空间', desc: '进入知识库页后，在右上角选择正确的「企业空间」；若目录未更新，点击「刷新」同步最新授权范围。' },
+      { num: '02', title: '文档全文检索', desc: '在「文档全文检索」模式选择全部或指定库，输入关键词点击「开始检索」，点击结果标题即可打开文档正文。' },
+      { num: '03', title: '目录筛选与定位', desc: '切换到「知识库目录筛选」按库名或描述查找目标库，点击「检索此库」可一键切回全文检索并选定该库。' },
+      { num: '04', title: '对话引用与限定', desc: '在对话中输入 @库名 选中目标库即可问答；点击卡片「限定问答范围」可持续绑定当前会话，用完点「取消限定」。' },
+    ],
+    exampleTitle: '对话调用示例',
+    exampleCmd: '@企业制度库 差旅报销需要准备哪些材料？请列出依据文档的名称',
+    tipTitle: '排查提示',
+    tipText: '若全部库检索报错 INVALID_REQUEST，请确认当前空间有可见知识库，先选中具体某一个库再检索。',
+  },
+  skills: {
+    heading: '企业技能安装与调用',
+    actionLabel: '前往技能页 →',
+    steps: [
+      { num: '01', title: '搜索与筛选技能', desc: '进入「技能」页输入技能名称或关键词，点击「立即检索」；支持按「全部 / 已安装 / 未安装」过滤。' },
+      { num: '02', title: '一键下载安装', desc: '在目标技能卡片点击「下载安装」，等待插件自动完成安装与初始化，直到状态标签变为「已启用」。' },
+      { num: '03', title: '斜杠唤起执行', desc: '回到左侧 DSH 对话框，输入 / 和技能名从候选中选中它，接着描述你的具体任务或上传待处理文件。' },
+      { num: '04', title: '启停与版本更新', desc: '已安装技能可按需「停用」或「卸载」；当企业平台发布新版本时，可直接在卡片上核对状态并更新。' },
+    ],
+    exampleTitle: '对话调用示例',
+    exampleCmd: '/excel-compare 请对比这两份报价单，按物料编码列输出差异明细',
+    tipTitle: '使用说明',
+    tipText: '技能安装后立即在本地生效；搭配文件上传（如 Excel、合同文档）可发挥最佳自动化处理效果。',
+  },
+  mcp: {
+    heading: 'MCP 服务查看与调试',
+    actionLabel: '前往 MCP 页 →',
+    steps: [
+      { num: '01', title: '查看连接状态', desc: '进入「MCP」页按服务或工具名称搜索，使用「全部 / 已连接 / 未挂载」胶囊快速筛选可用服务。' },
+      { num: '02', title: '核对工具定义', desc: '展开服务卡片的「查看可用工具与调试」，核对每个工具的名称、业务用途说明及输入参数 Schema。' },
+      { num: '03', title: '在线 JSON 调试', desc: '首次排查单个工具时，展开「在线调试调用」，输入 JSON 参数并点击「调用」，直接查看返回数据或报错。' },
+      { num: '04', title: '对话中审批调用', desc: '在 DSH 对话中说明要用哪个服务、工具和查询条件；写操作会弹出审批卡片，核对参数确认后才会执行。' },
+    ],
+    exampleTitle: '显式调用示例',
+    exampleCmd: '使用 supply-chain-erp 的 query_supplier_status 查询供应商 SUP-2026-008 状态',
+    tipTitle: '调试贴士',
+    tipText: '建议优先选择只读工具做首次联调；显式调用 opc_mcp_invoke 时需提供准确的 service_id、tool_name 与 arguments。',
+  },
+  apps: {
+    heading: '本地应用一键 AI 改造与部署上线（4 步流程）',
+    actionLabel: '前往应用中心 →',
+    steps: [
+      { num: '01', title: '选择应用与源码', desc: '点击「新建应用」，填写名称、访问子域名与分析模型，选择本地源码文件夹或 ZIP 压缩包发起 AI 分析。' },
+      { num: '02', title: '与 AI 改造应用', desc: 'OPC 在独立源码副本上生成 Dockerfile、契约与技能；如有待确认项（如管理员账密），在左侧会话回复即可。' },
+      { num: '03', title: '核对并发布上线', desc: '核对应用地址、容器端口、运行配置、持久化数据卷与必填环境变量，点击「确认配置并发布上线」。' },
+      { num: '04', title: '部署验证与运维', desc: '实时查看构建日志与健康检查，启用 /app-<标识> 技能；支持版本回滚、配置更新与单卷/整应用备份下载。' },
+    ],
+    exampleTitle: '对话调用示例',
+    exampleCmd: '/app-supplier-audit 查询最近提交的供应商审厂记录',
+    tipTitle: '运维保障',
+    tipText: '版本升级与回滚均会保留挂载卷中的业务数据；若平台上一轮构建未结束（1108），可直接等待后核对重发原交付包。',
+  },
+} as const
 
 const FAQ_ITEMS = [
   { q: '登录后列表为空，或输入 @ 找不到库', a: '核对右上角的「企业空间」并点击刷新。如仍无资源，请联系管理员确认当前账号的资源授权。' },
@@ -310,65 +370,50 @@ export function WorkbenchHome({ onSelect }: { onSelect: (kind: ModuleKind) => vo
             </div>
           )}
 
-          {guideTab === 'knowledge' && (
-            <div className="opc-guide-pane">
-              <div className="opc-guide-pane-head">
-                <strong>企业知识库使用方式</strong>
-                <button type="button" className="opc-guide-link-btn" onClick={() => onSelect('knowledge')}>前往知识库 →</button>
-              </div>
-              <ol className="opc-guide-list">
-                <li><strong>确认空间</strong>：进入知识库页后，在右上角选择正确的「企业空间」，若列表未更新可点击「刷新」。</li>
-                <li><strong>找文档（全文检索模式）</strong>：选择检索范围（全部或指定库），输入关键词点击「开始检索」，点击结果标题可打开文档正文。</li>
-                <li><strong>找库（目录筛选模式）</strong>：按库名或描述筛选，点击目标卡片的「检索此库」可切回全文检索并自动选定该库。</li>
-                <li><strong>AI 问答</strong>：在对话中输入 <code>@库名</code> 选中目标库，或在卡片点击「限定问答范围」（用完可点击「取消限定」）。</li>
-              </ol>
-            </div>
-          )}
-
-          {guideTab === 'skills' && (
-            <div className="opc-guide-pane">
-              <div className="opc-guide-pane-head">
-                <strong>企业技能安装与调用</strong>
-                <button type="button" className="opc-guide-link-btn" onClick={() => onSelect('skills')}>前往技能页 →</button>
-              </div>
-              <ol className="opc-guide-list">
-                <li><strong>检索技能</strong>：进入「技能」模块，输入名称或关键词点击「立即检索」，支持按「全部 / 已安装 / 未安装」筛选。</li>
-                <li><strong>安装启用</strong>：在目标技能卡片点击「下载安装」，等待状态变为「已启用」。</li>
-                <li><strong>对话执行</strong>：回到左侧对话输入 <code>/技能名</code> 从候选中选中，附带文件或说明需求即可运行（如 <code>/excel-compare</code>）。</li>
-              </ol>
-            </div>
-          )}
-
-          {guideTab === 'mcp' && (
-            <div className="opc-guide-pane">
-              <div className="opc-guide-pane-head">
-                <strong>MCP 服务查看与调试</strong>
-                <button type="button" className="opc-guide-link-btn" onClick={() => onSelect('mcp')}>前往 MCP 页 →</button>
-              </div>
-              <ol className="opc-guide-list">
-                <li><strong>查看服务</strong>：进入「MCP」模块，按服务或工具名称搜索，支持按「全部 / 已连接 / 未挂载」筛选状态。</li>
-                <li><strong>核对与在线调试</strong>：展开服务卡片的「查看可用工具与调试」，可查看工具用途与参数定义，并在「在线调试调用」中输入 JSON 直接调用测试。</li>
-                <li><strong>在对话中使用</strong>：直接说明要用哪个服务、哪个工具及查询条件；显式调用 <code>opc_mcp_invoke</code> 时需提供准确的 <code>service_id</code>、<code>tool_name</code> 和 <code>arguments</code>。</li>
-              </ol>
-            </div>
-          )}
-
-          {guideTab === 'apps' && (
-            <div className="opc-guide-pane">
-              <div className="opc-guide-pane-head">
-                <strong>本地应用一键 AI 改造与部署上线（4 步流程）</strong>
-                <button type="button" className="opc-guide-link-btn" onClick={() => onSelect('apps')}>前往应用中心 →</button>
-              </div>
-              <div className="opc-guide-app-steps">
-                {APP_STEPS.map(item => (
-                  <div key={item.step} className="opc-guide-app-step">
-                    <strong>{item.step}</strong>
-                    <p>{item.desc}</p>
+          {guideTab !== 'quickstart' && guideTab !== 'faq' && (() => {
+            const detail = MODULE_GUIDES[guideTab]
+            return (
+              <div className="opc-guide-pane">
+                <div className="opc-guide-pane-head">
+                  <strong>{detail.heading}</strong>
+                  <button type="button" className="opc-guide-link-btn" onClick={() => onSelect(guideTab)}>
+                    {detail.actionLabel}
+                  </button>
+                </div>
+                <div className="opc-guide-steps-grid">
+                  {detail.steps.map(step => (
+                    <div key={step.num} className={`opc-guide-step-card opc-step-tone-${guideTab}`}>
+                      <div className="opc-guide-step-top">
+                        <span className="opc-guide-step-num">{step.num}</span>
+                        <strong>{step.title}</strong>
+                      </div>
+                      <p>{step.desc}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="opc-guide-extras">
+                  <div className="opc-guide-example-box">
+                    <div className="opc-guide-example-head">
+                      <strong>{detail.exampleTitle}</strong>
+                      <button
+                        type="button"
+                        className="opc-guide-copy-btn"
+                        onClick={() => void copyCommand(`guide-${guideTab}`, detail.exampleCmd)}
+                      >
+                        <AppIcon name={copiedId === `guide-${guideTab}` ? 'check' : 'copy'} size={12} />
+                        <span>{copiedId === `guide-${guideTab}` ? '已复制' : '复制示例'}</span>
+                      </button>
+                    </div>
+                    <code className="opc-guide-cmd-syntax">{detail.exampleCmd}</code>
                   </div>
-                ))}
+                  <div className="opc-guide-tip-box">
+                    <strong>{detail.tipTitle}</strong>
+                    <p>{detail.tipText}</p>
+                  </div>
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
 
           {guideTab === 'faq' && (
             <div className="opc-guide-pane">

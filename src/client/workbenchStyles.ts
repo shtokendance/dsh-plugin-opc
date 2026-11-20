@@ -452,39 +452,66 @@ export const workbenchStyles = faces + `
   padding: 4px 8px;
 }
 .opc-guide-cmd-hint { margin: 0; color: var(--opc-muted); font-size: 11px; }
-.opc-guide-list {
-  margin: 0;
-  padding-left: 18px;
-  display: grid;
-  gap: 8px;
-  color: var(--opc-muted);
-}
-.opc-guide-list strong { color: var(--opc-ink); }
-.opc-guide-list code {
-  background: #f1f5f9;
-  color: var(--opc-ink);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-.opc-guide-app-steps {
+.opc-guide-steps-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 @container (min-width: 520px) {
-  .opc-guide-app-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .opc-guide-steps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.opc-guide-app-step {
+.opc-guide-step-card {
   padding: 12px;
   border-radius: 10px;
   background: var(--opc-paper);
   border: 1px solid var(--opc-line);
   display: grid;
-  gap: 4px;
+  gap: 6px;
 }
-.opc-guide-app-step strong { color: #b45309; font-size: 12px; }
-.opc-guide-app-step p { margin: 0; color: var(--opc-muted); font-size: 11px; }
+.opc-guide-step-top { display: flex; align-items: center; gap: 8px; }
+.opc-guide-step-top strong { color: var(--opc-ink); font-size: 12px; font-weight: 700; }
+.opc-guide-step-num {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--opc-blue-soft);
+  color: var(--opc-blue);
+  font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.opc-step-tone-skills .opc-guide-step-num { background: #f5f3ff; color: #6d28d9; }
+.opc-step-tone-mcp .opc-guide-step-num { background: #ecfdf5; color: #047857; }
+.opc-step-tone-apps .opc-guide-step-num { background: #fffbeb; color: #b45309; }
+.opc-guide-step-card p { margin: 0; color: var(--opc-muted); font-size: 11px; line-height: 1.55; }
+.opc-guide-extras {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+@container (min-width: 520px) {
+  .opc-guide-extras { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
+}
+.opc-guide-example-box,
+.opc-guide-tip-box {
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--opc-line);
+  background: #fff;
+  display: grid;
+  gap: 6px;
+}
+.opc-guide-tip-box { background: #f8fafc; }
+.opc-guide-example-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.opc-guide-example-head strong,
+.opc-guide-tip-box strong { color: var(--opc-ink); font-size: 12px; font-weight: 600; }
+.opc-guide-tip-box p { margin: 0; color: var(--opc-muted); font-size: 11px; line-height: 1.5; }
 .opc-guide-faq-list {
   display: grid;
   border: 1px solid var(--opc-line);
