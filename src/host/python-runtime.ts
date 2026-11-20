@@ -250,7 +250,7 @@ export function windowsInstallDirCandidates(options: {
   ]
   for (const parent of versionedParents) {
     const dirs = safeReadDir(readDir, parent)
-      .filter(name => /^Python3\d*(?:-\d+)?$/i.test(name))
+      .filter(name => /^Python3\d*(?:-[A-Za-z0-9_]+)?$/i.test(name))
       .sort((a, b) => versionSortKey(b) - versionSortKey(a))
     for (const dir of dirs) {
       candidatePaths.push(win32.join(parent, dir, 'python.exe'), win32.join(parent, dir, 'python3.exe'))
@@ -288,10 +288,14 @@ export function windowsInstallDirCandidates(options: {
   for (const condaRoot of [
     win32.join(userProfile, 'miniconda3'),
     win32.join(userProfile, 'anaconda3'),
+    win32.join(userProfile, 'miniforge3'),
+    win32.join(userProfile, 'mambaforge'),
     win32.join(localAppData, 'miniconda3'),
     win32.join(localAppData, 'anaconda3'),
+    win32.join(localAppData, 'miniforge3'),
     win32.join(programData, 'miniconda3'),
     win32.join(programData, 'anaconda3'),
+    win32.join(programData, 'miniforge3'),
   ]) {
     candidatePaths.push(win32.join(condaRoot, 'python.exe'))
   }

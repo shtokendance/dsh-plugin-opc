@@ -2,7 +2,7 @@ import { createWriteStream, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { copyFile, link, lstat, mkdir, readFile, readdir, stat, writeFile, rename, rm } from 'node:fs/promises'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -118,14 +118,31 @@ const workerQueues = new Map<string, Promise<void>>()
 
 async function serializeByRoot<T>(rootKey: string | undefined, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
   if (!rootKey) return fn()
-  const key = process.platform === 'win32' ? rootKey.toLowerCase() : rootKey
+  const resolved = resolve(rootKey)
+  const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved
   const previous = workerQueues.get(key) ?? Promise.resolve()
   let release!: () => void
-  const gate = new Promise<void>(resolve => { release = resolve })
+  const gate = new Promise<void>(resolveGate => { release = resolveGate })
   const tail = previous.catch(() => {}).then(() => gate)
   workerQueues.set(key, tail)
   try {
-    await previous.catch(() => {})
+    if (signal) {
+      signal.throwIfAborted()
+      let onAbort: (() => void) | undefined
+      try {
+        await Promise.race([
+          previous.catch(() => {}),
+          new Promise<never>((_, reject) => {
+            onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'))
+            signal.addEventListener('abort', onAbort, { once: true })
+          }),
+        ])
+      } finally {
+        if (onAbort) signal.removeEventListener('abort', onAbort)
+      }
+    } else {
+      await previous.catch(() => {})
+    }
     signal?.throwIfAborted()
     return await fn()
   } finally {
