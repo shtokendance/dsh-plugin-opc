@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, posix, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -36,25 +36,21 @@ const MIN_PYTHON_MAJOR = 3
 const MIN_PYTHON_MINOR = 9
 const WINDOWS_APPS_SEGMENT = /[\\/]Microsoft[\\/]WindowsApps(?:[\\/]|$)/i
 
-const WINDOWS_SAFE_ENV_KEYS = [
-  'SystemRoot',
-  'SYSTEMROOT',
-  'WINDIR',
+const WINDOWS_SAFE_ENV_KEYS = new Set([
+  'systemroot',
   'windir',
-  'SystemDrive',
-  'SYSTEMDRIVE',
-  'USERPROFILE',
-  'HOMEDRIVE',
-  'HOMEPATH',
-  'LOCALAPPDATA',
-  'APPDATA',
-  'ProgramData',
-  'TEMP',
-  'TMP',
-  'ComSpec',
-  'COMSPEC',
-  'PATHEXT',
-] as const
+  'systemdrive',
+  'userprofile',
+  'homedrive',
+  'homepath',
+  'localappdata',
+  'appdata',
+  'programdata',
+  'temp',
+  'tmp',
+  'comspec',
+  'pathext',
+])
 
 /** Build a minimal subprocess environment that keeps OS runtime paths without leaking credentials. */
 export function workerEnv(
@@ -66,9 +62,13 @@ export function workerEnv(
   if (pathValue !== undefined) env.PATH = pathValue
   if (sourceEnv.HOME !== undefined) env.HOME = sourceEnv.HOME
   if (platform === 'win32') {
-    for (const key of WINDOWS_SAFE_ENV_KEYS) {
-      const value = sourceEnv[key]
-      if (value !== undefined) env[key] = value
+    const seen = new Set(['lang', 'path', 'home'])
+    for (const [key, value] of Object.entries(sourceEnv)) {
+      if (value === undefined) continue
+      const lower = key.toLowerCase()
+      if (!WINDOWS_SAFE_ENV_KEYS.has(lower) || seen.has(lower)) continue
+      seen.add(lower)
+      env[key] = value
     }
   }
   return env
@@ -91,11 +91,17 @@ function safeReadDir(readDir: (path: string) => string[], dir: string): string[]
 }
 
 function versionSortKey(name: string): number {
-  const match = name.match(/(\d+)[._-]?(\d+)?/)
-  if (!match) return 0
-  const major = Number.parseInt(match[1] ?? '0', 10)
-  const minor = Number.parseInt(match[2] ?? '0', 10)
-  return major * 1000 + minor
+  const dotted = name.match(/(\d+)\.(\d+)/)
+  if (dotted) {
+    const base = Number.parseInt(dotted[1], 10) * 1000 + Number.parseInt(dotted[2], 10)
+    return base * 2 + (/-32$/i.test(name) ? 0 : 1)
+  }
+  const compact = name.match(/python(\d)(\d+)/i)
+  if (compact) {
+    const base = Number.parseInt(compact[1], 10) * 1000 + Number.parseInt(compact[2], 10)
+    return base * 2 + (/-32$/i.test(name) ? 0 : 1)
+  }
+  return 0
 }
 
 function isWindowsAppsPath(pathValue: string): boolean {
@@ -104,7 +110,7 @@ function isWindowsAppsPath(pathValue: string): boolean {
 
 function candidateKey(candidate: PythonCommand, platform: NodeJS.Platform): string {
   const pathApi = platform === 'win32' ? win32 : posix
-  const normalizedCmd = isAbsolute(candidate.command) ? pathApi.normalize(candidate.command) : candidate.command
+  const normalizedCmd = pathApi.isAbsolute(candidate.command) ? pathApi.normalize(candidate.command) : candidate.command
   const cmdKey = platform === 'win32' ? normalizedCmd.toLowerCase() : normalizedCmd
   return `${cmdKey}\0${candidate.prefixArgs.join('\0')}`
 }
@@ -250,7 +256,7 @@ export function windowsInstallDirCandidates(options: {
   ]
   for (const parent of versionedParents) {
     const dirs = safeReadDir(readDir, parent)
-      .filter(name => /^Python3\d*(?:-\d+)?$/i.test(name))
+      .filter(name => /^Python3\d*(?:-[A-Za-z0-9_]+)?$/i.test(name))
       .sort((a, b) => versionSortKey(b) - versionSortKey(a))
     for (const dir of dirs) {
       candidatePaths.push(win32.join(parent, dir, 'python.exe'), win32.join(parent, dir, 'python3.exe'))
@@ -272,7 +278,6 @@ export function windowsInstallDirCandidates(options: {
     .sort((a, b) => versionSortKey(b) - versionSortKey(a))) {
     candidatePaths.push(win32.join(pyenvVersionsDir, dir, 'python.exe'))
   }
-  candidatePaths.push(win32.join(userProfile, '.pyenv', 'pyenv-win', 'shims', 'python.exe'))
 
   const scoopApps = win32.join(userProfile, 'scoop', 'apps')
   for (const dir of safeReadDir(readDir, scoopApps)
@@ -288,10 +293,14 @@ export function windowsInstallDirCandidates(options: {
   for (const condaRoot of [
     win32.join(userProfile, 'miniconda3'),
     win32.join(userProfile, 'anaconda3'),
+    win32.join(userProfile, 'miniforge3'),
+    win32.join(userProfile, 'mambaforge'),
     win32.join(localAppData, 'miniconda3'),
     win32.join(localAppData, 'anaconda3'),
+    win32.join(localAppData, 'miniforge3'),
     win32.join(programData, 'miniconda3'),
     win32.join(programData, 'anaconda3'),
+    win32.join(programData, 'miniforge3'),
   ]) {
     candidatePaths.push(win32.join(condaRoot, 'python.exe'))
   }
@@ -395,6 +404,7 @@ async function defaultProbePython(
       return
     }
     let stdout = ''
+    child.stdout.setEncoding('utf8')
     child.stdout.on('data', chunk => {
       if (stdout.length < 4096) stdout += chunk
     })

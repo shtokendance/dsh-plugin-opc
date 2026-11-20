@@ -184,7 +184,7 @@ def scrypt_digest(password_bytes, salt, n, r, p, length):
         payload = json.dumps({"p": password_bytes.hex(), "s": salt.hex(), "n": n, "r": r, "p_par": p, "len": length})
         proc = subprocess.run(
             [node_bin, "-e", "const fs=require('fs'),c=require('crypto');const d=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(c.scryptSync(Buffer.from(d.p,'hex'),Buffer.from(d.s,'hex'),d.len,{N:d.n,r:d.r,p:d.p_par,maxmem:96*1024*1024}).toString('hex'))"],
-            input=payload, text=True, capture_output=True, timeout=30,
+            input=payload, text=True, encoding="utf-8", capture_output=True, timeout=30,
         )
         if proc.returncode == 0 and len(proc.stdout.strip()) == length * 2:
             return proc.stdout.strip()

@@ -31,7 +31,7 @@ def valid_origin(value):
 
 def read_json(value, filename):
     if filename:
-        return json.load(sys.stdin) if filename == "-" else json.loads(Path(filename).read_text())
+        return json.load(sys.stdin) if filename == "-" else json.loads(Path(filename).read_text(encoding="utf-8"))
     return json.loads(value)
 
 
@@ -280,6 +280,12 @@ def execute(contract, operation, params, body=None, approve_write=False, credent
 
 
 def main():
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operation", required=True)
     group = parser.add_mutually_exclusive_group()
@@ -292,7 +298,7 @@ def main():
         root = Path(__file__).resolve().parents[1]
         if (root / ".work-delivery-pending").exists():
             raise ValueError("Work application deployment has not passed verification; this skill is disabled")
-        contract = json.loads((root / "references/operations.json").read_text())
+        contract = json.loads((root / "references/operations.json").read_text(encoding="utf-8"))
         params = read_json(args.params, args.params_file)
         body = read_json("null", args.body_file)
         md = root / "SKILL.md"

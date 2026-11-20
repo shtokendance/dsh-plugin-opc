@@ -2,6 +2,7 @@
 """Deterministic application delivery helpers; analysis and source edits belong to the Agent."""
 
 import argparse
+import errno
 from glob import escape as escape_glob
 import hashlib
 import io
@@ -48,8 +49,39 @@ def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def atomic_replace(tmp_path, target):
+    """Replace target with brief retries for transient Windows sharing/AV locks (WinError 5/32)."""
+    tmp = Path(tmp_path)
+    dst = Path(target)
+    for attempt in range(8):
+        try:
+            tmp.replace(dst)
+            return
+        except PermissionError as exc:
+            winerr = getattr(exc, "winerror", None)
+            if os.name == "nt" and (winerr in (5, 32) or exc.errno in (errno.EACCES, errno.EBUSY)) and attempt < 7:
+                time.sleep(0.02 * (attempt + 1))
+                continue
+            raise
+        except OSError as exc:
+            if os.name == "nt" and exc.errno in (errno.EACCES, errno.EBUSY) and attempt < 7:
+                time.sleep(0.02 * (attempt + 1))
+                continue
+            raise
+
+
 def save(path, data):
-    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=target.name + "-", suffix=".tmp", mode="w", encoding="utf-8", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        atomic_replace(tmp_path, target)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def sha(data):
@@ -402,7 +434,7 @@ def read_environment(env_file=None):
     if env_file:
         path = Path(env_file).resolve()
         require(path.is_file() and not (path.stat().st_mode & 0o077), "env-file must exist with user-only permissions (chmod 600)")
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             key, sep, value = line.partition("=")
@@ -497,13 +529,13 @@ def bundle_work(work, out, admin_login=None):
 
 
 def docker(*args, timeout=60):
-    p = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    p = subprocess.run(["docker", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     require(p.returncode == 0, "Docker command failed: " + args[0] + "; " + "\n".join("[REDACTED]" if secret_lines(line) else line for line in p.stderr.splitlines()[-12:]))
     return p.stdout.strip()
 
 
 def owned_remove(kind, name, run_id):
-    raw = subprocess.run(["docker", kind, "inspect", name], capture_output=True, text=True)
+    raw = subprocess.run(["docker", kind, "inspect", name], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if raw.returncode != 0:
         return
     item = json.loads(raw.stdout)[0]
@@ -538,7 +570,7 @@ def smoke(args):
     run_id = load(work / "inventory.json")["run_id"]
     require(args.container.startswith("opc-adapter-") and re.fullmatch(r"[a-z0-9-]+", args.container), "use an exclusive opc-adapter-* container name")
     require(args.image.startswith("opc-adapter/"), "use an opc-adapter/ image tag")
-    existing_image = subprocess.run(["docker", "image", "inspect", args.image], capture_output=True, text=True)
+    existing_image = subprocess.run(["docker", "image", "inspect", args.image], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if existing_image.returncode == 0:
         labels = json.loads(existing_image.stdout)[0].get("Config", {}).get("Labels", {})
         require(labels.get(LABEL) == run_id, "image tag belongs to another run; choose a fresh tag")
@@ -631,6 +663,12 @@ def cleanup(args):
 
 
 def main():
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("prepare")

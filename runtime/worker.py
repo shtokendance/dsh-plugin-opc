@@ -116,14 +116,16 @@ def compute_change_diffs(source: Path, changes: list[dict]) -> dict[str, str]:
 
 def save_draft_files(path: Path, drafts: dict) -> None:
     # A cancelled worker must leave the previous complete checkpoint readable.
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix="draft-files-", mode="w", encoding="utf-8", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix="draft-files-", suffix=".tmp", mode="w", encoding="utf-8", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
             json.dump(drafts, tmp, ensure_ascii=False, indent=2)
             tmp.write("\n")
-            tmp.close()
-            tmp_path.replace(path)
-        finally:
+        d.atomic_replace(tmp_path, path)
+    finally:
+        if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
 
