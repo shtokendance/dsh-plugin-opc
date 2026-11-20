@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-opc",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "description": "OPC Enterprise Plugin for DeepSeek Harness (DSH)",
   "type": "module",
   "publishConfig": {
