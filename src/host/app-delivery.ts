@@ -39,16 +39,27 @@ export interface DeliveryJob {
 
 export function analysisQuestions(proposal?: AppDocument): string[] {
   const pendingAccount = proposal?.adminAccountPending
-    ? [`请${proposal?.contract?.admin_account?.mode === 'create' ? '设置' : '填写已有的'}管理员账号和密码，直接在当前对话按两行回复「账号：…」和「密码：…」。`]
+    ? [`请${proposal?.contract?.admin_account?.mode === 'create' ? '设置' : '填写已有的'}管理员账号和密码，直接在当前对话回复「账号：…」和「密码：…」（可分两行或同行用空格隔开）。`]
     : []
   return [...new Set<string>([...pendingAccount, ...(proposal?.unresolved ?? []), ...(proposal?.contract?.unresolved ?? [])])]
 }
 
 type AdminReply = { profile: string; mode: 'create' | 'existing'; username: string; password: string }
 
-function readAdminReply(plan: AppDocument, text: string): AdminReply | undefined {
-  const username = text.match(/^\s*(?:账号|帐号|用户名|username)\s*[：:=]\s*([^\r\n]+)$/im)?.[1]?.trim()
-  const password = text.match(/^\s*(?:密码|password)\s*[：:=]\s*([^\r\n]+)$/im)?.[1]?.trim()
+export function readAdminReply(plan: AppDocument, text: string): AdminReply | undefined {
+  let username = text.match(/^\s*(?:[-*•]\s*)?(?:账号|帐号|用户名|username)\s*[：:=]\s*([^\r\n]+)$/im)?.[1]?.trim()
+  let password = text.match(/^\s*(?:[-*•]\s*)?(?:密码|password)\s*[：:=]\s*([^\r\n]+)$/im)?.[1]?.trim()
+  if (!username || !password) {
+    const userFirst = text.match(/(?:^|[\s,，;；])(?:账号|帐号|用户名|username)\s*[：:=]\s*([^\r\n]+?)[\s,，;；]+(?:密码|password)\s*[：:=]\s*([^\r\n]+)/i)
+    const passFirst = userFirst ? undefined : text.match(/(?:^|[\s,，;；])(?:密码|password)\s*[：:=]\s*([^\r\n]+?)[\s,，;；]+(?:账号|帐号|用户名|username)\s*[：:=]\s*([^\r\n]+)/i)
+    if (userFirst) {
+      username = userFirst[1].replace(/[,，;；]+$/, '').trim()
+      password = userFirst[2].trim()
+    } else if (passFirst) {
+      password = passFirst[1].replace(/[,，;；]+$/, '').trim()
+      username = passFirst[2].trim()
+    }
+  }
   if (!username || !password || username.length > 4096 || password.length > 4096 || /\0/.test(username + password)) return undefined
   return { profile: plan.profile, mode: plan.mode, username, password }
 }
