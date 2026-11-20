@@ -161,26 +161,32 @@ def resolve_and_enrich_proposal(
     source = root / "review/source"
     draft_files = load_json_if_exists(root / "draft_files.json", {})
     resolved_changes = []
+    change_errors: list[str] = []
     for idx, change in enumerate(proposal.get("changes", [])):
-        if isinstance(change, dict) and "content" not in change:
-            cid = change.get("id") or change.get("path")
-            if cid and cid in draft_files:
-                staged = draft_files[cid]
-                if change.get("path") and staged.get("path") and change["path"] != staged["path"]:
-                    raise ValueError(f"汇总提案的文件路径与分项提案不一致：{cid} 已对应 {staged['path']}，本次提交 {change['path']}。请核对路径")
-                change = {**staged, **change}
-            elif not change.get("id") and change.get("path"):
-                by_path = next((v for v in draft_files.values() if isinstance(v, dict) and v.get("path") == change["path"]), None)
-                if by_path:
-                    change = {**by_path, **change}
-            if "content" not in change:
-                raise ValueError(f"changes[{idx}] 没有文件内容。请使用已暂存的修改 ID，或先单独暂存该文件")
-        if isinstance(change, dict) and not change.get("id"):
-            change = {**change, "id": change.get("path") or f"change-{idx + 1}"}
-        if isinstance(change, dict) and not change.get("reason"):
-            change = {**change, "reason": "容器化与部署适配"}
-        validate_file_change(source, change)
-        resolved_changes.append(change)
+        try:
+            if isinstance(change, dict) and "content" not in change:
+                cid = change.get("id") or change.get("path")
+                if cid and cid in draft_files:
+                    staged = draft_files[cid]
+                    if change.get("path") and staged.get("path") and change["path"] != staged["path"]:
+                        raise ValueError(f"汇总提案的文件路径与分项提案不一致：{cid} 已对应 {staged['path']}，本次提交 {change['path']}。请核对路径")
+                    change = {**staged, **change}
+                elif not change.get("id") and change.get("path"):
+                    by_path = next((v for v in draft_files.values() if isinstance(v, dict) and v.get("path") == change["path"]), None)
+                    if by_path:
+                        change = {**by_path, **change}
+                if "content" not in change:
+                    raise ValueError(f"changes[{idx}] 没有文件内容。请使用已暂存的修改 ID，或先单独暂存该文件")
+            if isinstance(change, dict) and not change.get("id"):
+                change = {**change, "id": change.get("path") or f"change-{idx + 1}"}
+            if isinstance(change, dict) and not change.get("reason"):
+                change = {**change, "reason": "容器化与部署适配"}
+            validate_file_change(source, change)
+            resolved_changes.append(change)
+        except ValueError as exc:
+            change_errors.append(str(exc))
+    if change_errors:
+        raise ValueError("\n".join(dict.fromkeys(change_errors)))
     proposal["changes"] = resolved_changes
     for key in ("id", "path"):
         d.require(len({change[key] for change in resolved_changes}) == len(resolved_changes), "修改项 ID 和路径必须唯一")
@@ -224,48 +230,84 @@ def resolve_and_enrich_proposal(
                     raise ValueError("本轮未修改失败制品中的文件，不能将相同程序错误标记为已修复；请读取出错文件并修正")
 
     if isinstance(contract, dict):
-        for config in contract.get("configs", []):
-            if not isinstance(config, dict):
-                raise ValueError("配置项必须是对象")
-            if not isinstance(config.get("key"), str) or not d.ENV_NAME.fullmatch(config["key"]):
-                raise ValueError("配置键名无效")
-            if type(config.get("secret")) is not bool or type(config.get("required")) is not bool or not isinstance(config.get("default", ""), str):
-                raise ValueError("配置必须声明 secret、required 和字符串默认值")
-            if config["secret"] and config.get("default"):
-                raise ValueError(f"秘密配置 {config['key']} 不能包含默认值。原值仅通过 source 引用。")
-            if config.get("source") is not None:
-                original_value(source, config["source"])
+        errors: list[str] = []
+        configs = contract.get("configs", [])
+        valid_config_dicts = isinstance(configs, list)
+        if not valid_config_dicts:
+            errors.append("配置列表必须是数组")
+        else:
+            for config in configs:
+                if not isinstance(config, dict):
+                    errors.append("配置项必须是对象")
+                    valid_config_dicts = False
+                    continue
+                if not isinstance(config.get("key"), str) or not d.ENV_NAME.fullmatch(config["key"]):
+                    errors.append("配置键名无效")
+                    valid_config_dicts = False
+                    continue
+                if type(config.get("secret")) is not bool or type(config.get("required")) is not bool or not isinstance(config.get("default", ""), str):
+                    errors.append("配置必须声明 secret、required 和字符串默认值")
+                elif config["secret"] and config.get("default"):
+                    errors.append(f"秘密配置 {config['key']} 不能包含默认值。原值仅通过 source 引用。")
+                if config.get("source") is not None:
+                    try:
+                        original_value(source, config["source"])
+                    except ValueError as exc:
+                        errors.append(str(exc))
 
-        validate_config_origins(root, contract)
+        if valid_config_dicts:
+            try:
+                validate_config_origins(root, contract)
+            except ValueError as exc:
+                errors.extend(line for line in str(exc).splitlines() if line)
 
         unresolved_all = list(proposal.get("unresolved") or []) + list(contract.get("unresolved") or [])
         decisions = proposal.get("decisions", [])
         if decisions is not None:
             if not isinstance(decisions, list):
-                raise ValueError("decisions 必须是列表")
-            decision_ids = set()
-            for decision in decisions:
-                if (
-                    not isinstance(decision, dict)
-                    or not isinstance(decision.get("id"), str)
-                    or not decision["id"]
-                    or decision["id"] in decision_ids
-                    or decision.get("question") not in unresolved_all
-                    or not isinstance(decision.get("impact", ""), str)
-                    or not isinstance(decision.get("options"), list)
-                    or len(decision["options"]) > 4
-                    or any(not isinstance(opt, str) or not opt.strip() for opt in decision["options"])
-                ):
-                    raise ValueError("每项决定须关联未解决问题、使用唯一 ID 并给出至多四个可选回答")
-                decision_ids.add(decision["id"])
+                errors.append("decisions 必须是列表")
+            else:
+                decision_ids = set()
+                for decision in decisions:
+                    if (
+                        not isinstance(decision, dict)
+                        or not isinstance(decision.get("id"), str)
+                        or not decision["id"]
+                        or decision["id"] in decision_ids
+                        or decision.get("question") not in unresolved_all
+                        or not isinstance(decision.get("impact", ""), str)
+                        or not isinstance(decision.get("options"), list)
+                        or len(decision["options"]) > 4
+                        or any(not isinstance(opt, str) or not opt.strip() for opt in decision["options"])
+                    ):
+                        errors.append("每项决定须关联未解决问题、使用唯一 ID 并给出至多四个可选回答")
+                        break
+                    decision_ids.add(decision["id"])
 
-        validate_auth_questions(proposal)
-        resolve_authentication(contract)
-        validate_auth_evidence(source, proposal)
-        d.validate_credential_references(contract)
-        validate_account_plan(source, contract)
+        checks = [
+            lambda: validate_auth_questions(proposal),
+            lambda: resolve_authentication(contract),
+            lambda: validate_auth_evidence(source, proposal),
+            lambda: d.validate_credential_references(contract),
+            lambda: validate_account_plan(source, contract),
+        ]
         if not proposal.get("unresolved") and not contract.get("unresolved"):
-            validate_auth_probe_coverage(contract)
+            checks.append(lambda: validate_auth_probe_coverage(contract))
+        for check in checks:
+            try:
+                check()
+            except ValueError as exc:
+                errors.extend(line for line in str(exc).splitlines() if line)
+
+        errors = list(dict.fromkeys(errors))
+        if errors:
+            if len(errors) == 1:
+                raise ValueError(errors[0])
+            shown = errors[:12]
+            formatted = "\n".join(f"{i}. {msg}" for i, msg in enumerate(shown, 1))
+            if len(errors) > 12:
+                formatted += f"\n...另有 {len(errors) - 12} 项未列出，请先修正以上问题。"
+            raise ValueError(f"发现 {len(errors)} 项提案校验问题，请一次性修正后重新提交：\n{formatted}")
 
     return proposal, discovery_report, transformation_report
 
@@ -463,15 +505,24 @@ def validate_config_origins(root: Path, contract: dict):
     origins = historical_config_origins(root, source)
     generated_keys, _ = origins
     references = set(source_configuration(root, origins)["references"])
+    errors = []
     for config in configs:
         key = config["key"]
-        d.require(not config.get("default"), "原应用配置只能引用已有值，AI 不可提交默认值：" + key)
+        if config.get("default"):
+            errors.append("原应用配置只能引用已有值，AI 不可提交默认值：" + key)
         ref = config.get("source")
+        original_key = False
         if ref is not None:
-            original_value(source, ref)
-        original_key = ref is not None and ref["keys"][-1] == key
-        d.require(key not in generated_keys and (original_key or key in references),
-                  "原应用没有可核实的配置键：" + key)
+            try:
+                original_value(source, ref)
+                original_key = ref["keys"][-1] == key
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+        if key in generated_keys or not (original_key or key in references):
+            errors.append("原应用没有可核实的配置键：" + key)
+    if errors:
+        raise ValueError("\n".join(dict.fromkeys(errors)))
 
 
 
@@ -540,7 +591,20 @@ def main(body):
     if action == "inventory":
         files = d.load(root / "review/inventory.json")["files"]
         start = max(0, int(body.get("start", 1)) - 1)
-        return {"files": [{"path": f["path"], "bytes": f["bytes"]} for f in files[start:start+500]], "total": len(files)}
+        result: dict = {"files": [{"path": f["path"], "bytes": f["bytes"]} for f in files[start:start+500]], "total": len(files)}
+        if start == 0 and (root / "review/source").is_dir():
+            try:
+                cfg = source_configuration(root)
+                result["source_configuration"] = {
+                    "config_files": [
+                        {"path": f["path"], "keys": [field["key"] for field in f.get("fields", [])]}
+                        for f in cfg.get("files", [])
+                    ],
+                    "env_references": cfg.get("references", []),
+                }
+            except Exception:
+                pass
+        return result
     if action == "read":
         source_dir = root / "review/source"
         path = body["path"]
