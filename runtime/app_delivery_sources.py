@@ -11,7 +11,7 @@ def dependency_path(source: Path, module: str = "", name: str = ""):
     mod = source / "go.mod"
     if not mod.is_file():
         raise ValueError("当前源码没有 go.mod；请提供缺失依赖的源码或接口说明")
-    contents = mod.read_text()
+    contents = mod.read_text(encoding="utf-8")
     declarations = re.findall(r"^\s*(?:require\s+)?([A-Za-z0-9_.!/-]+)\s+(v[0-9][A-Za-z0-9.+-]*)\s*(?://[^\n]*)?$", contents, re.M)
     replaced = set(re.findall(r"^\s*(?:replace\s+)?([A-Za-z0-9_.!/-]+)(?:\s+v[^\s]+)?\s*=>", contents, re.M))
     cache = Path(os.environ.get("GOMODCACHE") or str(Path(os.environ.get("GOPATH", str(Path.home() / "go")).split(os.pathsep)[0]) / "pkg/mod"))

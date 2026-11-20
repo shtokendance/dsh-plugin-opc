@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -216,6 +216,60 @@ test('worker executes worker.py with clean UTF-8 Chinese responses on the curren
     await assert.rejects(
       worker({ action: 'read', root, path: 'missing.txt' }),
       error => error instanceof Error && error.message.includes('找不到源码或该路径的暂存稿：missing.txt'),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('concurrent propose_file calls with Chinese comments avoid WinError 32, surrogates, and lost updates', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-py-concurrent-'))
+  const sourceDir = join(root, 'review', 'source')
+  try {
+    await mkdir(sourceDir, { recursive: true })
+    await writeFile(join(sourceDir, 'server.mjs'), 'console.log("ok")\n', 'utf8')
+    await writeFile(join(sourceDir, 'app.mjs'), 'console.log("app")\n', 'utf8')
+
+    await Promise.all([
+      worker({
+        action: 'propose_file',
+        root,
+        id: 'dockerfile',
+        path: 'Dockerfile',
+        reason: '容器化配置（含中文说明）',
+        content: '# 使用 Node 20 运行应用\nFROM node:20-alpine\nWORKDIR /app\nCOPY . .\nCMD ["node", "server.mjs"]\n',
+      }),
+      worker({
+        action: 'propose_file',
+        root,
+        id: 'server-edit',
+        path: 'server.mjs',
+        reason: '补充中文日志注释',
+        content: '// 启动服务（中文注释测试：供应商审核系统）\nconsole.log("ready")\n',
+      }),
+      worker({
+        action: 'propose_file',
+        root,
+        id: 'app-edit',
+        path: 'app.mjs',
+        reason: '更新入口文件',
+        content: '// 入口文件：支持健康检查\nconsole.log("app ready")\n',
+      }),
+    ])
+
+    const drafts = JSON.parse(await readFile(join(root, 'draft_files.json'), 'utf8')) as Record<string, { path: string }>
+    assert.deepEqual(Object.keys(drafts).sort(), ['app-edit', 'dockerfile', 'server-edit'])
+
+    await assert.rejects(
+      worker({
+        action: 'propose_file',
+        root,
+        id: 'bad-env',
+        path: 'Dockerfile',
+        reason: '测试环境变量校验',
+        content: 'FROM node:20-alpine\nENV PORT=8080\n',
+      }),
+      error => error instanceof Error && error.message.includes('AI 不可新增或改写应用环境变量的读取、赋值或默认值：Dockerfile'),
     )
   } finally {
     await rm(root, { recursive: true, force: true })

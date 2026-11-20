@@ -114,48 +114,88 @@ export function contains(actual: any, expected: any): boolean {
   return actual === expected
 }
 
+const workerQueues = new Map<string, Promise<void>>()
+
+async function serializeByRoot<T>(rootKey: string | undefined, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+  if (!rootKey) return fn()
+  const key = process.platform === 'win32' ? rootKey.toLowerCase() : rootKey
+  const previous = workerQueues.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const tail = previous.catch(() => {}).then(() => gate)
+  workerQueues.set(key, tail)
+  try {
+    await previous.catch(() => {})
+    signal?.throwIfAborted()
+    return await fn()
+  } finally {
+    release()
+    if (workerQueues.get(key) === tail) workerQueues.delete(key)
+  }
+}
+
+async function renameWithRetry(src: string, dest: string): Promise<void> {
+  const retryable = new Set(['EPERM', 'EBUSY', 'EACCES'])
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(src, dest)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (process.platform === 'win32' && code && retryable.has(code) && attempt < 6) {
+        await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)))
+        continue
+      }
+      throw error
+    }
+  }
+}
+
 /** Each helper runs as a short-lived process with only the plugin's protocol on stdin. */
 export async function worker(input: AppDocument, signal?: AbortSignal): Promise<any> {
-  const path = fileURLToPath(new URL('../../runtime/worker.py', import.meta.url))
-  // Bundled Host entry lives in lib/index.js; source tests live in src/host/.
-  const runtime = import.meta.url.endsWith('/lib/index.js') ? fileURLToPath(new URL('../runtime/worker.py', import.meta.url)) : path
-  const python = await resolvePythonInterpreter({ signal })
-  return new Promise((resolve, reject) => {
-    const child = spawn(python.command, [...python.prefixArgs, '-I', '-B', '-X', 'utf8', runtime], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: workerEnv(),
-      signal,
-      timeout: 120_000,
-      windowsHide: true,
-    })
-    let stdout = '', stderr = '', exceeded = false
-    child.stdout.on('data', data => { stdout += data; if (stdout.length > 8_000_000) { exceeded = true; child.kill() } })
-    child.stderr.on('data', data => { if (stderr.length < 2000) stderr += data })
-    child.on('error', error => {
-      if (error.message.includes('ENOENT')) resetPythonResolutionCache()
-      reject(new Error(error.message.includes('ENOENT') ? '需要 Python 3.9 或以上版本：请安装后重新打开 DSH。原项目未改动。' : error.message))
-    })
-    child.on('close', (code, closeSignal) => {
-      if (exceeded) return reject(new Error('分析输出超过限制，请缩小读取范围'))
-      try { const result = JSON.parse(stdout); if (!result.ok) throw new Error(result.error); resolve(result.value) }
-      catch (error) {
-        if (stdout) {
-          reject(new Error(error instanceof Error ? error.message : String(error)))
-          return
+  const rootKey = typeof input?.root === 'string' && input.root ? input.root : undefined
+  return serializeByRoot(rootKey, signal, async () => {
+    const path = fileURLToPath(new URL('../../runtime/worker.py', import.meta.url))
+    // Bundled Host entry lives in lib/index.js; source tests live in src/host/.
+    const runtime = import.meta.url.endsWith('/lib/index.js') ? fileURLToPath(new URL('../runtime/worker.py', import.meta.url)) : path
+    const python = await resolvePythonInterpreter({ signal })
+    return new Promise((resolve, reject) => {
+      const child = spawn(python.command, [...python.prefixArgs, '-I', '-B', '-X', 'utf8', runtime], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: workerEnv(),
+        signal,
+        timeout: 120_000,
+        windowsHide: true,
+      })
+      let stdout = '', stderr = '', exceeded = false
+      child.stdout.on('data', data => { stdout += data; if (stdout.length > 8_000_000) { exceeded = true; child.kill() } })
+      child.stderr.on('data', data => { if (stderr.length < 2000) stderr += data })
+      child.on('error', error => {
+        if (error.message.includes('ENOENT')) resetPythonResolutionCache()
+        reject(new Error(error.message.includes('ENOENT') ? '需要 Python 3.9 或以上版本：请安装后重新打开 DSH。原项目未改动。' : error.message))
+      })
+      child.on('close', (code, closeSignal) => {
+        if (exceeded) return reject(new Error('分析输出超过限制，请缩小读取范围'))
+        try { const result = JSON.parse(stdout); if (!result.ok) throw new Error(result.error); resolve(result.value) }
+        catch (error) {
+          if (stdout) {
+            reject(new Error(error instanceof Error ? error.message : String(error)))
+            return
+          }
+          const trimmedStderr = stderr.trim().slice(0, 500)
+          const detail = trimmedStderr
+            ? `：${trimmedStderr}`
+            : closeSignal
+              ? `（进程被信号 ${closeSignal} 中止）`
+              : code !== 0 && code !== null
+                ? `（退出码 ${code}）`
+                : '（未返回任何输出）'
+          reject(new Error(`应用准备工具未能启动${detail}`))
         }
-        const trimmedStderr = stderr.trim().slice(0, 500)
-        const detail = trimmedStderr
-          ? `：${trimmedStderr}`
-          : closeSignal
-            ? `（进程被信号 ${closeSignal} 中止）`
-            : code !== 0 && code !== null
-              ? `（退出码 ${code}）`
-              : '（未返回任何输出）'
-        reject(new Error(`应用准备工具未能启动${detail}`))
-      }
+      })
+      child.stdin.on('error', () => {})
+      child.stdin.end(JSON.stringify(input))
     })
-    child.stdin.on('error', () => {})
-    child.stdin.end(JSON.stringify(input))
   })
 }
 
@@ -199,7 +239,12 @@ export class AppDelivery {
   private async save(root: string, job: DeliveryJob) {
     await mkdir(root, { recursive: true, mode: 0o700 })
     const temp = join(root, `job-${randomUUID()}.tmp`)
-    await writeFile(temp, JSON.stringify(job), { mode: 0o600 }); await rename(temp, join(root, 'job.json'))
+    try {
+      await writeFile(temp, JSON.stringify(job), { mode: 0o600 })
+      await renameWithRetry(temp, join(root, 'job.json'))
+    } finally {
+      await rm(temp, { force: true }).catch(() => {})
+    }
     this.core.emit('change')
   }
   private skillPreferencePath(directory: string, slug: string) {
@@ -1793,7 +1838,7 @@ export class AppDelivery {
       try {
         await writeFile(temp, enabled ? 'enabled' : 'disabled', { mode: 0o600 })
         scope.assertCurrent()
-        await rename(temp, path)
+        await renameWithRetry(temp, path)
       } finally {
         await rm(temp, { force: true })
       }

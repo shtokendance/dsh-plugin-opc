@@ -42,7 +42,7 @@ def check_archive_syntax(archive):
                 raise ValueError(f'语法检查超时：{member.name}') from exc
             if result.returncode:
                 # Do not expose source lines or embedded credentials in parser output.
-                error = next((s.strip() for s in result.stderr.decode(errors='replace').splitlines() if 'SyntaxError:' in s), 'Node.js 解析失败')
+                error = next((s.strip() for s in result.stderr.decode('utf-8', errors='replace').splitlines() if 'SyntaxError:' in s), 'Node.js 解析失败')
                 raise ValueError(f'交付包语法检查失败：{member.name}：{error}；请修复完整文件后重新打包')
             checked += 1
     return {'label': '交付包 JavaScript 语法', 'status': 'passed' if checked else 'pending', 'detail': f'已检查 {checked} 个 .mjs/.cjs 文件；不代表目标版本兼容、启动或业务验证通过' if checked else '没有可用此检查器验证的 .mjs/.cjs 文件；其他语言及 .js/TS/JSX 未检查'}
