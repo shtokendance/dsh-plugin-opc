@@ -145,7 +145,7 @@ def validate_account_plan(source, contract, reuse_source_admin=False):
                 if reuse_source_admin and code_refs and (found := initial_admin_source(source, plan.get("evidence"))):
                     plan["source"] = found
                     return
-                raise ValueError("请核对 admin_account.source 引用的准确行号，name 填源码字段名，避免填写字段的值。") from None
+                raise
         if reuse_source_admin and (found := initial_admin_source(source, plan.get("evidence"))):
             plan["source"] = found
         return
