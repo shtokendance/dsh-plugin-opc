@@ -162,11 +162,20 @@ export const workbenchStyles = faces + `
   gap: 12px;
 }
 .opc-home-intro-copy { display: grid; gap: 4px; flex: 1 1 280px; }
+.opc-home-intro-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .opc-home-intro-copy h2 {
   margin: 0;
   color: var(--opc-ink);
   font-size: 16px;
   font-weight: 700;
+}
+.opc-home-version {
+  font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--opc-blue-soft);
+  color: var(--opc-blue);
+  border: 1px solid #bfdbfe;
 }
 .opc-home-intro-copy p {
   margin: 0;
@@ -185,57 +194,6 @@ export const workbenchStyles = faces + `
   cursor: pointer;
 }
 .opc-panel .opc-home-intro-btn:hover { background: var(--opc-blue-hover); border-color: var(--opc-blue-hover); }
-.opc-home-steps {
-  list-style: none;
-  margin: 0;
-  padding: 12px 0 0;
-  border-top: 1px solid #f1f5f9;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-@container (min-width: 620px) {
-  .opc-home-steps { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-}
-.opc-home-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border-radius: var(--opc-control-radius);
-  background: var(--opc-paper);
-  border: 1px solid var(--opc-line);
-  min-width: 0;
-}
-.opc-home-step-badge {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--opc-blue-soft);
-  color: var(--opc-blue);
-  font-size: 11px;
-  font-weight: 700;
-  flex: 0 0 auto;
-}
-.opc-home-step-badge.is-done { background: #dcfce7; color: #15803d; }
-.opc-home-step-text { display: grid; min-width: 0; }
-.opc-home-step-text strong {
-  color: var(--opc-ink);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.opc-home-step-text span {
-  color: var(--opc-muted);
-  font-size: 10px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .opc-home-section-head {
   display: flex;
   flex-wrap: wrap;

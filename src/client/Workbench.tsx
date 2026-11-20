@@ -117,6 +117,10 @@ export function WorkbenchNavigation({ kind, onSelect }: { kind: PanelKind; onSel
 
 type HomeGuideTab = 'quickstart' | ModuleKind | 'faq'
 
+declare const __OPC_PLUGIN_VERSION__: string | undefined
+
+const PLUGIN_VERSION = typeof __OPC_PLUGIN_VERSION__ !== 'undefined' ? __OPC_PLUGIN_VERSION__ : ''
+
 const GUIDE_TABS: readonly { id: HomeGuideTab; label: string }[] = [
   { id: 'quickstart', label: '对话指令速查' },
   { id: 'knowledge', label: '知识库用法' },
@@ -125,14 +129,6 @@ const GUIDE_TABS: readonly { id: HomeGuideTab; label: string }[] = [
   { id: 'apps', label: '应用部署 4 步流' },
   { id: 'faq', label: '常见问题' },
 ]
-
-const ONBOARDING_STEPS = [
-  { step: '1', title: '配置网关', detail: '测试连接 HTTP 200', done: true },
-  { step: '2', title: '企业登录', detail: '企微 / SSO 授权', done: true },
-  { step: '3', title: '选择空间', detail: '切换企业授权范围', done: true },
-  { step: '4', title: '选用能力', detail: '装技能 / 查库 / 建应用', done: false },
-  { step: '5', title: '对话调用', detail: '输入 @ 或 / 唤起', done: false },
-] as const
 
 const QUICK_COMMANDS = [
   {
@@ -276,26 +272,16 @@ export function WorkbenchHome({ onSelect }: { onSelect: (kind: ModuleKind) => vo
       <div className="opc-home-intro">
         <div className="opc-home-intro-head">
           <div className="opc-home-intro-copy">
-            <h2 id={heading}>欢迎使用 OPC 企业工作台</h2>
+            <div className="opc-home-intro-title-row">
+              <h2 id={heading}>欢迎使用 OPC 企业工作台</h2>
+              {PLUGIN_VERSION && <span className="opc-home-version">v{PLUGIN_VERSION}</span>}
+            </div>
             <p>在 DeepSeek Harness 中无缝连接企业级能力：查文档、调技能、连业务工具，以及将本地应用源码一键 AI 改造并部署上线。</p>
           </div>
           <button type="button" className="opc-home-intro-btn" onClick={() => openGuide('quickstart')}>
             对话指令速查
           </button>
         </div>
-        <ol className="opc-home-steps" aria-label="上手流程">
-          {ONBOARDING_STEPS.map(item => (
-            <li key={item.step} className="opc-home-step">
-              <span className={`opc-home-step-badge ${item.done ? 'is-done' : ''}`}>
-                {item.done ? <AppIcon name="check" size={11} /> : item.step}
-              </span>
-              <span className="opc-home-step-text">
-                <strong>{item.step}. {item.title}</strong>
-                <span>{item.detail}</span>
-              </span>
-            </li>
-          ))}
-        </ol>
       </div>
 
       <div className="opc-home-section-head">
