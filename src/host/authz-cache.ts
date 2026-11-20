@@ -2,7 +2,7 @@ import { AuthManager } from './auth.ts'
 import { OpcError } from './context.ts'
 
 export interface ResourceItem {
-  tenant_id: string; availability: string; catalog_id?: string; knowledge_base_id?: string
+  tenant_id: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; availability: string; catalog_id?: string; knowledge_base_id?: string
   name: string; version?: string; bundle_sha256?: string; description?: string
 }
 function object(value: unknown): Record<string, unknown> {
@@ -14,6 +14,9 @@ export function resourceItem(value: unknown): ResourceItem {
   if (typeof item.tenant_id !== 'string' || typeof item.name !== 'string' || typeof item.availability !== 'string') throw new OpcError('INVALID_PLATFORM_RESPONSE')
   return {
     tenant_id: item.tenant_id, name: item.name, availability: item.availability,
+    source_tenant_id: typeof item.source_tenant_id === 'string' ? item.source_tenant_id : undefined,
+    source_tenant_name: typeof item.source_tenant_name === 'string' ? item.source_tenant_name : undefined,
+    permission: typeof item.permission === 'string' ? item.permission : undefined,
     catalog_id: typeof item.catalog_id === 'string' ? item.catalog_id : undefined,
     knowledge_base_id: typeof item.knowledge_base_id === 'string' ? item.knowledge_base_id : undefined,
     version: typeof item.version === 'string' ? item.version : undefined,
@@ -47,19 +50,20 @@ export class ResourceAuthorization {
     if (!Array.isArray(response.body.spaces) || !response.body.spaces.includes(captured.context.tenant)) throw new OpcError('SPACE_FORBIDDEN')
     this.#sessionExpires = Date.now() + 60_000
   }
-  async knowledge(tenant: string, id: string, list: () => Promise<ResourceItem[]>): Promise<void> {
+  async knowledge(tenant: string, id: string, list: () => Promise<ResourceItem[]>): Promise<ResourceItem> {
     this.sync()
     const captured = this.auth.contexts.capture()
     if (tenant !== captured.context.tenant) throw new OpcError('SPACE_FORBIDDEN')
     await this.session(); captured.assertCurrent()
     const key = JSON.stringify(['knowledge', tenant, id])
     const cached = this.#entries.get(key)
-    if (cached && cached.expires > Date.now()) return
+    if (cached && cached.expires > Date.now()) return cached.item
     // Platform exposes the authorized KB directory, not a single-KB resource route.
     const items = await list(); captured.assertCurrent()
     const item = items.find(item => item.tenant_id === tenant && item.knowledge_base_id === id && item.availability === 'available')
     if (!item) { this.#entries.delete(key); throw new OpcError('RESOURCE_NOT_ACCESSIBLE') }
     this.#entries.set(key, { item, expires: Date.now() + 30_000 })
+    return item
   }
   async catalog(tenant: string, catalog: string): Promise<ResourceItem> {
     this.sync()

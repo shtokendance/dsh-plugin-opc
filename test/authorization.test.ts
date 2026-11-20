@@ -14,18 +14,25 @@ import { contextId } from '../src/host/context.ts'
 async function setup() {
   const home = await mkdtemp(join(tmpdir(), 'opc-authz-'))
   const grant: StoredGrant = { refreshToken: 'r', platformBaseUrl: 'https://platform.example/', lastContext: { issuer: 'https://platform.example', subject: 'alice', tenant: 'A', spaces: ['A','B'], generation: 1 } }
-  const state = { revoked: false, documentKb: 'kb', reads: 0, checks: 0 }
-  const auth = new AuthManager(new PlatformHttp('https://platform.example', 1000, async url => {
-    const path = new URL(String(url)).pathname
+  const state = { source: 'A', documentSource: 'A', revoked: false, documentKb: 'kb', reads: 0, checks: 0 }
+  const auth = new AuthManager(new PlatformHttp('https://platform.example', 1000, async (url, init) => {
+    const endpoint = new URL(String(url))
+    const path = endpoint.pathname
     if (path.endsWith('/refresh')) return Response.json({ access_token: 'a', refresh_token: 'r2', expires_in: 900, subject: 'alice', spaces: ['A','B'], tenant: 'A' })
     if (path.endsWith('/session')) return Response.json({ spaces: ['A','B'] })
     if (path.endsWith('/skills/cat')) {
       state.checks++
       return state.revoked ? Response.json({ error: { code: 'RESOURCE_NOT_ACCESSIBLE' } }, { status: 404 }) : Response.json({ item: { tenant_id: 'A', catalog_id: 'cat', name: 'demo', availability: 'available' } })
     }
-    if (path.endsWith('/knowledge-bases')) return Response.json({ items: [{ tenant_id: 'A', knowledge_base_id: 'kb', name: 'KB', availability: 'available' }], total: 1, complete: true })
-    if (path.endsWith('/search')) return Response.json({ results: [{ knowledge_id: 'doc', source_tenant: 'A', knowledge_base_id: 'kb' }] })
-    if (path.endsWith('/knowledge/doc')) { state.reads++; return Response.json({ source_tenant: 'A', data: { content: 'private', knowledge_base_id: state.documentKb } }) }
+    if (path.endsWith('/knowledge-bases')) {
+      if (state.source !== 'A') assert.equal(endpoint.searchParams.get('include_shared'), 'true')
+      return Response.json({ includes_shared: true, items: [{ tenant_id: 'A', knowledge_base_id: 'kb', name: 'KB', source_tenant_id: state.source, availability: 'available' }], total: 1, complete: true })
+    }
+    if (path.endsWith('/search')) {
+      if (state.source !== 'A') assert.equal(JSON.parse(String(init?.body)).include_shared, true)
+      return Response.json({ results: [{ knowledge_id: 'doc', tenant_id: 'A', source_tenant: state.source, knowledge_base_id: 'kb' }] })
+    }
+    if (path.endsWith('/knowledge/doc')) { state.reads++; return Response.json({ tenant_id: 'A', source_tenant: state.documentSource, data: { content: 'private', knowledge_base_id: state.documentKb } }) }
     throw new Error(`Unexpected path ${path}`)
   }), { read: async () => grant, write: async () => {}, delete: async () => {} }, async () => {})
   await auth.restore()
@@ -62,5 +69,19 @@ test('pinned knowledge blocks unhit reads before network and rejects moved docum
     assert.equal((await core.read('s','t','doc')).source_tenant, 'A')
     state.documentKb = 'other'
     await assert.rejects(core.read('s','t','doc'))
+  } finally { await fixture.close() }
+})
+
+test('pinned conversation reads a shared KB in the recipient space and rejects a mismatched owner', async () => {
+  const fixture = await setup()
+  try {
+    const { core, auth, state } = fixture
+    state.source = state.documentSource = 'C'
+    core.scopes.pin('s', { tenantId: 'A', knowledgeBaseId: 'kb', contextId: contextId(auth.contexts.capture().context) })
+    core.scopes.begin('s', 't')
+    await core.search('s', 't', 'question')
+    assert.equal((await core.read('s', 't', 'doc')).source_tenant, 'C')
+    state.documentSource = 'D'
+    await assert.rejects(core.read('s', 't', 'doc'), { code: 'SCOPE_MISMATCH' })
   } finally { await fixture.close() }
 })

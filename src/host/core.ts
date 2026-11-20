@@ -39,14 +39,22 @@ export class OpcCore extends EventEmitter {
     return response.body
   }
   async catalog(kind: 'skills' | 'knowledge-bases', q = ''): Promise<ResourceItem[]> {
+    return (await this.resourceDirectory(kind, q)).items
+  }
+  async knowledgeDirectory(q = '') {
+    return this.resourceDirectory('knowledge-bases', q)
+  }
+  private async resourceDirectory(kind: 'skills' | 'knowledge-bases', q: string) {
     const captured = this.auth.contexts.capture()
     const items: ResourceItem[] = []
-    let offset = 0, complete = true
+    const sharedQuery = kind === 'knowledge-bases' ? '&include_shared=true' : ''
+    let offset = 0, complete = true, includesShared = kind === 'knowledge-bases'
     for (;;) {
-      const page = await this.request(`/integration/v1/resources/${kind}?tenant_id=${encodeURIComponent(captured.context.tenant)}&q=${encodeURIComponent(q)}&offset=${offset}&limit=100`)
+      const page = await this.request(`/integration/v1/resources/${kind}?tenant_id=${encodeURIComponent(captured.context.tenant)}&q=${encodeURIComponent(q)}&offset=${offset}&limit=100${sharedQuery}`)
       captured.assertCurrent()
       if (!Array.isArray(page.items) || typeof page.total !== 'number') throw new OpcError('INVALID_PLATFORM_RESPONSE')
       complete &&= page.complete === true && (!Array.isArray(page.failures) || page.failures.length === 0)
+      includesShared &&= page.includes_shared === true
       const current = page.items.map(resourceItem)
       if (current.some(item => item.tenant_id !== captured.context.tenant)) throw new OpcError('SCOPE_MISMATCH')
       items.push(...current)
@@ -59,7 +67,8 @@ export class OpcCore extends EventEmitter {
           }
           this.emit('skills-changed')
         }
-        return items
+        if (kind === 'knowledge-bases' && !complete) throw new OpcError('RESOURCE_DIRECTORY_INCOMPLETE', '知识库目录加载不完整，请刷新重试。')
+        return { items, includesShared }
       }
     }
   }
@@ -78,16 +87,17 @@ export class OpcCore extends EventEmitter {
     const captured = this.auth.contexts.capture()
     const scope = this.scopes.searchParams(session, turn, space, knowledgeBaseId)
     if (scope.tenant_id !== captured.context.tenant) throw new OpcError('SPACE_FORBIDDEN')
-    if (scope.knowledge_base_id) {
-      await this.authz.knowledge(captured.context.tenant, scope.knowledge_base_id, () => this.catalog('knowledge-bases'))
-    }
+    const scopedItem = scope.knowledge_base_id
+      ? await this.authz.knowledge(captured.context.tenant, scope.knowledge_base_id, () => this.catalog('knowledge-bases'))
+      : undefined
     captured.assertCurrent()
-    const result = await this.request('/integration/v1/knowledge/search', { query, ...scope })
+    const result = await this.request('/integration/v1/knowledge/search', { query, ...scope, include_shared: true })
     captured.assertCurrent()
     if (!Array.isArray(result.results)) throw new OpcError('INVALID_PLATFORM_RESPONSE')
     const ids = result.results.map(hit => {
       if (!hit || typeof hit !== 'object' || typeof hit.knowledge_id !== 'string') throw new OpcError('INVALID_PLATFORM_RESPONSE')
-      if (scope.knowledge_base_id && ((hit.source_tenant ?? hit.tenant_id) !== scope.tenant_id || hit.knowledge_base_id !== scope.knowledge_base_id)) throw new OpcError('SCOPE_MISMATCH')
+      if ((hit.tenant_id ?? hit.source_tenant) !== scope.tenant_id ||
+        (scopedItem && (hit.knowledge_base_id !== scopedItem.knowledge_base_id || (hit.source_tenant ?? hit.tenant_id) !== (scopedItem.source_tenant_id ?? scopedItem.tenant_id)))) throw new OpcError('SCOPE_MISMATCH')
       return hit.knowledge_id as string
     })
     this.scopes.recordHits(session, turn, ids)
@@ -98,14 +108,16 @@ export class OpcCore extends EventEmitter {
     this.scopes.assertReadable(session, turn, knowledgeId)
     const scope = this.scopes.scope(session, turn)
     await this.authz.session(); captured.assertCurrent()
-    if (scope) await this.authz.knowledge(captured.context.tenant, scope.knowledgeBaseId, () => this.catalog('knowledge-bases'))
+    const scopedItem = scope ? await this.authz.knowledge(captured.context.tenant, scope.knowledgeBaseId, () => this.catalog('knowledge-bases')) : undefined
     captured.assertCurrent()
-    const result = await this.request(`/integration/v1/knowledge/${encodeURIComponent(knowledgeId)}?include_content=true&tenant=${encodeURIComponent(captured.context.tenant)}${scope ? `&knowledge_base_id=${encodeURIComponent(scope.knowledgeBaseId)}` : ''}`)
+    const result = await this.request(`/integration/v1/knowledge/${encodeURIComponent(knowledgeId)}?include_content=true&include_shared=true&tenant=${encodeURIComponent(captured.context.tenant)}${scope ? `&knowledge_base_id=${encodeURIComponent(scope.knowledgeBaseId)}` : ''}`)
     captured.assertCurrent()
     const data = result.data as { knowledge_base_id?: string; content?: string } | undefined
-    this.scopes.verifyDocument(session, turn, String(result.source_tenant ?? ''), data?.knowledge_base_id ?? '')
-    if (result.source_tenant !== captured.context.tenant || !data?.knowledge_base_id) throw new OpcError('SCOPE_MISMATCH')
-    await this.authz.knowledge(captured.context.tenant, data.knowledge_base_id, () => this.catalog('knowledge-bases'))
+    const tenant = result.tenant_id ?? result.source_tenant
+    if (tenant !== captured.context.tenant || !data?.knowledge_base_id) throw new OpcError('SCOPE_MISMATCH')
+    this.scopes.verifyDocument(session, turn, tenant, data.knowledge_base_id)
+    const item = scopedItem ?? await this.authz.knowledge(tenant, data.knowledge_base_id, () => this.catalog('knowledge-bases'))
+    if (result.source_tenant !== (item.source_tenant_id ?? item.tenant_id)) throw new OpcError('SCOPE_MISMATCH')
     captured.assertCurrent()
     if (typeof data?.content !== 'string') throw new OpcError('KNOWLEDGE_CONTENT_UNAVAILABLE', '平台未返回文档正文，需要启用正文读取接口。')
     return result
