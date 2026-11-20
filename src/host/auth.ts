@@ -55,6 +55,7 @@ export class AuthManager extends EventEmitter {
   #refresh = ''
   #expiresAt = 0
   #revision = 0
+  #sessionRequest = 0
   #writes: Promise<void> = Promise.resolve()
   #login: { server: Server; controller: AbortController; timer: ReturnType<typeof setTimeout>; url?: string } | undefined
   #error: PublicAuthState['loginError']
@@ -73,19 +74,12 @@ export class AuthManager extends EventEmitter {
     this.#writes = next.catch(() => {}) // caller owns failure; retain queue usability
     return next
   }
-  private async accept(body: Record<string, unknown>, revision: number, newLogin = false): Promise<string> {
-    if (revision !== this.#revision) throw new OpcError('CONTEXT_CHANGED')
-    const access = text(body.access_token), refresh = text(body.refresh_token)
-    if (!access || !refresh || typeof body.expires_in !== 'number' || body.expires_in <= 0) throw new OpcError('INVALID_TOKEN_RESPONSE')
-    let view = body
-    if (!text(view.subject) || !Array.isArray(view.spaces)) view = { ...body, ...check(await this.http.request('/integration/v1/session', { token: access })) }
-    if (revision !== this.#revision) throw new OpcError('CONTEXT_CHANGED')
+  private sessionContext(view: Record<string, unknown>, old: EnterpriseContext | null, newLogin = false): EnterpriseContext {
     const subject = text(view.subject)
     if (!subject || !Array.isArray(view.spaces) || !view.spaces.every(s => typeof s === 'string')) throw new OpcError('INVALID_SESSION_RESPONSE')
-    const old = this.contexts.current
     const spaces = view.spaces as string[]
     const tenant = old?.subject === subject && spaces.includes(old.tenant) ? old.tenant : spaces.includes(text(view.tenant)) ? text(view.tenant) : spaces[0] ?? ''
-    const context: EnterpriseContext = { issuer: this.http.base.origin, subject, tenant, spaces, generation: newLogin || !old ? this.contexts.epoch + 1 : old.generation,
+    return { issuer: this.http.base.origin, subject, tenant, spaces, generation: newLogin || !old ? this.contexts.epoch + 1 : old.generation + Number(old.tenant !== tenant),
       displayName: text(view.name) || old?.displayName || '', email: text(view.email) || old?.email || '',
       spacesDetail: spaces.map(id => {
         const details = Array.isArray(view.spaces_detail) ? view.spaces_detail : []
@@ -93,6 +87,36 @@ export class AuthManager extends EventEmitter {
         return { id, name: detail && typeof detail.name === 'string' ? detail.name : id }
       }),
     }
+  }
+  async syncSession(): Promise<void> {
+    const revision = this.#revision
+    const request = ++this.#sessionRequest
+    const token = await this.token()
+    const isCurrent = () => revision === this.#revision && request === this.#sessionRequest && token === this.#access
+    if (!isCurrent()) throw new OpcError('CONTEXT_CHANGED')
+    const response = await this.http.request('/integration/v1/session', { token })
+    if (!isCurrent()) throw new OpcError('CONTEXT_CHANGED')
+    if (response.status === 401 || ['SESSION_REVOKED', 'SUBJECT_NOT_PROVISIONED'].includes(text((response.body.error as { code?: unknown } | undefined)?.code))) {
+      await this.invalidateSession()
+    }
+    const view = check(response)
+    const current = this.contexts.current
+    if (!current || view.subject !== current.subject) throw new OpcError('INVALID_SESSION_RESPONSE')
+    const updated = this.sessionContext(view, current)
+    if (JSON.stringify(current) !== JSON.stringify(updated)) {
+      this.contexts.replace(updated)
+      this.changed()
+    }
+  }
+  private async accept(body: Record<string, unknown>, revision: number, newLogin = false): Promise<string> {
+    if (revision !== this.#revision) throw new OpcError('CONTEXT_CHANGED')
+    const access = text(body.access_token), refresh = text(body.refresh_token)
+    if (!access || !refresh || typeof body.expires_in !== 'number' || body.expires_in <= 0) throw new OpcError('INVALID_TOKEN_RESPONSE')
+    let view = body
+    if (!text(view.subject) || !Array.isArray(view.spaces)) view = { ...body, ...check(await this.http.request('/integration/v1/session', { token: access })) }
+    if (revision !== this.#revision) throw new OpcError('CONTEXT_CHANGED')
+    const old = this.contexts.current
+    const context = this.sessionContext(view, old, newLogin)
     try {
       await this.persist(async () => {
         if (revision !== this.#revision) throw new OpcError('CONTEXT_CHANGED')
@@ -134,7 +158,7 @@ export class AuthManager extends EventEmitter {
     try {
       return await this.accept(check(await this.http.request('/integration/v1/auth/refresh', { body: { refresh_token: this.#refresh, client_id: this.clientId, device: this.device } })), revision)
     } catch (error) {
-      if (revision === this.#revision && error instanceof OpcError && ['REFRESH_REUSE_DETECTED', 'SESSION_REVOKED'].includes(error.code)) await this.clear()
+      if (revision === this.#revision && error instanceof OpcError && ['REFRESH_REUSE_DETECTED', 'SESSION_REVOKED', 'SUBJECT_NOT_PROVISIONED'].includes(error.code)) await this.clear()
       throw error
     }
   }

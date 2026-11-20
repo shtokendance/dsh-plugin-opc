@@ -290,6 +290,8 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async logout(): Promise<void> { await this.core.auth.logout() }
   @Remote
+  async syncSession(): Promise<void> { await this.core.auth.syncSession() }
+  @Remote
   async switchTenant(tenantId: string): Promise<void> { this.core.auth.switchTenant(tenantId) }
   @Remote
   async listKnowledgeBases(q: string): Promise<string> { return JSON.stringify(await this.core.catalog('knowledge-bases', q)) }

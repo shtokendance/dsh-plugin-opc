@@ -134,3 +134,26 @@ test('token exchange error surfaces specific code and Chinese guidance', async (
     assert.match(body, /SUBJECT_NOT_PROVISIONED/)
   } finally { await auth.dispose() }
 })
+
+test('syncSession refreshes space names and preserves the selected space until removed', async () => {
+  let spaces = ['a', 'b', 'c']
+  const { auth, grants } = setup(async path => {
+    if (path.endsWith('/refresh')) return Response.json(tokens)
+    assert.equal(path, '/integration/v1/session')
+    return Response.json({ subject: 'alice', spaces, spaces_detail: [{ id: 'c', name: '协作空间' }] })
+  })
+  grants.value = { refreshToken: 'old', platformBaseUrl: 'http://127.0.0.1:3002/', lastContext: { issuer: 'http://127.0.0.1:3002', subject: 'alice', tenant: 'a', spaces: ['a'], generation: 1 } }
+  try {
+    await auth.restore()
+    auth.switchTenant('b')
+    const generation = auth.state.context?.generation
+    await auth.syncSession()
+    assert.equal(auth.state.context?.tenant, 'b')
+    assert.equal(auth.state.context?.generation, generation)
+    assert.deepEqual(auth.state.context?.spacesDetail?.at(-1), { id: 'c', name: '协作空间' })
+    spaces = ['c']
+    await auth.syncSession()
+    assert.equal(auth.state.context?.tenant, 'c')
+    assert.equal(auth.state.context?.generation, Number(generation) + 1)
+  } finally { await auth.dispose() }
+})

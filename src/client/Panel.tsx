@@ -934,7 +934,10 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           {!showSettings && kind !== 'home' && <button
             className="btn-header"
             disabled={busy}
-            onClick={action(load)}
+            onClick={action(async () => {
+              if (kind !== 'apps') await api.syncSession()
+              await load()
+            })}
             title="刷新"
           >
             刷新

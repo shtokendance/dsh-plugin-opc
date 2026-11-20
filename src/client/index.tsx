@@ -91,6 +91,7 @@ function registerPanels(ctx: Context): void {
     startLogin: () => unwrap(wire.startLogin()),
     cancelLogin: () => unwrap(wire.cancelLogin()),
     logout: () => unwrap(wire.logout()),
+    syncSession: () => unwrap(wire.syncSession()),
     switchTenant: tenant => unwrap(wire.switchTenant(tenant)),
     listKnowledgeBases: q => unwrap(wire.listKnowledgeBases(q)),
     listSkillsCatalog: q => unwrap(wire.listSkillsCatalog(q)),
