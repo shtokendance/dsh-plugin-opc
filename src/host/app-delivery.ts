@@ -87,6 +87,9 @@ function checkPublishReceipt(job: DeliveryJob, receipt: AppDocument) {
       (receipt.skill_zip_sha256 && receipt.skill_zip_sha256 !== job.hashes?.['skill.zip'])) {
     throw new Error('发布回执制品摘要不一致')
   }
+  if (Object.hasOwn(receipt, 'published_version') &&
+      (!Number.isSafeInteger(receipt.published_version) || receipt.published_version < 0 ||
+        (receipt.status === 'running' && receipt.published_version !== receipt.version))) throw new Error('发布回执正式版本无效')
   if (['accepted', 'building', 'running', 'failed'].includes(receipt.status) &&
       (!Number.isSafeInteger(receipt.version) || receipt.version < 1)) throw new Error('发布回执缺少有效版本')
 }
@@ -372,6 +375,22 @@ export class AppDelivery {
       await writeFile(join(verDir, 'summary.json'), JSON.stringify({ version, hashes, jobId, requestId }, null, 2), { mode: 0o600 }).catch(() => {})
     }
   }
+  private async applyPublishReceipt(scopeDir: string, root: string, job: DeliveryJob, receipt: AppDocument) {
+    checkPublishReceipt(job, receipt)
+    if (!['accepted', 'building', 'running', 'failed'].includes(receipt.status)) return false
+    job.published = true
+    job.version = Object.hasOwn(receipt, 'published_version') ? receipt.published_version || undefined : receipt.version
+    if (receipt.status === 'failed') {
+      this.recordFailureState(job, receipt.error_message || '部署失败', receipt.build_log?.slice(-8000), job.version)
+    } else {
+      job.status = 'building'
+      job.error = undefined
+      if (job.revision && job.version) {
+        await this.archivePublishedVersion(scopeDir, job, join(root, job.revision, 'bundle'))
+      }
+    }
+    return true
+  }
   private async demoteOtherJobsForSlug(scopeDir: string, slug: string, activeJobId: string) {
     for (const parent of await this.directories(scopeDir)) {
       const entries = await readdir(parent).catch(() => [] as string[])
@@ -417,25 +436,13 @@ export class AppDelivery {
           job = latestJob.job
           // List polling must not lock out explicit Verify while waiting on the network.
           try {
-            if (job.status === 'unknown' && job.requestId) {
+            if (job.requestId && (job.status === 'unknown' || !job.version)) {
               const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected)
-              checkPublishReceipt(job, receipt)
-              if (['accepted', 'building', 'running', 'failed'].includes(receipt.status) && !this.busy.has(id)) {
+              if ((job.status === 'unknown' || ['running', 'failed'].includes(receipt.status)) && !this.busy.has(id)) {
                 await this.exclusive(id, async () => {
                   job = (await this.open(scope.directory, id)).job
-                  if (job.status !== 'unknown' || job.requestId !== latestJob.job.requestId) return
-                  job.published = true
-                  job.version = receipt.version
-                  if (receipt.status === 'failed') {
-                    this.recordFailureState(job, receipt.error_message || '部署失败', receipt.build_log?.slice(-8000), job.version)
-                  } else {
-                    job.status = 'building'
-                    job.error = undefined
-                    if (job.revision && job.version) {
-                      await this.archivePublishedVersion(scope.directory, job, join(root, job.revision, 'bundle'))
-                    }
-                  }
-                  await this.save(root, job)
+                  if (job.status !== latestJob.job.status || job.requestId !== latestJob.job.requestId || job.version !== latestJob.job.version) return
+                  if (await this.applyPublishReceipt(scope.directory, root, job, receipt)) await this.save(root, job)
                 })
               }
             }
@@ -691,7 +698,7 @@ export class AppDelivery {
       if (!targetDesc && typeof existing.description === 'string') {
         targetDesc = existing.description
       }
-      defaultVersionNote = `升级到 v${(existing.current_version || 1) + 1}`
+      defaultVersionNote = '应用升级'
     } else {
       const reserved = await this.checkSlug(input.slug, expected)
       if (!reserved.available) throw new Error('应用标识已被使用，请换一个标识；若需升级已有应用请选择升级')
@@ -1399,14 +1406,9 @@ export class AppDelivery {
       this.core.emit('skills-changed')
       try {
         const result = await this.platform('/publish', expected, { form })
-        checkPublishReceipt(job, result)
         if (result.app_url !== job.url) throw new Error('平台返回地址与确认地址不同')
-        job.published = true
-        job.version = result.version ?? 1
-        if (result.status === 'failed') this.recordFailureState(job, result.error_message || '部署失败', result.build_log?.slice(-8000), job.version)
-        else job.status = 'building'
-        await this.archivePublishedVersion(scope.directory, job, folder)
-        job.events.push(`已上传经过确认的同一交付包 (v${job.version})，等待服务器构建与业务验证`)
+        if (!await this.applyPublishReceipt(scope.directory, root, job, result)) throw new Error('平台尚未确认发布请求')
+        job.events.push('已上传经过确认的同一交付包，等待服务器构建与业务验证')
       } catch (error) {
         if (error instanceof AppRequestError && [400, 401, 403, 404, 409, 413, 422].includes(error.status)) {
           job.status = 'ready'
@@ -1415,21 +1417,9 @@ export class AppDelivery {
           let reconciled = false
           try {
             const reqState = await this.platform(`/${job.slug}/requests/${requestId}`, expected)
-            checkPublishReceipt(job, reqState)
-            if (reqState.status === 'failed') {
-              job.published = true
-              job.version = reqState.version
-              this.recordFailureState(job, reqState.error_message || '部署失败', reqState.build_log?.slice(-8000), reqState.version)
-              reconciled = true
-            } else if (['accepted', 'building', 'running'].includes(reqState.status)) {
-              if (reqState.app_url && reqState.app_url !== job.url) throw new Error('平台返回地址与确认地址不同')
-              job.published = true
-              job.version = reqState.version ?? 1
-              job.status = 'building'
-              job.error = undefined
-              await this.archivePublishedVersion(scope.directory, job, folder)
+            reconciled = await this.applyPublishReceipt(scope.directory, root, job, reqState)
+            if (reconciled && reqState.status !== 'failed') {
               job.events.push('上传连接中断后已通过幂等请求号核实平台接收状态')
-              reconciled = true
             }
           } catch { /* Preserve uncertainty until Platform returns a receipt. */ }
           if (!reconciled) {
@@ -1455,23 +1445,12 @@ export class AppDelivery {
         return view
       }
       if (!['building', 'unknown', 'awaiting_page_verification', 'verified', 'failed', 'publishing', 'verifying'].includes(job.status) || !job.hashes || !job.proposal) throw new Error('应用尚未发布')
-      if (job.status === 'unknown' || job.status === 'publishing') {
+      if (job.status === 'unknown' || job.status === 'publishing' || (job.status === 'building' && !job.version && job.requestId)) {
         if (!job.requestId) throw new Error('缺少上次发布请求号，无法核对结果')
         const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected)
-        checkPublishReceipt(job, receipt)
-        if (receipt.status === 'failed') {
-          job.version = receipt.version
-          job.published = true
-          this.recordFailureState(job, receipt.error_message || '部署失败', receipt.build_log?.slice(-8000), job.version)
-          await this.save(root, job)
-          return this.public(job, root)
-        }
-        if (!['accepted', 'building', 'running'].includes(receipt.status)) return this.public(job, root)
-        job.published = true
-        job.version = receipt.version
-        job.status = 'building'
-        if (job.revision) await this.archivePublishedVersion(scope.directory, job, join(root, job.revision, 'bundle'))
+        if (!await this.applyPublishReceipt(scope.directory, root, job, receipt)) return this.public(job, root)
         await this.save(root, job)
+        if (receipt.status === 'failed' || !job.version) return this.public(job, root)
       }
       const contract = job.proposal.contract
       const supplied: Record<string, string> = {}

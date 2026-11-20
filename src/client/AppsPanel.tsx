@@ -1505,7 +1505,7 @@ export function AppsPanel({
                     <div className="oa-app-card-heading">
                       <div className="oa-app-card-name">
                         <h3 title={app.name}>{app.name}</h3>
-                        {app.current_version && <span className="oa-app-version">v{app.current_version}</span>}
+                        {app.current_version ? <span className="oa-app-version">v{app.current_version}</span> : null}
                       </div>
                       <div className="oa-app-card-slug oa-mono" title={app.slug}>{app.slug}</div>
                     </div>
@@ -1669,8 +1669,7 @@ export function AppsPanel({
                 <div className="oa-alert oa-alert-info">
                   <AppIcon name="sparkle" size={16} />
                   <div>
-                    <strong>升级目标：{upgradeTarget.name}</strong>（<span className="oa-mono">{upgradeTarget.slug}</span>，当前版本 v
-                    {upgradeTarget.current_version || 1}）。将沿用原应用访问地址 <span className="oa-mono">{upgradeTarget.app_url}</span>。
+                    <strong>升级目标：{upgradeTarget.name}</strong>（<span className="oa-mono">{upgradeTarget.slug}</span>，{upgradeTarget.current_version ? `当前版本 v${upgradeTarget.current_version}` : '尚无成功部署版本'}）。将沿用原应用访问地址 <span className="oa-mono">{upgradeTarget.app_url}</span>。
                   </div>
                 </div>
               )}

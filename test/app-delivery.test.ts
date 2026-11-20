@@ -326,7 +326,10 @@ test('real worker preserves source, rejects traversal and stale proposal, builds
       if (path === '/publish') {
         published++
         assert.ok(options?.form?.get('app_tar') instanceof Blob)
-        return { app_url: url, version: 1 }
+        return { app_url: url, status: 'building', version: 1, published_version: 0 }
+      }
+      if (path.startsWith('/test-app/requests/')) {
+        return { status: deployed.status, version: 1, published_version: 1, request_id: path.split('/').at(-1) }
       }
       return deployed
     }
@@ -360,7 +363,8 @@ test('real worker preserves source, rejects traversal and stale proposal, builds
     await assert.rejects(delivery.publish(created.id, { ...confirmation, artifactHash: ready.artifactHash,
       config: [{ key: 'OPTIONAL', value: 'modified-after-confirmation' }] }, expected), /最终确认/)
     assert.equal(published, 0)
-    await publishConfirmed(delivery, created.id, { artifactHash: ready.artifactHash, config: [] }, expected)
+    const accepted = await publishConfirmed(delivery, created.id, { artifactHash: ready.artifactHash, config: [] }, expected)
+    assert.equal(accepted.version, undefined)
     deployed = { status: 'running', app_url: url, current_version: 1, build_log: 'wrong receipts' }
     await assert.rejects(delivery.verify(created.id, expected), /回执/)
     deployed.build_log = ['app.tar', 'skill.zip'].map(name => `[Artifact] ${name}:${ready.hashes[name]}\n`).join('')
@@ -1088,6 +1092,49 @@ test('a healthy old version does not end polling for a newer build', async () =>
     assert.equal(failed.status, 'failed')
     assert.equal(failed.failureStage, 'deployment')
     assert.equal(failed.error, 'build failed')
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('an unnumbered deployment becomes a failed request or a confirmed release from its own receipt', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-publish-receipt-'))
+  try {
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { async read() { return {} }, async write() {} })
+    const id = '2e9fda92-f3b7-4d23-9ae9-9fd1d7d2aa07'
+    const url = 'http://127.0.0.1:1'
+    const root = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context), id)
+    await mkdir(root, { recursive: true })
+    const writeJob = (requestId: string) => writeFile(join(root, 'job.json'), JSON.stringify({
+      id, name: 'App', slug: 'test-app', url, requestId,
+      status: 'building', published: true, events: [], proposal: proposal(url),
+      hashes: { 'app.tar': 'new-app', 'skill.zip': 'new-skill' },
+    }))
+    let status = 'building'
+    let publishedVersion = 0
+    delivery.platform = async path => {
+      if (path === '/test-app') return { current_version: publishedVersion, status: 'running' }
+      assert.match(path, /^\/test-app\/requests\/req-[12]$/)
+      return { status, request_id: path.split('/').at(-1), version: 1, published_version: publishedVersion, error_message: 'build failed' }
+    }
+    await writeJob('req-1')
+    const pending = await delivery.verify(id, expected)
+    assert.equal(pending.status, 'building')
+    assert.equal(pending.version, undefined)
+
+    status = 'failed'
+    const [failed] = await delivery.list(expected)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.version, undefined)
+    assert.equal(failed.error, 'build failed')
+
+    await writeJob('req-2')
+    status = 'running'
+    publishedVersion = 1
+    const [successful] = await delivery.list(expected)
+    assert.equal(successful.version, 1)
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
