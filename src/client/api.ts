@@ -254,6 +254,7 @@ export interface OpcApi {
   startLogin(): Promise<string>
   cancelLogin(): Promise<void>
   logout(): Promise<void>
+  syncSession(): Promise<void>
   switchTenant(tenant: string): Promise<void>
   listKnowledgeBases(q: string): Promise<string>
   listSkillsCatalog(q: string): Promise<string>
