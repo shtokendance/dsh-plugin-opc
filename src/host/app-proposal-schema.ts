@@ -17,7 +17,7 @@ export function proposalParameters(port: number) {
     issues: { ...objects, items: { ...object, properties: {
       id: text, evidence: text, impact: text, recommendation: text,
     } } },
-    unresolved: strings,
+    unresolved: { ...strings, description: '若涉及令牌/登录/账密/凭据/授权码等阻塞问题，必须在 contract.auth_blockers 中添加 question 完全一致的条目（管理员登录通过 admin_account 处理，不要写入 unresolved）' },
     changes: { ...objects, items: { ...object, properties: {
       id: text, path: text, reason: text, group: str,
       content: { ...str, description: '完整文件内容；已通过 opc_delivery_propose_file 暂存的文件省略该字段' },
@@ -32,7 +32,7 @@ export function proposalParameters(port: number) {
       } },
       build_context: { ...strings, required: true },
       health: { ...object, required: true, properties: { path: text, status: { type: 'integer', required: true }, json_contains: { ...object, required: true } } },
-      configs: { ...objects, items: { ...object, properties: {
+      configs: { ...objects, description: '仅填写源码真实存在的配置键（参考 inventory.source_configuration）；default 必须为空字符串 ""；source 仅支持 YAML/JSON/TOML/.env/properties 文件，不支持代码文件', items: { ...object, properties: {
         key: text, default: text, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
         source: { ...object, description: '使用 path 和 keys 引用源配置，禁止写入真实秘密值' },
       } } },
@@ -48,7 +48,7 @@ export function proposalParameters(port: number) {
         source: { ...object, description: '已有可复用明文的 {username,password} 引用：结构化配置 {path,keys}、源码常量 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。缺任何一项则省略 source。' },
         storage: { ...object, description: '首次建号仅在交付副本中写入应用真正读取的 SQLite 或 JSON/YAML 文件，具体结构见 references/contract.md。' },
       } },
-      auth_rules: { ...objects, description: '每条规则须二选一填写 path 或 prefix；精确规则优先', items: { ...object, properties: {
+      auth_rules: { ...objects, description: '每条规则须二选一填写 path 或 prefix；evidence 是规则顶层必填数组（与 auth 平级，不要放在 auth 内部）；同权限页面可用 target="page" 且 prefix="/" 统一覆盖', items: { ...object, properties: {
         target: { ...text, enum: ['api', 'page'] }, path: str, prefix: str, method: str,
         auth: { ...object, required: true, properties: { type: { ...text, enum: ['none', 'header', 'bearer'] } } },
         evidence: { ...strings, required: true, description: '读取工具返回的源码位置数组，例如 ["server.mjs:42"]' },
@@ -68,7 +68,7 @@ export function proposalParameters(port: number) {
       pages: { ...objects, description: '扫描结果由插件合并，可以传 [] 或只补充需要定制的页面',
         items: { ...object, properties: { auth: routeAuth } } },
       verification: object,
-      unresolved: strings,
+      unresolved: { ...strings, description: '若涉及令牌/登录/账密/凭据/授权码等阻塞问题，必须在 contract.auth_blockers 中添加 question 完全一致的条目（管理员登录通过 admin_account 处理，不要写入 unresolved）' },
     } },
     decisions: { ...objects, items: { ...object, properties: {
       id: text, question: text, impact: text, options: { ...strings, required: true },

@@ -18,6 +18,7 @@ declare module '@deepseek-ai/dsh-llm' {
 
 const ANALYSIS_TIMEOUT_MS = 15 * 60_000
 const REPLY_TIMEOUT_MS = 30 * 60_000
+const MAX_VALIDATION_ERRORS = 10
 
 function loadBundledSkillText(relativePath: string): string {
   const fromSrc = fileURLToPath(new URL(`../../runtime/app_delivery/${relativePath}`, import.meta.url))
@@ -189,7 +190,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             }
             return JSON.stringify(await worker({ ...args, root, revision: job.failedRevision || job.revision }, abort))
           } }))
-        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存根目录 Dockerfile 或现有应用代码的必要改动。原配置由用户维护。暂存文件在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
+        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存根目录 Dockerfile 或现有应用代码的必要改动。禁止新增或改写 ENV 环境变量默认值，禁止新增健康检查接口。原配置由用户维护。暂存文件在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
           parameters: {
             id: { type: 'string', required: true },
             path: { type: 'string', required: true },
@@ -209,7 +210,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           parameters: proposalParameters(port), output,
           async execute(args) {
             if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-            if (repeatedProposal || validationErrors.length >= 6) throw new Error('技术方案连续校验未通过，已停止自动重试')
+            if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) throw new Error('技术方案连续校验未通过，已停止自动重试')
             job.events.push(formatToolStep('submit'))
             delivery.core.emit('change')
             let candidate: AppDocument | undefined
@@ -223,7 +224,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               await delivery.submit(job, root, candidate!, abort)
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error)
-              const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 1000) }, abort)
+              const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 2000) }, abort)
               validationErrors.push(detail)
               job.analysisFailure = detail
               if (candidate) {
@@ -243,7 +244,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               }
               job.events.push(`提案校验未通过：${detail}`)
               delivery.core.emit('change')
-              if (validationErrors.length === 6) cancel()
+              if (validationErrors.length === MAX_VALIDATION_ERRORS) cancel()
               throw new Error(detail)
             }
             const questions = analysisQuestions(job.proposal)
@@ -417,7 +418,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           attempt = -1
           continue
         }
-        if (repeatedProposal || validationErrors.length >= 6) {
+        if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) {
           throw new Error(validationErrors.at(-1) ?? '技术方案连续校验未通过，已停止自动重试')
         }
         abort.throwIfAborted()
@@ -431,7 +432,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         const reason = invalidOutput
           ? (badToolJson ? '模型返回的工具参数不是合法 JSON' : '模型输出达到长度上限')
           : providerMessage
-            ? await worker({ action: 'redact_feedback', root, text: providerMessage.slice(0, 1000) }, abort)
+            ? await worker({ action: 'redact_feedback', root, text: providerMessage.slice(0, 2000) }, abort)
             : validationErrors.at(-1) || 'AI 尚未提交完整提案'
         job.analysisFailure = reason
         if (providerMessage && !invalidOutput && !networkError) throw new Error(reason)

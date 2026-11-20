@@ -1687,3 +1687,55 @@ test('delivery rejects invented files, environment settings and config defaults 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('validate aggregates multiple proposal errors in one response', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-validate-multi-'))
+  try {
+    const source = join(root, 'review/source')
+    await mkdir(source, { recursive: true })
+    await writeFile(join(source, '.env'), 'OPC_REGION=source\n')
+    await writeFile(join(source, 'main.py'), 'import os\nregion = os.getenv("OPC_REGION")\n')
+    const plan = proposal('http://127.0.0.1:8080') as AppDocument
+    plan.unresolved = ['是否需要配置外部授权码？']
+    plan.contract.configs = [
+      { key: 'OPC_SERVICE_SLUG', default: '', required: false, secret: false },
+      { key: 'OPC_REGION', default: 'invented', required: true, secret: false, source: { path: '.env', keys: ['OPC_REGION'] } },
+    ]
+    plan.contract.pages = [
+      { path: '/dashboard', purpose: '看板', evidence: ['main.py:1'], auth: { type: 'unknown' } },
+    ]
+    await assert.rejects(
+      worker({ action: 'validate', root, allow_unresolved: true, proposal: plan }),
+      (error: unknown) => {
+        const msg = error instanceof Error ? error.message : String(error)
+        return /发现 \d+ 项提案校验问题/.test(msg)
+          && /OPC_SERVICE_SLUG/.test(msg)
+          && /默认值/.test(msg)
+          && /\/dashboard/.test(msg)
+          && /auth_blockers/.test(msg)
+      },
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('inventory exposes source_configuration metadata without secret values', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-inventory-cfg-'))
+  const sourceInput = join(root, 'input')
+  try {
+    await mkdir(sourceInput, { recursive: true })
+    await writeFile(join(sourceInput, '.env'), 'APP_MODE=demo\nAPI_SECRET=super-secret-value\n')
+    await writeFile(join(sourceInput, 'main.js'), 'console.log(process.env.APP_MODE, process.env.EXTRA_ENV)\n')
+    await worker({ action: 'prepare', root, source: sourceInput, slug: 'test-app', url: 'http://127.0.0.1:8080' })
+    const inv = await worker({ action: 'inventory', root })
+    assert.ok(Array.isArray(inv.files))
+    assert.deepEqual(inv.source_configuration, {
+      config_files: [{ path: '.env', keys: ['APP_MODE', 'API_SECRET'] }],
+      env_references: ['APP_MODE', 'EXTRA_ENV'],
+    })
+    assert.doesNotMatch(JSON.stringify(inv), /super-secret-value/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
