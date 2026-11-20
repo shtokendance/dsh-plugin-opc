@@ -797,6 +797,12 @@ def main(body):
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
     try:
         print(json.dumps({"ok": True, "value": main(json.load(sys.stdin))}, ensure_ascii=False))
     except Exception as exc:

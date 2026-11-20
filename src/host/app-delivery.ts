@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import type { OpcCore } from './core.ts'
 import { identityHash } from './context.ts'
 import { DEFAULT_APP_DOMAIN_ROOT } from './opc-config.ts'
+import { resetPythonResolutionCache, resolvePythonInterpreter, workerEnv } from './python-runtime.ts'
 
 export const ROLLBACK_NOTICE = '回滚恢复代码与运行配置，不自动回退数据库/卷中的业务数据；旧代码和新数据兼容性仍需验证。'
 export type AppDocument = Record<string, any>
@@ -114,25 +115,44 @@ export function contains(actual: any, expected: any): boolean {
 }
 
 /** Each helper runs as a short-lived process with only the plugin's protocol on stdin. */
-export function worker(input: AppDocument, signal?: AbortSignal): Promise<any> {
+export async function worker(input: AppDocument, signal?: AbortSignal): Promise<any> {
   const path = fileURLToPath(new URL('../../runtime/worker.py', import.meta.url))
   // Bundled Host entry lives in lib/index.js; source tests live in src/host/.
   const runtime = import.meta.url.endsWith('/lib/index.js') ? fileURLToPath(new URL('../runtime/worker.py', import.meta.url)) : path
-  const executable = dirname(process.execPath)
-  const bundled = [
-    join(executable, '../Resources/runtime/primary-runtime/dependencies/python/bin/python3'),
-    join(executable, '../../python/bin/python3'),
-  ].find(candidate => existsSync(candidate))
+  const python = await resolvePythonInterpreter({ signal })
   return new Promise((resolve, reject) => {
-    const child = spawn(bundled ?? 'python3', ['-I', '-B', runtime], { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'en_US.UTF-8' }, signal, timeout: 120_000 })
+    const child = spawn(python.command, [...python.prefixArgs, '-I', '-B', '-X', 'utf8', runtime], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: workerEnv(),
+      signal,
+      timeout: 120_000,
+      windowsHide: true,
+    })
     let stdout = '', stderr = '', exceeded = false
     child.stdout.on('data', data => { stdout += data; if (stdout.length > 8_000_000) { exceeded = true; child.kill() } })
     child.stderr.on('data', data => { if (stderr.length < 2000) stderr += data })
-    child.on('error', error => reject(new Error(error.message.includes('ENOENT') ? '需要 Python 3.9 或以上版本：请安装后重新打开 DSH。原项目未改动。' : error.message)))
-    child.on('close', () => {
+    child.on('error', error => {
+      if (error.message.includes('ENOENT')) resetPythonResolutionCache()
+      reject(new Error(error.message.includes('ENOENT') ? '需要 Python 3.9 或以上版本：请安装后重新打开 DSH。原项目未改动。' : error.message))
+    })
+    child.on('close', (code, closeSignal) => {
       if (exceeded) return reject(new Error('分析输出超过限制，请缩小读取范围'))
       try { const result = JSON.parse(stdout); if (!result.ok) throw new Error(result.error); resolve(result.value) }
-      catch (error) { reject(new Error(stdout ? (error instanceof Error ? error.message : String(error)) : `应用准备工具未能启动：${stderr.slice(0, 500)}`)) }
+      catch (error) {
+        if (stdout) {
+          reject(new Error(error instanceof Error ? error.message : String(error)))
+          return
+        }
+        const trimmedStderr = stderr.trim().slice(0, 500)
+        const detail = trimmedStderr
+          ? `：${trimmedStderr}`
+          : closeSignal
+            ? `（进程被信号 ${closeSignal} 中止）`
+            : code !== 0 && code !== null
+              ? `（退出码 ${code}）`
+              : '（未返回任何输出）'
+        reject(new Error(`应用准备工具未能启动${detail}`))
+      }
     })
     child.stdin.on('error', () => {})
     child.stdin.end(JSON.stringify(input))
