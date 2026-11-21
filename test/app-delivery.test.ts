@@ -1915,6 +1915,73 @@ test('skill delivery bundles authored files, explicit mounts and the submitted s
   }
 })
 
+test('skill delivery reports malformed mounts and unresolved configuration references together', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-declarations-'))
+  try {
+    const source = join(home, 'source')
+    const root = join(home, 'job')
+    const url = 'http://test-app.apps.opc.test'
+    await mkdir(source)
+    await writeFile(join(source, 'main.py'), 'import os\nlookup = os.getenv("LOOKUP_URL")\n')
+    await writeFile(join(source, 'login.json'), '{"user":"fixture-user","password":"fixture-value"}')
+    await worker({ action: 'prepare', root, source, slug: 'test-app', url })
+    const base = proposal(url)
+    const plan = { ...base, delivery_format: 1, config_format: 1,
+      skill_markdown: '---\nname: app-test-app\ndescription: 查询记录\n---\n查询记录。\n',
+      contract: { ...base.contract, storage_mounts: [{ id: 'attachments', kind: 'uploads', path: '/app/data' }],
+        resources: [{ id: 'shared-lookup', type: 'redis' }],
+        auth_profiles: { login: { username_env: 'LOGIN_USER', password_env: 'LOGIN_PASSWORD' } },
+      },
+    }
+    const validate = (candidate: AppDocument, allowUnresolved = false) =>
+      worker({ action: 'validate', root, proposal: candidate, allow_unresolved: allowUnresolved })
+    await assert.rejects(validate(plan), (error: unknown) => {
+      const message = String(error)
+      return message.includes('contract.storage_mounts[0]') && message.includes('name, container_path') &&
+        message.includes('contract.resources[0].id') && message.includes('shared-lookup') &&
+        message.includes('LOGIN_USER') && message.includes('LOGIN_PASSWORD')
+    })
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { read: async () => ({}), write: async () => {} })
+    const id = '04c9e4d1-498e-4d2e-947a-a3c71d6dde30'
+    const analysisSessionId = 'b1698d05-e8b4-4eab-a038-baa082fd737c'
+    const jobRoot = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context), id)
+    await mkdir(jobRoot, { recursive: true })
+    await writeFile(join(jobRoot, 'job.json'), JSON.stringify({ id, name: '示例应用', slug: 'test-app', url, session: 'parent',
+      status: 'ready', events: [], proposal: plan, analysisSessionId, modelSelection: { provider: 'fixture', model: 'chosen' } }))
+    const reopened = await delivery.reopenReview(id, expected)
+    assert.equal(reopened.status, 'failed')
+    assert.equal(reopened.failureStage, 'analysis')
+    assert.equal(reopened.analysisSessionId, analysisSessionId)
+    assert.equal(reopened.model, 'chosen')
+    assert.equal(reopened.proposalHash, fingerprint(plan))
+    assert.match(reopened.error, /contract\.storage_mounts\[0\]/)
+    assert.match(reopened.error, /contract\.resources\[0\]/)
+    const corrected = {
+      ...plan,
+      contract: { ...plan.contract,
+        storage_mounts: [{ name: 'attachments', kind: 'uploads', container_path: '/app/data' }],
+        configs: [{ key: 'LOOKUP_URL', required: true, secret: false, default: '', resource_id: 'shared-lookup',
+          resource_key: 'REDIS_URL', value_plan: { kind: 'resource' } }],
+        credential_sources: {
+          LOGIN_USER: { path: 'login.json', keys: ['user'] },
+          LOGIN_PASSWORD: { path: 'login.json', keys: ['password'] },
+        },
+      },
+    }
+    assert.equal((await validate(corrected)).valid, true)
+    assert.equal((await validate({ ...corrected, contract: { ...corrected.contract,
+      configs: [], resources: [], storage_mounts: [] } })).valid, true)
+    assert.equal((await validate({ ...corrected, unresolved: ['等待确认资源'], contract: { ...corrected.contract,
+      configs: [] } }, true)).valid, true)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('source configuration inventory reads imported files and masks credentials', async () => {
   const root = await mkdtemp(join(tmpdir(), 'opc-source-config-'))
   try {

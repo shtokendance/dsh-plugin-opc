@@ -55,7 +55,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
         } : {}),
       } },
       health: { ...object, description: '可选。仅用于标识源码已有的健康入口，业务验证不得使用该入口。没有则省略。', properties: { path: text, status: { type: 'integer' }, json_contains: object } },
-      configs: { ...objects, description: '填写应用实际使用的配置键。默认值必须能从源码确认，不能使用示例占位符。用户给定的实际值写 value。由平台注入时写资源 ID 和资源字段名。', items: { ...object, properties: {
+      configs: { ...objects, description: '完整列出本次部署使用的运行配置。已核实没有运行配置时填 []。默认值须有源码依据，用户给定的值写 value；平台注入项填写 resource_id 和 resource_key。', items: { ...object, properties: {
         key: text, default: text, value: { ...str, description: '本次部署已确定的实际值，包括用户给出的口令或连接串。未确定时省略。' }, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
         app_default: { ...str, description: '填写源码中的兜底默认值（只读展示参考，不会自动注入）' },
         source: { ...object, description: '使用 path 和 keys 定位源配置' },
@@ -68,9 +68,13 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
           encoding: { ...str, enum: ['base64', 'base64url', 'hex'] },
         } },
       } } },
-      resources: objects,
-      storage_mounts: { ...objects, required: true, description: '完整挂载清单，没有挂载时为 []。' },
-      credential_sources: { ...object, description: '用于业务技能的已有凭据源码引用。键是登录凭据的引用名，值为 {path,keys} 或 {path,line,name}。不创建部署环境变量，不填写实际账密。' },
+      resources: { ...objects, description: '列出本次选择的资源。填写 id 时，须在 configs 或 storage_mounts 中声明对应绑定。' },
+      storage_mounts: { ...objects, description: '每项必须有 name、kind、container_path。container_path 是容器内绝对目录；没有挂载时填 []。resource_id 可以留给用户确认。',
+        items: { ...object, properties: {
+          name: str, kind: str, container_path: str, purpose: str, resource_id: str,
+        } },
+      },
+      credential_sources: { ...object, description: '用于业务技能的已有凭据源码引用。键是登录凭据的引用名，值为 {path,keys} 或 {path,line,name}。鉴权使用的引用名须与 configs 或本对象对应。' },
       auth_profile: { ...object, description: '保留原认证；凭据只写运行时环境变量名', properties: {
         page_auth_required: bool, api_auth_required: bool, username_env: str, password_env: str,
         token_env: str, login_url: str, login_method: str, token_json_path: str,

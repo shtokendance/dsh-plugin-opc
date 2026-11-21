@@ -201,6 +201,77 @@ def validate_config_value_plan(proposal, config):
     d.require(set(plan) <= allowed, f"配置 {key} 的 value_plan 只能包含取值方式和生成规格")
 
 
+def delivery_declaration_errors(contract, *, complete=True):
+    errors = []
+    configs = contract.get("configs")
+    mounts = contract.get("storage_mounts")
+    if (complete or configs is not None) and not isinstance(configs, list):
+        errors.append("contract.configs 必须声明为数组，无运行配置时填 []")
+    if not isinstance(mounts, list):
+        errors.append("contract.storage_mounts 必须声明为数组，无挂载时填 []")
+        mounts = []
+
+    paths = set()
+    for index, mount in enumerate(mounts):
+        field = f"contract.storage_mounts[{index}]"
+        if not isinstance(mount, dict):
+            errors.append(f"{field} 必须是对象")
+            continue
+        path = mount.get("container_path")
+        valid_path = (isinstance(path, str) and path.startswith("/") and not path.startswith("//")
+                      and path != "/" and path == path.strip() and ".." not in path.split("/")
+                      and not any(ch in path for ch in ("\\", "\0", "\r", "\n")))
+        checks = {
+            "name": isinstance(mount.get("name"), str) and bool(mount["name"].strip()),
+            "kind": mount.get("kind") in ("state-data", "sqlite", "uploads", "exports", "backups"),
+            "container_path": valid_path,
+        }
+        missing = [key for key, valid in checks.items() if not valid]
+        if missing:
+            errors.append(f"{field} 缺少或格式无效：{', '.join(missing)}。请使用部署契约字段和容器内的绝对目录")
+        if valid_path:
+            if path in paths:
+                errors.append(f"{field}.container_path 与另一条挂载重复：{path}")
+            paths.add(path)
+
+    if not complete:
+        return errors
+
+    config_rows = [item for item in configs if isinstance(item, dict)] if isinstance(configs, list) else []
+    bound_resources = {item["resource_id"] for item in [*config_rows, *mounts]
+                       if isinstance(item, dict) and isinstance(item.get("resource_id"), str)}
+    resources = contract.get("resources", [])
+    if isinstance(resources, list):
+        for index, resource in enumerate(resources):
+            identifier = resource.get("id") if isinstance(resource, dict) else None
+            if isinstance(identifier, str) and identifier.strip() and identifier not in bound_resources:
+                errors.append(f"contract.resources[{index}].id 引用 {identifier}，但没有对应的配置字段或挂载绑定")
+
+    keys = {item["key"] for item in config_rows if isinstance(item.get("key"), str)}
+    sources = contract.get("credential_sources")
+    if isinstance(sources, dict):
+        keys.update(sources)
+
+    def check_reference(field, key):
+        if isinstance(key, str) and d.ENV_NAME.fullmatch(key) and key not in keys:
+            errors.append(f"{field} 引用 {key}，但未在 contract.configs 或 contract.credential_sources 声明来源")
+
+    profiles = contract.get("auth_profiles")
+    named_profiles = [(f"auth_profiles.{name}", profile) for name, profile in profiles.items()] if isinstance(profiles, dict) else []
+    for field, profile in [("auth_profile", contract.get("auth_profile")), *named_profiles]:
+        if isinstance(profile, dict):
+            for key in ("username_env", "password_env", "token_env"):
+                check_reference(f"contract.{field}.{key}", profile.get(key))
+    for collection in ("apis", "pages", "auth_rules"):
+        entries = contract.get(collection)
+        if isinstance(entries, list):
+            for index, entry in enumerate(entries):
+                auth = entry.get("auth") if isinstance(entry, dict) else None
+                if isinstance(auth, dict) and auth.get("type") in ("header", "bearer") and not auth.get("profile"):
+                    check_reference(f"contract.{collection}[{index}].auth.env", auth.get("env"))
+    return errors
+
+
 def resolve_and_enrich_proposal(
     root: Path,
     proposal: dict,
@@ -287,7 +358,6 @@ def resolve_and_enrich_proposal(
 
     if skill_delivery:
         d.require(not contract.get("admin_account"), "按技能声明应用自己的账号配置和登录引用，不使用插件建号方案")
-        d.require(isinstance(contract.get("storage_mounts"), list), "请声明 storage_mounts，没有挂载时填写 []")
         markdown = proposal.get("skill_markdown")
         d.require(isinstance(markdown, str) and markdown.startswith("---\n") and len(markdown.encode("utf-8")) <= 128_000
                   and "<!-- opc-admin-login -->" not in markdown,
@@ -315,7 +385,11 @@ def resolve_and_enrich_proposal(
                     raise ValueError("本轮未修改失败制品中的文件，不能将相同程序错误标记为已修复；请读取出错文件并修正")
 
     if isinstance(contract, dict):
-        errors: list[str] = d.contract_shape_errors(contract) if skill_delivery else []
+        unresolved_all = list(proposal.get("unresolved") or []) + list(contract.get("unresolved") or [])
+        errors: list[str] = (
+            d.contract_shape_errors(contract) + delivery_declaration_errors(contract, complete=not unresolved_all)
+            if skill_delivery else []
+        )
         configs = contract.get("configs", [])
         valid_config_dicts = isinstance(configs, list)
         if not valid_config_dicts:
@@ -362,7 +436,6 @@ def resolve_and_enrich_proposal(
             except ValueError as exc:
                 errors.extend(line for line in str(exc).splitlines() if line)
 
-        unresolved_all = list(proposal.get("unresolved") or []) + list(contract.get("unresolved") or [])
         decisions = proposal.get("decisions", [])
         if decisions is not None:
             if not isinstance(decisions, list):
@@ -723,9 +796,12 @@ def main(body):
         )
         return {"prompt": prompt, "source_path": str(snapshot), "revision": job["revision_count"]}
     if action == "validate_deployment_scope":
+        proposal = body["proposal"]
+        if proposal.get("delivery_format") == 1:
+            errors = delivery_declaration_errors(proposal["contract"])
+            d.require(not errors, "\n".join(errors))
         # Remote/restored version records can lack a local source snapshot.
         if (root / "review/source").is_dir():
-            proposal = body["proposal"]
             for change in proposal.get("changes", []):
                 if proposal.get("delivery_format") == 1:
                     validate_skill_file(root / "review/source", change)

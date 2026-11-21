@@ -11,6 +11,7 @@
 - `configs` 只列应用实际使用的环境变量。每个条目填写 `key, description, required, secret, default`，可用 `source: {path, keys}` 引用真实配置。`default` 或 `app_default` 填源码确认的值；用户给出的本次实际值写 `value`。选择平台资源时填写 `resource_id` 和 `resource_key`，使用 `config_values` 读取已选字段的实际值。配置文件本身通过改造差异展示并随应用包保存。
 - 每个必填配置都在 `value_plan.kind` 声明可执行的来源。`default` 用经源码证实的默认值，`source` 用真实原配置引用，`resource` 用资源及字段映射，`input` 由用户在部署会话或表单填写，`generate` 由系统按规格生成。生成项须为敏感配置，另填 `bytes`（16–128 个随机字节）和 `encoding`（`base64`、`base64url` 或 `hex`），均须符合源码实际约束。使用提交工具为当前任务提供的取值方式。
 - 用 `config_values` 核对当前任务已取得的配置值。部署会话、交付 JSON 和确认表单展示实际值，用户可以替换未锁定的配置。还未取得的值明确标为待填写。复用的业务技能通过配置键使用当前部署值。
+- 提交 `readiness.outcome: ready` 前，逐项核对向用户说明的运行配置已经写入 `contract.configs`。确实不需要运行配置时填 `[]`。选择了带 `id` 的平台资源时，在配置或挂载中声明真实绑定。只供业务技能读取的现有凭据使用 `contract.credential_sources`，鉴权引用名须对应已声明的配置或凭据来源。
 - `storage_mounts` 必须完整列出。没有挂载时填 `[]`。每项填写 `name, kind, container_path`，其中 `kind` 用 `state-data`、`sqlite`、`uploads`、`exports` 或 `backups`，可写 `purpose, resource_id`。使用容器内路径和资源引用。
 - `apis` 和 `pages` 填写实际供技能使用的路由及证据。插件不会回填扫描出来的路由。复用一条已证实的共同鉴权规则时写 `auth_rules`，特殊路由通过自身 `auth` 声明例外。cookie 登录用 `auth_profiles` 记录登录路由和用户名、口令的配置引用，规则绑定需授权页面或 API，不在公开登录路由上声明已有登录。接口结构见 `contract.md` 中的 API、页面和认证协议章节。无接口填 `[]`。写入、删除、外部操作的 `confirmation_required` 必须为 true。
 - `verification` 描述最终验收要证明的真实业务目标，供运行阶段选择检查。
