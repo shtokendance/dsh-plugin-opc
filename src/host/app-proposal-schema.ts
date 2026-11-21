@@ -14,10 +14,11 @@ export function proposalParameters(port: number, portLocked = true) {
   // Keep fields optional at the top level for the legacy proposal string.
   return {
     summary: { ...str, description: '中文改造摘要；使用结构化参数时必填' },
+    skill_markdown: { ...str, description: '按当前改造技能要求生成可用的应用 SKILL.md，含 YAML 名称与说明，记录真实业务操作与调用方式，只写凭据引用' },
     issues: { ...objects, items: { ...object, properties: {
       id: text, evidence: text, impact: text, recommendation: text,
     } } },
-    unresolved: { ...strings, description: '仅填写必须由用户处理的部署阻塞。鉴权阻塞项与 contract.auth_blockers 的 question 保持一致。管理员账密使用 admin_account。' },
+    unresolved: { ...strings, description: '仅填写必须由用户处理的部署阻塞。鉴权阻塞项与 contract.auth_blockers 的 question 保持一致。' },
     changes: { ...objects, items: { ...object, properties: {
       id: text, path: text, reason: text, group: str,
       content: { ...str, description: '完整文件内容；已通过 opc_delivery_propose_file 暂存的文件省略该字段' },
@@ -37,34 +38,38 @@ export function proposalParameters(port: number, portLocked = true) {
         },
       } },
       build_context: { ...strings, required: true },
+      data_plan: { ...object, required: true, properties: {
+        strategy: { ...text, enum: ['initialize', 'reuse', 'postgres_copy'] },
+        summary: text, recovery: text,
+        source_resource_id: str, target_resource_id: str, rehearsal_resource_id: str,
+        migration_files: strings,
+      } },
       health: { ...object, description: '可选。仅用于标识源码已有的健康入口，业务验证不得使用该入口。没有则省略。', properties: { path: text, status: { type: 'integer' }, json_contains: object } },
-      configs: { ...objects, description: '仅填写源码真实存在的配置键（参考 inventory.source_configuration）；default 必须为空字符串 ""；source 仅支持 YAML/JSON/TOML/.env/properties 文件，不支持代码文件；不要将 *.example/*.sample/*.template 示例文件里的 PORT 或占位密钥作为真实运行值绑定；如应用存在代码兜底默认值（仅非敏感），可写入 app_default 供第 3 步参考展示', items: { ...object, properties: {
+      configs: { ...objects, description: '填写应用实际使用的配置键。非敏感默认值必须能从源码确认；凭据和示例占位符不能写成默认值。由平台注入时写资源 ID 和资源字段名。', items: { ...object, properties: {
         key: text, default: text, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
         app_default: { ...str, description: '仅非敏感配置可填写源码中的兜底默认值（只读展示参考，不会自动注入）' },
         source: { ...object, description: '使用 path 和 keys 引用源配置，禁止写入真实秘密值' },
+        resource_id: str,
+        resource_key: str,
       } } },
       resources: objects,
-      storage_mounts: objects,
+      storage_mounts: { ...objects, required: true, description: '完整挂载清单，没有挂载时为 []。' },
+      credential_sources: { ...object, description: '用于业务技能的已有凭据源码引用。键是登录凭据的引用名，值为 {path,keys} 或 {path,line,name}。不创建部署环境变量，不填写实际账密。' },
       auth_profile: { ...object, description: '保留原认证；凭据只写运行时环境变量名', properties: {
         page_auth_required: bool, api_auth_required: bool, username_env: str, password_env: str,
         token_env: str, login_url: str, login_method: str, token_json_path: str,
       } },
       auth_profiles: { ...object, description: '按 ID 保存登录方式。例：{"account":{"login_url":"/api/session","login_method":"POST","username_env":"APP_USER","password_env":"APP_PASSWORD"}}。profile ID 只出现一层，接口通过 auth.profile 引用。非标准登录字段用 login_body_template，仅允许账号和密码占位符。' },
-      admin_account: { ...object, description: '按应用源码证据选择 existing 或 create。仅描述账号来源或写入位置，不提交实际账密。', properties: {
-        mode: { ...text, enum: ['existing', 'create'] }, profile: text, evidence: strings,
-        source: { ...object, description: '为已有可复用账密提供 {username,password} 引用：结构化配置 {path,keys}、源码 {path,line,name} 或 SQLite 明文字段 {path,table,column,where}。源码 name 填字段名（如 username、passwordHash），line 填定义该字段的行号，禁止填真实密码。只有源码和真实配置均缺少可复用账密时才省略 source。' },
-        storage: { ...object, description: '首次建号仅在交付副本中写入应用真正读取的 SQLite 或 JSON/YAML 文件，具体结构见 references/contract.md。' },
-      } },
       auth_rules: { ...objects, description: '共用鉴权写一条 prefix 规则；公开登录等例外用 path 和 method。登录方式写在受保护规则的 auth.profile，不能只写在公开登录接口上。evidence 在规则顶层。', items: { ...object, properties: {
         target: { ...text, enum: ['api', 'page'] }, path: str, prefix: str, method: str,
         auth: { ...object, required: true, properties: { type: { ...text, enum: ['none', 'header', 'bearer'] }, profile: str, header: str, env: str } },
         evidence: { ...strings, required: true, description: '读取工具返回的源码位置数组，例如 ["server.mjs:42"]' },
       } } },
-      auth_blockers: { ...objects, description: '只填确实阻塞改造的外部授权或角色决定；管理员登录通过 admin_account 处理', items: { ...object, properties: {
+      auth_blockers: { ...objects, description: '只填确实阻塞改造的外部授权或角色决定。', items: { ...object, properties: {
         question: text, evidence: { ...strings, required: true }, affected: { ...strings, required: true }, action: text,
         reason: { ...text, enum: ['external_authorization', 'missing_credential', 'role_change'] },
       } } },
-      apis: { ...objects, description: '扫描结果由插件合并，可以传 [] 或只补充需要定制的接口', items: { ...object, properties: {
+      apis: { ...objects, required: true, description: '填写技能可使用的真实接口，没有时为 []。', items: { ...object, properties: {
         id: text, method: text, path: text, purpose: text,
         evidence: { ...strings, required: true }, parameters: { ...objects, required: true },
         request_body: { oneOf: [{ type: 'null' }, object], required: true },
@@ -72,10 +77,10 @@ export function proposalParameters(port: number, portLocked = true) {
         effect: { ...text, enum: ['read', 'write', 'destructive', 'external'] },
         confirmation_required: { ...bool, required: true, description: 'effect 为 write、destructive 或 external 时必须为 true' },
       } } },
-      pages: { ...objects, description: '扫描结果由插件合并，可以传 [] 或只补充需要定制的页面',
+      pages: { ...objects, required: true, description: '填写技能可使用的真实页面，没有时为 []。',
         items: { ...object, properties: { auth: routeAuth } } },
-      verification: { ...object, description: '一个可核实响应字段的代表性只读业务用例即可。有受保护的只读业务接口时选其中一个。纯页面应用填写浏览器用例。' },
-      unresolved: { ...strings, description: '仅保留阻塞部署且需用户决定的问题。可选集成配置、改密建议、部署后才能确认的事项放在摘要。鉴权阻塞项使用 auth_blockers，管理员账密使用 admin_account。' },
+      verification: { ...object, description: '说明 AI 部署验收的业务目标和可取得的证据。' },
+      unresolved: { ...strings, description: '仅保留阻塞部署且需用户决定的问题。可选集成配置、改密建议、部署后才能确认的事项放在摘要。' },
     } },
     decisions: { ...objects, items: { ...object, properties: {
       id: text, question: text, impact: text, options: { ...strings, required: true },

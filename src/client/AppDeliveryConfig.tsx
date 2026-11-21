@@ -44,6 +44,7 @@ export const configName = (item: AppConfigItem) =>
   names[item.key] || item.description?.split(/[。；\n]/)[0] || item.key || '新增配置'
 
 function matches(item: AppConfigItem, resource: ResourceSummary) {
+  if (resource.id === item.resource_id && item.resource_key && resource.env_keys?.includes(item.resource_key)) return true
   if (!resource.env_keys?.includes(item.key)) return false
   if (/DATABASE|DB_DSN|CONNECTION_STRING/i.test(item.key)) {
     const type =
@@ -97,6 +98,7 @@ function defaultDisplayValue(item: AppConfigItem, original?: AppConfigItem, lock
 
 export function AppDeliveryConfig({
   configs,
+  allowNew = true,
   originals,
   resources,
   onChange,
@@ -105,6 +107,7 @@ export function AppDeliveryConfig({
   readOnly = false,
 }: {
   configs: AppConfigItem[]
+  allowNew?: boolean
   originals: AppConfigItem[]
   resources: ResourceSummary[]
   compact?: boolean
@@ -238,7 +241,6 @@ export function AppDeliveryConfig({
                 onClick={() =>
                   update(index, {
                     ...original,
-                    resource_id: undefined,
                     local_connection_confirmed: false,
                   })
                 }
@@ -419,13 +421,14 @@ export function AppDeliveryConfig({
                       onChange(
                         configs.map(config =>
                           resource.env_keys.includes(config.key)
-                            ? { ...config, value: '', value_source: 'resource', resource_id: resource.id }
+                            ? { ...config, value: '', value_source: 'resource', resource_id: resource.id, resource_key: undefined }
                             : config,
                         ),
                       )
                       return
                     }
-                    update(index, { ...item, value: '', value_source: 'resource', resource_id: resource.id })
+                    update(index, { ...item, value: '', value_source: 'resource', resource_id: resource.id,
+                      resource_key: resource.id === item.resource_id ? item.resource_key : undefined })
                   }}
                 >
                   {item.resource_id === resource.id ? '✓ ' : '改用 '}
@@ -507,7 +510,7 @@ export function AppDeliveryConfig({
               留空或保持不变将沿用应用默认值；修改仅在本次容器运行时生效，不改本地源码。密码与密钥不会发送给 AI。
             </p>
           </div>
-          {!readOnly && (
+          {!readOnly && allowNew && (
             <button
               type="button"
               className="oa-btn oa-btn-sm"
@@ -527,7 +530,7 @@ export function AppDeliveryConfig({
 
       {configs.length === 0 && (
         <div className="oa-subcard" style={{ textAlign: 'center', padding: 18, color: 'var(--oa-muted)' }}>
-          当前未声明额外运行时环境变量，可直接确认发布；如有需要可点击右上角「＋ 新增环境变量」。
+          当前交付清单没有运行时环境变量。
         </div>
       )}
 

@@ -352,7 +352,7 @@ def validate_credential_references(contract):
             login_method(profile)
 
 
-def check_work(work):
+def check_work(work, *, require_legacy_probe=True):
     inventory = load(work / "inventory.json")
     contract = load(work / "app-contract.json")
     validate_credential_references(contract)
@@ -381,7 +381,8 @@ def check_work(work):
     keys = [c["key"] for c in contract.get("configs", [])]
     require(len(set(keys)) == len(keys), "duplicate configuration key")
     require(isinstance(contract.get("apis"), list) and isinstance(contract.get("pages"), list), "declare APIs and pages as explicit lists")
-    require(contract["apis"] or contract["pages"], "at least one real business API or page is required; do not invent dummy APIs")
+    if require_legacy_probe:
+        require(contract["apis"] or contract["pages"], "at least one real business API or page is required; do not invent dummy APIs")
     seen = set()
     for api in contract["apis"]:
         require(re.fullmatch(r"[a-z][a-z0-9-]*", api["id"]) and api["id"] not in seen, "invalid/duplicate operation ID")
@@ -421,14 +422,15 @@ def check_work(work):
         require(all(isinstance(action, (str, dict)) for action in page["actions"]), "page actions must be text or structured objects")
     cases = contract.get("verification", {}).get("cases", [])
     browser_cases = contract.get("verification", {}).get("browser_cases", [])
-    require(cases or browser_cases, "a read-only business probe or explicit browser verification plan is required")
+    if require_legacy_probe:
+        require(cases or browser_cases, "a read-only business probe or explicit browser verification plan is required")
     pages = {p["path"] for p in contract["pages"]}
     for case in browser_cases:
         require(case.get("page") in pages and case.get("steps") and case.get("expected"), "browser checks need a declared page, steps and expected result")
     operations = {a["id"]: a for a in contract["apis"]}
     for case in cases:
         api = operations[case["operation"]]
-        require(api["effect"] == "read" and case.get("json_contains"), "automatic business probes must be read-only and assert JSON results")
+        require(api["effect"] == "read" and (not require_legacy_probe or case.get("json_contains")), "business probes must use declared read-only operations")
     files = context_files(work, contract)
     if "captain-definition" in files:
         definition = load(files["captain-definition"])
@@ -498,8 +500,8 @@ def render_skill_markdown(contract, admin_login=None):
     return md
 
 
-def bundle_work(work, out, admin_login=None):
-    contract, files = check_work(work)
+def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
+    contract, files = check_work(work, require_legacy_probe=delivery_plan is None)
     require(not out.exists(), "output directory already exists")
     out.mkdir(parents=True, mode=0o700)
     with tarfile.open(out / "app.tar", "w") as tar:
@@ -519,7 +521,17 @@ def bundle_work(work, out, admin_login=None):
             tar.addfile(info, io.BytesIO(data))
     manifest = {"slug": contract["slug"], "app_url": contract["base_url"], "container_port": contract["runtime"]["port"], "configs": [{"key": c["key"], "value": "" if c.get("secret") else c.get("default", ""), "required": bool(c.get("required")), "description": c.get("description", "")} for c in contract.get("configs", [])], "detected_resource_types": [r["type"] for r in contract.get("resources", [])], "storage_mounts": contract.get("storage_mounts", []), "apis": contract["apis"], "pages": contract.get("pages", []), "skill_version": VERSION, "verification_status": "not-verified"}
     save(out / "app-manifest.json", manifest)
-    md = render_skill_markdown(contract, admin_login)
+    md = render_skill_markdown(contract, admin_login) if delivery_plan is None else delivery_plan["skill_markdown"]
+    if delivery_plan is not None:
+        save(out / "delivery.json", {
+            "format": 1, "slug": contract["slug"], "contract": contract,
+            "base_version": delivery_plan.get("base_version", 0),
+            "summary": delivery_plan["summary"],
+            "files": [
+                {"path": f["path"], "reason": f["reason"], "sha256": sha(files[f["path"]].read_bytes())}
+                for f in delivery_plan["changes"]
+            ],
+        })
     with zipfile.ZipFile(out / "skill.zip", "w", zipfile.ZIP_DEFLATED) as z:
         def member(name, data):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))

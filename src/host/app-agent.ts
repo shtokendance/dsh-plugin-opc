@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
 import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, worker } from './app-delivery.ts'
@@ -85,8 +85,20 @@ function compactPreviousPlan(proposal?: AppDocument): AppDocument | undefined {
   }
 }
 
+interface AnalysisRound {
+  tools: Map<string, ToolDefinition>
+  reply(text: string, signal: AbortSignal): Promise<string>
+  ready: Promise<boolean>
+}
+
+interface AnalysisSession {
+  handle?: AgentHandle
+  round?: AnalysisRound
+}
+
 export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
-  delivery.analyze = async (job, root, feedback, signal, onSessionReady) => {
+  const sessions = new Map<string, AnalysisSession>()
+  delivery.analyze = async (job, root, feedback, signal, onSessionReady, fromChat, assessment) => {
     const parent = ctx.agents.get(job.session as never)
     const configured = job.modelSelection
     const selection = configured ? { provider: configured.provider, model: configured.model,
@@ -96,18 +108,21 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const isRepair = Boolean(job.failedRevision || job.failedSnapshot || job.failureContext || job.analysisMode === 'repair')
     const port = job.port ?? 8080
     const portLocked = job.portAuto !== true
-    const skill = loadBundledSkillText('SKILL.md')
+    const updating = job.deliveryMode ? job.deliveryMode === 'update' : Boolean(job.upgrade)
+    const skill = loadBundledSkillText(updating ? 'UPDATE.md' : 'SKILL.md')
     const repairInstructions = isRepair
       ? '\n修复失败部署时，先核对失败阶段和日志，用 read_failed 读取实际失败制品并与原源码比对。只修正根因，提交完整替换文件。'
       : ''
     const portInstructions = portLocked
       ? `本任务锁定的容器端口为 ${port}。`
       : `容器端口策略：优先识别并沿用应用自身默认监听端口（从源码、现有 Dockerfile 或真实配置文件核实）；若应用无默认端口（或依赖外部注入 PORT 且无兜底值），则使用 OPC 默认端口 ${port}。${job.upgrade ? `本次为升级部署，如新版未变更端口优先沿用线上当前端口 ${port}。` : ''}容器内必须监听 0.0.0.0（禁止监听 127.0.0.1），且契约 configs 中的 PORT 必须与 runtime.port 一致，不要引用 *.example 示例文件中冲突的 PORT 或占位密钥。`
-    const instructions = `${skill}\n${portInstructions}${repairInstructions}`
     const prevPlan = compactPreviousPlan(job.proposal)
-    const taskInstruction = '按三步完成本次应用改造。' + (isRepair
-      ? '先用失败制品核实根因。'
-      : (prevPlan && feedback.trim()) ? '结合用户补充复核上一版方案。' : '')
+    const taskInstruction = assessment
+      ? `当前是${assessment.phase === 'build' ? '构建产物' : '运行版本'}验收阶段。先通过 opc_delivery_observe 读取事实，然后提交 opc_delivery_assess 结论。`
+      : isRepair
+      ? '沿用已确认方案，先用失败制品核实根因，只修复导致中断的问题。'
+      : prevPlan || job.analysisFailure ? '从已有方案、暂存文件与上次中断位置继续。只补本轮缺的内容。'
+        : '按技能的三步完成本次应用改造。'
 
     const timeout = new AbortController()
     const abort = AbortSignal.any([signal, timeout.signal])
@@ -121,6 +136,19 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     let replyCount = 0
     const sessionReady = Promise.withResolvers<boolean>()
     const validationErrors: string[] = []
+    const observations = new Map<string, string>()
+    let activeVersion: Promise<AppDocument> | undefined
+    const readActiveVersion = () => activeVersion ??= (async () => {
+      if (!updating) throw new Error('首次部署没有可沿用的应用版本')
+      const app = await delivery.platform(`/${job.slug}`, appCtxId)
+      if (!app.can_manage) throw new Error('没有读取此应用版本的权限')
+      const { versions } = await delivery.platform(`/${job.slug}/versions`, appCtxId)
+      const releases: AppDocument[] = Array.isArray(versions) ? versions : []
+      const active = releases.find(item => item.is_active === true && item.status === 'running')
+        ?? (app.status === 'running' ? releases.find(item => item.version === app.current_version && item.status === 'running') : undefined)
+      if (!active) throw new Error('找不到当前生效版本')
+      return active
+    })().catch(error => { activeVersion = undefined; throw error })
     const rejectedProposals = new Set<string>()
     let repeatedProposal = false
     let draftFileChanges: { id?: string; path?: string; reason?: string }[] = []
@@ -133,12 +161,215 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const agentOptions = selection
       ? { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
       : { ...parent?.options }
+    const live = sessions.get(job.id) ?? {}
+    const round: AnalysisRound = {
+      tools: new Map(),
+      ready: sessionReady.promise,
+      async reply(text, turnSignal) {
+        if (assessment) return worker({ action: 'redact_feedback', root, text: text.slice(0, 20_000) }, AbortSignal.any([abort, turnSignal]))
+        const safeText = await delivery.recordAnalysisReply(job, root, text, AbortSignal.any([abort, turnSignal]))
+        validationErrors.length = 0
+        rejectedProposals.clear()
+        repeatedProposal = false
+        replyCount++
+        wakeReply?.()
+        return safeText
+      },
+    }
+    const register = (tool: ToolDefinition) => round.tools.set(tool.name, tool)
+    const output = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
+    register(defineTool({ name: 'opc_delivery_observe', description: '读取候选版本的实际事实。state 读取状态和日志；rehearsal 在已确认的隔离 PostgreSQL 上演练；运行态可使用 http 或 operation 进行站内读取。',
+      parameters: {
+        kind: { type: 'string', enum: ['state', 'http', 'operation', 'rehearsal'], required: true },
+        path: { type: 'string' }, method: { type: 'string', enum: ['GET', 'HEAD'] },
+        expected_statuses: { type: 'array', items: { type: 'number' } }, within_seconds: { type: 'number' },
+        operation: { type: 'string' }, params: { type: 'object', additionalProperties: true },
+        body: { type: 'object', additionalProperties: true },
+      }, output,
+      async execute(args) {
+        if (!assessment || assessment.result) throw new Error('当前没有可验收的部署阶段')
+        if (observations.size >= 30) throw new Error('本轮事实读取已达到上限，请据此提交结论')
+        const result = await delivery.observeDeployment(job, root, args, appCtxId, abort)
+        const id = randomUUID()
+        observations.set(id, JSON.stringify(result))
+        return JSON.stringify({ id, result })
+      },
+    }))
+    register(defineTool({ name: 'opc_delivery_assess', description: '根据本轮实际观察提交构建或运行验收结论。使用 opc_delivery_observe 返回的证据 ID。',
+      parameters: {
+        outcome: { type: 'string', required: true, enum: ['passed', 'failed'] },
+        report: { type: 'string', required: true },
+        evidence: { type: 'array', items: { type: 'string' }, required: true },
+      }, output,
+      async execute(args) {
+        if (!assessment || assessment.result) throw new Error('当前没有可提交的部署验收')
+        const ids = [...new Set(args.evidence)]
+        if (!args.report.trim() || args.report.length > 2000 || !ids.length || ids.length > 12 || ids.some(id => !observations.has(id))) {
+          throw new Error('请提交简短结论以及本轮工具读取的证据 ID')
+        }
+        assessment.result = { phase: assessment.phase, outcome: args.outcome,
+          report: await worker({ action: 'redact_feedback', root, text: args.report }, abort),
+          evidence: ids.map(id => observations.get(id)!) }
+        return '验收结论与证据已记录。'
+      },
+    }))
+    register(defineTool({ name: 'opc_delivery_inspect', description: '只读检查应用。inventory 查看导入源码清单；read、read_failed 或 version_file 传 path（version_file 读取线上生效版本）；resources 读取平台资源；active_version 读取生效版本和交付清单；database_schema 读取应用专属 PostgreSQL 的表和列；reference 传 name；template 传 language 和 version。另可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency。',
+      parameters: {
+        action: { type: 'string', required: true },
+        path: { type: 'string' },
+        proposed: { type: 'boolean' },
+        language: { type: 'string' },
+        version: { type: 'string' },
+        name: { type: 'string' },
+        schema: { type: 'string' },
+        table: { type: 'string' },
+        key: { type: 'string' },
+        source: { type: 'object', additionalProperties: true },
+        module: { type: 'string' },
+        start: { type: 'number' },
+      }, output,
+      async execute(args) {
+        const allowedActions = [
+          'inventory',
+          'scan_routes_and_pages',
+          'read',
+          'read_failed',
+          'reference',
+          'template',
+          'inspect_local_storage',
+          'read_go_dependency',
+          'resources',
+          'active_version',
+          'version_file',
+          'database_schema',
+          'read_source_connection',
+        ]
+        if (!allowedActions.includes(args.action)) throw new Error('只允许读取源码与规范')
+        if (args.action === 'reference' && !['delivery-files.md', 'contract.md', 'framework-checks.md'].includes(args.name ?? '')) {
+          throw new Error('请读取 delivery-files.md、contract.md 或 framework-checks.md')
+        }
+        job.events.push(formatToolStep(args.action, args.path, args.language))
+        delivery.core.emit('change')
+        if (args.action === 'resources') {
+          const response = await delivery.platform('/resources', appCtxId, { query: { slug: job.slug } })
+          return JSON.stringify((response.resources ?? []).map(({ id, name, type, env_keys, is_default, supports_auto_migration, host, port, database_name }: AppDocument) =>
+            ({ id, name, type, env_keys, is_default, supports_auto_migration, host, port, database_name })))
+        }
+        if (args.action === 'active_version') {
+          const active = await readActiveVersion()
+          const plan = active.download_urls?.['delivery.json']
+            ? await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/delivery.json`, appCtxId)
+            : undefined
+          return worker({ action: 'redact_feedback', root, text: JSON.stringify({ version: active.version, container_port: active.container_port,
+            configs: (active.app_config ?? []).map(({ key, resource_id, resource_key, has_value }: AppDocument) => ({ key, resource_id, resource_key, has_value })),
+            mounts: (active.storage_mounts ?? []).map(({ container_path, resource_id, kind, purpose }: AppDocument) => ({ container_path, resource_id, kind, purpose })),
+            delivery: plan }, null, 2) }, abort)
+        }
+        if (args.action === 'version_file') {
+          const active = await readActiveVersion()
+          if (!args.path) throw new Error('请提供上一版交付文件路径')
+          const file = await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/app.tar`, appCtxId, { query: { file: args.path } })
+          if (typeof file?.text !== 'string') throw new Error('平台尚未提供上一版交付文件读取接口')
+          const text = await worker({ action: 'redact_feedback', root, text: file.text, path: args.path }, abort)
+          const start = Math.max(0, (args.start ?? 1) - 1)
+          return JSON.stringify({ path: args.path, text: text.split('\n').slice(start, start + 200).join('\n') })
+        }
+        if (args.action === 'database_schema') {
+          await readActiveVersion()
+          return JSON.stringify(await delivery.platform(`/${job.slug}/database-schema`, appCtxId, {
+            query: { ...(args.name ? { resource_id: args.name } : {}), ...(job.requestId ? { request_id: job.requestId } : {}),
+              ...(args.table ? { table: args.table } : {}), ...(args.schema ? { schema: args.schema } : {}) },
+          }))
+        }
+        if (args.action === 'template') {
+          abort.throwIfAborted()
+          const result = await delivery.platform('/dockerfile-templates', appCtxId, { query: { language: args.language ?? '', version: args.version ?? '' } })
+          abort.throwIfAborted()
+          return JSON.stringify(result.matched_template ?? null)
+        }
+        return JSON.stringify(await worker({ ...args, root, revision: job.failedRevision || job.revision }, abort))
+      } }))
+    register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存技能规定的 Dockerfile、配置或 SQL 文件。在 opc_delivery_submit 的 changes 中引用 ID 和实际部署路径。',
+      parameters: {
+        id: { type: 'string', required: true },
+        path: { type: 'string', required: true },
+        reason: { type: 'string', required: true },
+        content: { type: 'string', required: true },
+        executable: { type: 'boolean' },
+        group: { type: 'string' },
+      }, output,
+      async execute(args) {
+        if (assessment) throw new Error('当前正在验收，改造需回到原任务继续')
+        if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
+        job.events.push(formatToolStep('propose_file', args.path))
+        delivery.core.emit('change')
+        const res = await worker({ action: 'propose_file', root, ...args, skill_delivery: true }, abort)
+        return JSON.stringify(res)
+      } }))
+    register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
+      parameters: proposalParameters(port, portLocked), output,
+      async execute(args) {
+        if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
+        if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) throw new Error('技术方案连续校验未通过，已停止自动重试')
+        job.events.push(formatToolStep('submit'))
+        delivery.core.emit('change')
+        let candidate: AppDocument | undefined
+        try {
+          const { proposal, ...fields } = args
+          candidate = proposal ? JSON.parse(proposal) : { issues: [], unresolved: [], changes: [], decisions: [], ...fields }
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('提案必须是完整的 JSON 对象')
+          if (candidate && typeof candidate.contract === 'object' && candidate.contract !== null) {
+            candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
+          }
+          candidate.delivery_format = 1
+        if (updating) candidate.base_version = (await readActiveVersion()).version
+          await delivery.submit(job, root, candidate, abort, { dockerfileOnly: true })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 2000) }, abort)
+          const duplicateError = validationErrors.includes(detail)
+          validationErrors.push(detail)
+          job.analysisFailure = detail
+          if (candidate) {
+            const rej = fingerprint({
+              contract: candidate.contract,
+              issues: candidate.issues,
+              changes: candidate.changes,
+              unresolved: candidate.unresolved,
+              decisions: candidate.decisions,
+              reason: detail,
+            })
+            if (rejectedProposals.has(rej)) {
+              repeatedProposal = true
+              cancel()
+            }
+            rejectedProposals.add(rej)
+          }
+          if (!duplicateError) job.events.push(`提案校验未通过：${detail}`)
+          delivery.core.emit('change')
+          if (validationErrors.length === MAX_VALIDATION_ERRORS) cancel()
+          throw new Error(detail)
+        }
+        const questions = analysisQuestions(job.proposal)
+        return questions.length
+          ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
+          : '方案通过。只用几句话说明端口、必要改造和技能范围，然后结束本轮。OPC 将自动生成交付包。'
+      } }))
     const options: Omit<CreateAgentOptions, 'sessionId' | 'meta'> = {
       agentOptions,
       signal: abort,
       setup(child) {
         child.tools.restrict({ allow: [] })
-        child.systemPrompt.section({ name: 'opc-delivery', order: 1, text: instructions, complete: true, interpolate: false })
+        child.systemPrompt.section({ name: 'opc-delivery', order: 1,
+          text: skill + '\n' + loadBundledSkillText('references/delivery-files.md') + '\n' + loadBundledSkillText('references/assessment.md'),
+          complete: true, interpolate: false })
+        for (const [name, tool] of round.tools) {
+          child.tools.register({ ...tool, execute: (...args) => {
+            const current = live.round?.tools.get(name)
+            if (!current) throw new Error('请先继续当前应用准备')
+            return current.execute(...args)
+          } })
+        }
         child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
           const decision = await next()
           if (decision.kind !== 'enter' || !decision.messages.length) return decision
@@ -149,122 +380,36 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               continue
             }
             const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').trim()
-            if (!text || !await sessionReady.promise) continue
-            const safeText = await delivery.recordAnalysisReply(job, root, text, AbortSignal.any([abort, turnSignal]))
-            validationErrors.length = 0
-            rejectedProposals.clear()
-            repeatedProposal = false
-            replyCount++
+            if (!text) continue
+            if (!live.round) {
+              await new Promise<void>((resolve, reject) => {
+                delivery.startAnalysis(job.id, '', appCtxId, undefined, {
+                  mode: 'resume', fromChat: true, onChatReady: resolve,
+                }).catch(reject)
+              }).catch(() => {})
+            }
+            const current = live.round
+            if (!current || !await current.ready) continue
+            const safeText = await current.reply(text, turnSignal)
             if (safeText) messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
-            wakeReply?.()
           }
           return messages.length ? { ...decision, messages } : { kind: 'reject' }
         })
-        const output = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
-        child.tools.register(defineTool({ name: 'opc_delivery_inspect', description: '只读分析应用：action 支持 inventory / scan_routes_and_pages / read / read_failed / reference / template / inspect_local_storage / read_go_dependency。read_failed 读取上次实际部署包；template 传 language 和 version；read 传 path（可选 proposed=true 读取已暂存修改版本）；reference 传 name（contract.md/framework-checks.md/preparation-checks.md/integration.md）。',
-          parameters: {
-            action: { type: 'string', required: true },
-            path: { type: 'string' },
-            proposed: { type: 'boolean' },
-            language: { type: 'string' },
-            version: { type: 'string' },
-            name: { type: 'string' },
-            module: { type: 'string' },
-            start: { type: 'number' },
-          }, output,
-          async execute(args) {
-            const allowedActions = [
-              'inventory',
-              'scan_routes_and_pages',
-              'read',
-              'read_failed',
-              'reference',
-              'template',
-              'inspect_local_storage',
-              'read_go_dependency',
-            ]
-            if (!allowedActions.includes(args.action)) throw new Error('只允许读取源码与规范')
-            job.events.push(formatToolStep(args.action, args.path, args.language))
-            delivery.core.emit('change')
-            if (args.action === 'template') {
-              abort.throwIfAborted()
-              const result = await delivery.platform('/dockerfile-templates', appCtxId, { query: { language: args.language ?? '', version: args.version ?? '' } })
-              abort.throwIfAborted()
-              return JSON.stringify(result.matched_template ?? null)
-            }
-            return JSON.stringify(await worker({ ...args, root, revision: job.failedRevision || job.revision }, abort))
-          } }))
-        child.tools.register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存根目录 Dockerfile 的必要改动。应用源码和配置由用户维护。暂存文件在 opc_delivery_submit 的 changes 中按 id 和 path 引用。',
-          parameters: {
-            id: { type: 'string', required: true },
-            path: { type: 'string', required: true },
-            reason: { type: 'string', required: true },
-            content: { type: 'string', required: true },
-            executable: { type: 'boolean' },
-            group: { type: 'string' },
-          }, output,
-          async execute(args) {
-            if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-            job.events.push(formatToolStep('propose_file', args.path))
-            delivery.core.emit('change')
-            const res = await worker({ action: 'propose_file', root, ...args, dockerfile_only: true }, abort)
-            return JSON.stringify(res)
-          } }))
-        child.tools.register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
-          parameters: proposalParameters(port, portLocked), output,
-          async execute(args) {
-            if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-            if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) throw new Error('技术方案连续校验未通过，已停止自动重试')
-            job.events.push(formatToolStep('submit'))
-            delivery.core.emit('change')
-            let candidate: AppDocument | undefined
-            try {
-              const { proposal, ...fields } = args
-              candidate = proposal ? JSON.parse(proposal) : { issues: [], unresolved: [], changes: [], decisions: [], ...fields }
-              if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('提案必须是完整的 JSON 对象')
-              if (candidate && typeof candidate.contract === 'object' && candidate.contract !== null) {
-                candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
-              }
-              await delivery.submit(job, root, candidate!, abort, { dockerfileOnly: true })
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error)
-              const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 2000) }, abort)
-              const duplicateError = validationErrors.includes(detail)
-              validationErrors.push(detail)
-              job.analysisFailure = detail
-              if (candidate) {
-                const rej = fingerprint({
-                  contract: candidate.contract,
-                  issues: candidate.issues,
-                  changes: candidate.changes,
-                  unresolved: candidate.unresolved,
-                  decisions: candidate.decisions,
-                  reason: detail,
-                })
-                if (rejectedProposals.has(rej)) {
-                  repeatedProposal = true
-                  cancel()
-                }
-                rejectedProposals.add(rej)
-              }
-              if (!duplicateError) job.events.push(`提案校验未通过：${detail}`)
-              delivery.core.emit('change')
-              if (validationErrors.length === MAX_VALIDATION_ERRORS) cancel()
-              throw new Error(detail)
-            }
-            const questions = analysisQuestions(job.proposal)
-            return questions.length
-              ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
-              : '方案通过。只用几句话说明端口、必要改造和技能范围，然后结束本轮。OPC 将自动生成交付包。'
-          } }))
       },
     }
-    // Always bind analysis turns to a fresh Session ID instead of resuming a disposed one:
-    // DSH client marks disposed sessions as removed ("会话不可用") permanently.
-    // taskContext already carries previous_plan, draft_file_changes, and user_answers.
-    const analysis = await ctx.agents.create({
-      ...options, sessionId: randomUUID() as never, meta: { cwd: root },
-    })
+    live.round = round
+    sessions.set(job.id, live)
+    let analysis: AgentHandle
+    try {
+      analysis = live.handle ?? (job.analysisSessionId
+        ? await ctx.agents.resume({ ...options, resumeSessionId: job.analysisSessionId as never })
+        : await ctx.agents.create({ ...options, sessionId: randomUUID() as never, meta: { cwd: root } }))
+      live.handle = analysis
+    } catch (error) {
+      sessions.delete(job.id)
+      sessionReady.resolve(false)
+      throw error
+    }
     const turnOutcome: { failure?: LlmFailure; truncated?: boolean; stopped?: boolean } = {}
     const getTurnOutcome = () => ({ ...turnOutcome })
     const stopObserving = ctx.on('session/event', (session, event) => {
@@ -301,14 +446,6 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       const runtimeLogs = job.published
         ? await delivery.platform('/' + job.slug + '/logs', appCtxId).catch(() => undefined)
         : undefined
-      const rawResources = await delivery.platform('/resources', appCtxId).catch(() => ({ resources: [] }))
-      const filteredRes = await worker({
-        action: 'filter_resources',
-        root,
-        resources: rawResources?.resources ?? [],
-        slug: job.slug,
-        default_only: true,
-      }, abort).catch(() => ({ resources: [] }))
 
       if (isRepair || (job.published && (previous?.error_message || previous?.build_log || runtimeLogs?.runtime_logs))) {
         const mergedFailure = [
@@ -359,14 +496,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         default_container_port: port,
         upgrade: Boolean(job.upgrade),
         deployed_baseline: deployedBaseline,
-        available_resource_metadata: (filteredRes?.resources ?? []).map((resource: AppDocument) => ({
-          id: resource.id,
-          name: resource.name,
-          type: resource.type,
-          is_default: resource.is_default,
-          env_keys: resource.env_keys,
-          supports_auto_migration: resource.supports_auto_migration,
-        })),
+        instructions: portInstructions + repairInstructions,
         user_answers: job.feedbackHistory || feedback,
         previous_validation_failure: job.analysisFailure ?? '',
         draft_file_changes: draftFileChanges,
@@ -375,6 +505,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         previous_plan: prevPlan,
         failed_snapshot: job.failedSnapshot,
         failure_log: job.failureContext ?? '',
+        assessment_phase: assessment?.phase,
         task: waitingForReply ? '请结合 previous_plan 中的待确认事项处理接下来收到的用户回复。' : taskInstruction,
       })
       analysis.agent.inject({
@@ -394,7 +525,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       }
       await onSessionReady(String(analysis.agent.session.id))
       sessionReady.resolve(true)
-      let prompt = '请开始准备应用。'
+      let prompt = taskInstruction
       for (let attempt = 0; ; attempt++) {
         turnOutcome.failure = undefined
         turnOutcome.truncated = false
@@ -414,9 +545,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             setDeadline(ANALYSIS_TIMEOUT_MS)
           } else {
             abort.throwIfAborted()
-            send(prompt)
+            if (!fromChat || attempt > 0) send(prompt)
           }
           await analysis.agent.whenIdle()
+          if (assessment?.result) return
         } catch (err) {
           if (signal.aborted || (abort.aborted && !repeatedProposal)) throw err
           errorMessage = err instanceof Error ? err.message : String(err)
@@ -441,7 +573,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           ? (badToolJson ? '模型返回的工具参数不是合法 JSON' : '模型输出达到长度上限')
           : providerMessage
             ? await worker({ action: 'redact_feedback', root, text: providerMessage.slice(0, 2000) }, abort)
-            : validationErrors.at(-1) || 'AI 尚未提交完整提案'
+            : validationErrors.at(-1) || (assessment ? 'AI 尚未提交验收结论' : 'AI 尚未提交完整提案')
         job.analysisFailure = reason
         if (providerMessage && !invalidOutput && !networkError) throw new Error(reason)
         if (attempt === 2) {
@@ -465,8 +597,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       clearTimeout(deadline)
       stopObserving()
       abort.removeEventListener('abort', onAbort)
-      await analysis.dispose()
+      if (live.round === round) live.round = undefined
     }
   }
-  ctx.effect(() => () => { delivery.analyze = undefined })
+  ctx.effect(() => async () => {
+    delivery.analyze = undefined
+    await Promise.allSettled([...sessions.values()].map(session => session.handle?.dispose()))
+    sessions.clear()
+  })
 }
