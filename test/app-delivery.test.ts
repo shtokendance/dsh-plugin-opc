@@ -10,6 +10,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { zipSync, strToU8 } from 'fflate'
+import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import SessionStore, { type Session, type SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SessionTitleService from '@deepseek-ai/dsh-session-title'
 import { AppDelivery, AppRequestError, fingerprint, worker, type AppDocument } from '../src/host/app-delivery.ts'
 import { attachAppAgent } from '../src/host/app-agent.ts'
 import { AppSkillProvider } from '../src/host/app-skills.ts'
@@ -1546,7 +1551,7 @@ exec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})
   }
 })
 
-test('attachAppAgent retains the live session when continuing preparation and exposes the new skill contract', async () => {
+test('attachAppAgent names the deployment session and preserves its title and identity on continuation', async () => {
   const workDir = await mkdtemp(join(tmpdir(), 'opc-agent-auth-'))
   try {
     // 1. Python auth validation diagnostics and trimmed auth_blockers match
@@ -1586,11 +1591,18 @@ test('attachAppAgent retains the live session when continuing preparation and ex
     }] })
 
     const createdSessions: string[] = []
+    const titleContext = new Context()
+    await titleContext.plugin(SessionStore)
+    await titleContext.plugin(SessionProjectionRegistry)
+    await titleContext.plugin(AgentRegistry)
+    await titleContext.plugin(SessionTitleService, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 })
+    let liveSession: Session | undefined
     const injectedNotices: string[] = []
     let deliveryInstructions = ''
     let deliveryContext: AppDocument | undefined
     let resumeCalled = false
     const fakeCtx = {
+      get: (key: 'sessionTitle') => titleContext.get(key),
       agents: {
         get: () => undefined,
         resume: async () => {
@@ -1599,8 +1611,9 @@ test('attachAppAgent retains the live session when continuing preparation and ex
         },
         create: async ({ sessionId, setup }: { sessionId: string; setup: (agent: unknown) => void }) => {
           createdSessions.push(sessionId)
+          liveSession = titleContext.sessions.create(sessionId as SessionId)
           const agent = {
-            session: { id: sessionId },
+            session: liveSession,
             tools: { restrict: () => {}, register: () => {} },
             systemPrompt: { section: ({ text }: { text: string }) => { deliveryInstructions = text } },
             on: () => {},
@@ -1625,7 +1638,7 @@ test('attachAppAgent retains the live session when continuing preparation and ex
     const ac = new AbortController()
     const fakeJob: any = {
       id: 'job-1',
-      name: '报销系统',
+      name: '供应商系统',
       slug: 'baoxiao',
       url: 'http://baoxiao.apps.example.test',
       port: 8080,
@@ -1636,6 +1649,7 @@ test('attachAppAgent retains the live session when continuing preparation and ex
     }
     await assert.rejects(
       () => delivery.analyze!(fakeJob, workDir, '', ac.signal, async () => {
+        assert.equal(titleContext.sessionTitle.get(liveSession!)?.title, '部署供应商系统')
         setTimeout(() => ac.abort(), 10)
       }),
       /AbortError|aborted/i,
@@ -1654,6 +1668,7 @@ test('attachAppAgent retains the live session when continuing preparation and ex
     assert.match(deliveryInstructions, /credential_sources/)
     assert.doesNotMatch(deliveryInstructions, /python3 scripts\/delivery\.py smoke/)
     assert.equal(deliveryContext?.available_resource_metadata, undefined)
+    titleContext.sessionTitle.rename(liveSession!, '供应商系统验收')
     fakeJob.analysisSessionId = createdSessions[0]
     fakeJob.status = 'analyzing'
     await assert.rejects(delivery.analyze!(fakeJob, workDir, '', new AbortController().signal, async id => {
@@ -1661,6 +1676,7 @@ test('attachAppAgent retains the live session when continuing preparation and ex
     }), /尚未提交/)
     assert.equal(createdSessions.length, 1)
     assert.equal(resumeCalled, false)
+    assert.equal(titleContext.sessionTitle.get(liveSession!)?.title, '供应商系统验收')
   } finally {
     await rm(workDir, { recursive: true, force: true })
   }
