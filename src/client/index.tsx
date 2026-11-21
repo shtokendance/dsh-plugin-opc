@@ -80,6 +80,7 @@ function registerPanels(ctx: Context): void {
     appSetSkillEnabled: (...args) => unwrap(wire.appSetSkillEnabled!(...args)),
     appVersions: (...args) => unwrap(wire.appVersions!(...args)),
     appLogs: (...args) => unwrap(wire.appLogs!(...args)),
+    appDeploymentLogs: (...args) => unwrap(wire.appDeploymentLogs!(...args)),
     appStorage: (...args) => unwrap(wire.appStorage!(...args)),
     appRecheck: (...args) => unwrap(wire.appRecheck!(...args)),
     appUpdateConfig: (...args) => unwrap(wire.appUpdateConfig!(...args)),

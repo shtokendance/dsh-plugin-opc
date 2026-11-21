@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { AppDelivery, type AppDocument, type DeliveryJob } from '../src/host/app-delivery.ts'
-import { ContextStore } from '../src/host/context.ts'
+import { ContextStore, identityHash } from '../src/host/context.ts'
 import type { OpcCore } from '../src/host/core.ts'
 
-function deliveryFixture(base = 'https://platform.example.test', rows: AppDocument[] = []) {
+function deliveryFixture(base = 'https://platform.example.test', rows: AppDocument[] = [], home = tmpdir()) {
   const contexts = new ContextStore()
   contexts.replace({ issuer: base, subject: 'owner', tenant: 'test', spaces: ['test'], generation: 1 })
   const core = Object.assign(new EventEmitter(), {
     auth: { contexts, http: { base }, token: async () => 'platform-fixture-token' },
   }) as unknown as OpcCore
-  const delivery = new AppDelivery(core, tmpdir(), {
+  const delivery = new AppDelivery(core, home, {
     read: async key => key === 'publish-config-request1' ? { rows: JSON.stringify(rows) } : {} as Record<string, string>,
     write: async () => {},
   })
@@ -26,6 +26,46 @@ const candidateJob: DeliveryJob = {
   id: 'ade2b0fa-7def-4be5-b6db-bc6a44d791ae', name: '示例应用', slug: 'example-app',
   url: 'https://app.example.test', session: 'fixture', status: 'verifying', requestId: 'request1', events: [],
 }
+
+test('deployment logs use the current request for both first deployment and upgrade', async () => {
+  const paths: string[] = []
+  const server = createServer((req, res) => {
+    const path = req.url ?? ''
+    paths.push(path)
+    res.setHeader('Content-Type', 'application/json')
+    const requestId = path.includes('/request1?') ? 'request1' : 'request2'
+    res.end(JSON.stringify(path.endsWith('/logs') ? { build_log: 'legacy logs' } : {
+      request_id: requestId, status: 'building', version: requestId === 'request1' ? 1 : 2,
+      build_log: `Docker output for ${requestId}`,
+    }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const home = await mkdtemp(join(tmpdir(), 'opc-deployment-logs-'))
+  try {
+    const address = server.address() as { port: number }
+    const issuer = `http://127.0.0.1:${address.port}`
+    const { delivery, expected } = deliveryFixture(issuer, [], home)
+    const dir = join(home, 'opc', 'apps', identityHash({ issuer, subject: 'owner' }), candidateJob.id)
+    await mkdir(dir, { recursive: true })
+    const writeJob = (job: DeliveryJob) => writeFile(join(dir, 'job.json'), JSON.stringify(job))
+    const archived = { ...candidateJob, archivedRevision: 'ab123' }
+    await writeJob({ ...archived, upgrade: false })
+    assert.equal((await delivery.deploymentLogs(candidateJob.id, expected)).build_log, 'Docker output for request1')
+    await writeJob({ ...archived, upgrade: true, requestId: 'request2' })
+    assert.equal((await delivery.deploymentLogs(candidateJob.id, expected)).build_log, 'Docker output for request2')
+    await writeJob(candidateJob)
+    assert.equal((await delivery.deploymentLogs(candidateJob.id, expected)).build_log, 'legacy logs')
+    assert.deepEqual(paths, [
+      '/integration/v1/apps/example-app/requests/request1?live_logs=1',
+      '/integration/v1/apps/example-app/requests/request2?live_logs=1',
+      '/integration/v1/apps/example-app/logs',
+    ])
+  } finally {
+    await rm(home, { recursive: true, force: true })
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
 
 test('candidate login and business requests use the authorized proxy and selected credential resource', async () => {
   const seen: AppDocument[] = []

@@ -287,13 +287,13 @@ function DeploymentLogs({ fetchLogs, live, buildOnly, failed, onCopy, copied }: 
     let timer: number | undefined
     const poll = async () => {
       try {
-        const data = JSON.parse(await fetchLogs()) as { build_log?: string; runtime_logs?: string; logs?: string; content?: string }
+        const data = JSON.parse(await fetchLogs()) as { build_log?: string; runtime_logs?: string; logs?: string; content?: string; logs_unavailable?: boolean }
         const build = formatLogOutput(data.build_log)
         const runtime = buildOnly ? '' : formatLogOutput(data.runtime_logs ?? data.logs ?? data.content)
         const output = build && runtime && runtime !== build ? `${build}\n\n运行日志\n${runtime}` : build || runtime
         if (!active) return
-        if (output) setLogs(output)
-        setError(false)
+        if (output) setLogs(current => data.logs_unavailable && current ? current : output)
+        setError(Boolean(data.logs_unavailable))
       } catch {
         if (active) setError(true)
       } finally {
@@ -310,7 +310,7 @@ function DeploymentLogs({ fetchLogs, live, buildOnly, failed, onCopy, copied }: 
 
   return (
     <details className="oa-deploy-logs" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-      <summary>查看服务器部署日志</summary>
+      <summary>查看本次部署日志</summary>
       {open && (
         <>
           {logs && <button type="button" className="oa-btn oa-btn-xs" onClick={() => onCopy(logs)}>
@@ -681,12 +681,14 @@ export function AppsPanel({
   const progressJobId = wizardJob?.id
   const progressStatus = wizardJob?.status
   const progressSlug = wizardJob?.slug
+  const progressUsesReceipt = Boolean(wizardJob?.archivedRevision)
   const fetchDeploymentLogs = useCallback(
     async () => {
+      if (progressUsesReceipt && api.appDeploymentLogs && progressJobId) return api.appDeploymentLogs(progressJobId, contextId)
       if (!api.appLogs || !progressSlug) throw new Error('没有可查询的部署日志')
       return api.appLogs(progressSlug, contextId)
     },
-    [api, contextId, progressSlug],
+    [api, contextId, progressJobId, progressSlug, progressUsesReceipt],
   )
 
   useEffect(() => {
@@ -2302,12 +2304,12 @@ export function AppsPanel({
                     </a>
                   )}
                 </div>
-                {api.appLogs && (
+                {(progressUsesReceipt ? api.appDeploymentLogs : api.appLogs) && (
                   <DeploymentLogs
-                    key={wizardJob.id}
+                    key={`${wizardJob.id}:${wizardJob.requestId ?? ''}`}
                     fetchLogs={fetchDeploymentLogs}
                     live={liveLogs}
-                    buildOnly={liveLogs}
+                    buildOnly={liveLogs && !progressUsesReceipt}
                     failed={failed}
                     onCopy={text => void copyText('wizard-logs', text)}
                     copied={copiedKey === 'wizard-logs'}
