@@ -70,7 +70,9 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
           encoding: { ...str, enum: ['base64', 'base64url', 'hex'] },
         } },
       } } },
-      resources: { ...objects, description: '列出本次选择的资源。填写 id 时，须在 configs 或 storage_mounts 中声明对应绑定。' },
+      resources: { ...objects, description: '列出本次选择的资源，没有则填 []。使用资源目录返回的原始字段；填写 id 时，须在配置、挂载或数据迁移计划中声明对应绑定。',
+        items: { ...object, properties: { id: str, type: { ...text, description: 'resources 工具返回的原始 type。' } } },
+      },
       storage_mounts: { ...objects, description: '每项必须有 name、kind、container_path，使用容器内绝对路径。新增目录须填写 resources 中已核对的 resource_id。同路径升级沿用线上绑定。没有挂载时填 []。',
         items: { ...object, properties: {
           name: str, kind: str, container_path: str, purpose: str, resource_id: str,

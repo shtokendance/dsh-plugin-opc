@@ -26,4 +26,5 @@
 
 - 源码确认应用依赖容器外的服务，而现有配置缺失或默认指向本机时，调用 `resources`。优先核对 `is_default: true` 的兼容资源。把实际所需的地址、端口、库名、账号等字段从同一已选资源映射到应用自己的配置键。每项填 `value_plan.kind: resource`、目录返回的原样 `resource_id` 和 `env_keys` 中的原样 `resource_key`，再用 `config_values` 批量核对。应用内运行的依赖、用户已指定的有效配置和可兼容的线上绑定继续沿用。
 - 新增持久目录时，用 `resources` 核对卷类型和默认资源，选择与应用读写方式兼容的卷，填写每项 `storage_mounts.resource_id`。SQLite 使用本地磁盘卷。升级中的同路径挂载沿用线上绑定。
+- 在 `contract.resources` 列出选中的平台资源，每项原样填写目录返回的 `id` 和 `type`。没有使用平台资源时填 `[]`。
 - 已核实的选择随提案直接进入第三步供用户核对和更换。资源不可用或需要用户决定数据归属时，写入 `unresolved`，说明具体缺项和可选方案。
