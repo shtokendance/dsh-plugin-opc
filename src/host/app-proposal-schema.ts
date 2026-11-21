@@ -61,8 +61,8 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
         key: text, default: text, value: { ...str, description: '本次部署已确定的实际值，包括用户给出的口令或连接串。未确定时省略。' }, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
         app_default: { ...str, description: '填写已证实的源码兜底值。value_plan.kind 为 default 且未提供覆盖值或非空 default 时，此值作为第三步生效值。' },
         source: { ...object, description: '使用 path 和 keys 定位源配置' },
-        resource_id: str,
-        resource_key: str,
+        resource_id: { ...str, description: '原样填写 resources 返回的 id。' },
+        resource_key: { ...str, description: '原样填写该资源 env_keys 中的字段名，区分大小写。' },
         preserve_on_upgrade: { ...bool, description: '该值用于读取历史数据时设为 true，例如字段加密密钥或查询盐。' },
         value_plan: { ...object, description: '每个必填项声明取值方式。generate 由系统按规格生成；input 由用户在部署会话或配置表单填写。', properties: {
           kind: { ...text, enum: ['default', 'source', 'resource', 'input', 'generate', ...(updating ? ['inherit'] : [])] },
@@ -71,7 +71,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
         } },
       } } },
       resources: { ...objects, description: '列出本次选择的资源。填写 id 时，须在 configs 或 storage_mounts 中声明对应绑定。' },
-      storage_mounts: { ...objects, description: '每项必须有 name、kind、container_path。container_path 是容器内绝对目录；没有挂载时填 []。resource_id 可以留给用户确认。',
+      storage_mounts: { ...objects, description: '每项必须有 name、kind、container_path，使用容器内绝对路径。新增目录须填写 resources 中已核对的 resource_id。同路径升级沿用线上绑定。没有挂载时填 []。',
         items: { ...object, properties: {
           name: str, kind: str, container_path: str, purpose: str, resource_id: str,
         } },

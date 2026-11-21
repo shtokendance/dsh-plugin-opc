@@ -21,3 +21,9 @@
 - `skill_markdown` 是完整业务技能文件。首先给出 YAML front matter，名称用 `app-<slug>`，说明技能的适用场景。记录应用访问地址、页面与实际操作 ID、应用原有的登录方式和凭据引用。常规 API 用 OPC 的业务调用工具；保留已有账号和原有权限。
 - 已有可直接用于登录的源码凭据用 `credential_sources` 引用。键与技能登录方式里的引用名对应，值为真实配置字段 `{path,keys}` 或源码明文常量位置 `{path,line,name}`。打包器按引用取值存入本机凭据存储，只供技能调用使用。密码散列不能作为登录凭据。
 - `delivery.json` 记录 `format: 1, slug, base_version, summary, contract, files, effective_configs`。每个 `files` 项记录 `path, reason, sha256`，`effective_configs` 记录当前配置值及来源。插件绑定基线，打包器生成 `app.tar` 和 `skill.zip` 并校验散列。用户最终确认的生效配置和挂载归入同一部署版本。
+
+## 平台资源选择
+
+- 源码确认应用依赖容器外的服务，而现有配置缺失或默认指向本机时，调用 `resources`。优先核对 `is_default: true` 的兼容资源。把实际所需的地址、端口、库名、账号等字段从同一已选资源映射到应用自己的配置键。每项填 `value_plan.kind: resource`、目录返回的原样 `resource_id` 和 `env_keys` 中的原样 `resource_key`，再用 `config_values` 批量核对。应用内运行的依赖、用户已指定的有效配置和可兼容的线上绑定继续沿用。
+- 新增持久目录时，用 `resources` 核对卷类型和默认资源，选择与应用读写方式兼容的卷，填写每项 `storage_mounts.resource_id`。SQLite 使用本地磁盘卷。升级中的同路径挂载沿用线上绑定。
+- 已核实的选择随提案直接进入第三步供用户核对和更换。资源不可用或需要用户决定数据归属时，写入 `unresolved`，说明具体缺项和可选方案。

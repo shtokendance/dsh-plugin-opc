@@ -170,7 +170,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const validationErrors: string[] = []
     const observations = new Map<string, DeliveryObservation>()
     let activeVersion: Promise<AppDocument> | undefined
-    const readActiveVersion = () => activeVersion ??= (async () => {
+    const readActiveVersion = () => activeVersion ??= (async (): Promise<AppDocument> => {
       if (!updating) throw new Error('首次部署没有可沿用的应用版本')
       const app = await delivery.platform(`/${job.slug}`, appCtxId)
       if (!app.can_manage) throw new Error('没有读取此应用版本的权限')
@@ -179,7 +179,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       const active = releases.find(item => item.is_active === true && item.status === 'running')
         ?? (app.status === 'running' ? releases.find(item => item.version === app.current_version && item.status === 'running') : undefined)
       if (!active) throw new Error('找不到当前生效版本')
-      return active
+      return { ...active, storage_mounts: app.storage_mounts ?? active.storage_mounts }
     })().catch(error => { activeVersion = undefined; throw error })
     const readActiveSnapshot = async (active: AppDocument) => {
       if (!active.download_urls?.['confirmed-deployment.json']) return undefined
@@ -397,11 +397,16 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           if ((readiness.outcome === 'blocked') !== Boolean(waitingForDecision)) {
             throw new Error('readiness 必须与 unresolved 一致。待处理的阻塞要列明原因，准备就绪时清空已解决项')
           }
+          let existingMounts: AppDocument[] = []
           if (updating) {
             const active = await readActiveVersion()
             candidate.base_version = active.version
             candidate.base_config_revision = active.config_revision ?? ''
-            const activeConfig = active.app_config ?? (await readActiveSnapshot(active))?.app_config ?? []
+            const needsSnapshot = active.app_config == null ||
+              (Array.isArray(candidate.contract?.storage_mounts) && candidate.contract.storage_mounts.length > 0 && active.storage_mounts == null)
+            const snapshot = needsSnapshot ? await readActiveSnapshot(active) : undefined
+            const activeConfig = active.app_config ?? snapshot?.app_config ?? []
+            existingMounts = snapshot?.storage_mounts ?? active.storage_mounts ?? []
             const previous = new Map(activeConfig.map((c: AppDocument) => [c.key, c]))
             for (const config of candidate.contract?.configs ?? []) {
               if (!previous.has(config.key) && config.value_plan?.kind === 'inherit') {
@@ -412,7 +417,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               }
             }
           } else candidate.base_version = 0
-          await delivery.submit(job, root, candidate, abort, { dockerfileOnly: true })
+          await delivery.submit(job, root, candidate, abort, { dockerfileOnly: true, resourceReview: { contextId: appCtxId, existingMounts } })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 2000) }, abort)

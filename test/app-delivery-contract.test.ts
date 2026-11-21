@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { worker, type AppDocument } from '../src/host/app-delivery.ts'
+import type { AppDeliveryJob } from '../src/client/api.ts'
+import { mergeJobConfigs } from '../src/client/app-config-helpers.ts'
+import { AppDelivery, worker, type AppDocument, type DeliveryJob } from '../src/host/app-delivery.ts'
+import type { OpcCore } from '../src/host/core.ts'
 
 test('selected AI declares acceptance for static apps and explicit route authentication takes precedence', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'opc-delivery-contract-'))
@@ -53,6 +57,102 @@ test('selected AI declares acceptance for static apps and explicit route authent
     assert.deepEqual(parsed.proposal.contract.apis[0].auth, api.auth)
     assert.equal(parsed.proposal.contract.apis[1].auth.type, 'bearer')
     await assert.rejects(validate({ ...withAuth, apis: [{ ...api, effect: 'write', confirmation_required: true }] }), /effect: read/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('AI resource bindings are checked before Step 3 and carried into its configuration', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'opc-delivery-resources-'))
+  try {
+    const root = join(workspace, 'job')
+    const source = join(workspace, 'source')
+    const url = 'https://resources.example.test'
+    await mkdir(source)
+    await writeFile(join(source, 'Dockerfile'), 'FROM nginx:alpine\n')
+    await worker({ action: 'prepare', root, source, slug: 'fixture', url })
+    const delivery = new AppDelivery(new EventEmitter() as unknown as OpcCore, workspace, {
+      async read() { return {} },
+      async write() {},
+    })
+    let values = { APP_HOST: 'fixture-cache.internal', APP_PORT: '6379' }
+    delivery.platform = async path => {
+      if (path === '/resources') {
+        return { resources: [
+          { id: 'shared-cache', name: 'Cache', type: 'redis', is_default: true, env_keys: ['CACHE_HOST', 'CACHE_PORT'] },
+          { id: 'site-volume', name: 'Volume', type: 'docker-volume', is_default: true, env_keys: [] },
+          { id: 'site-oss', name: 'OSS', type: 'aliyun-oss-volume', env_keys: [] },
+        ] }
+      }
+      if (path === '/fixture/config-values') return { values }
+      throw new Error(`Unexpected test API path: ${path}`)
+    }
+    const newJob = (): DeliveryJob => ({
+      id: 'resources', name: 'Fixture', slug: 'fixture', url, session: 'selected-ai', status: 'analyzing', events: [],
+    })
+    const proposal = {
+      summary: '核对运行配置与挂载', config_format: 1, delivery_format: 1, changes: [], unresolved: [],
+      skill_markdown: '---\nname: app-fixture\ndescription: 查询样例页面\n---\n查阅页面。\n',
+      contract: {
+        schema_version: 1, slug: 'fixture', base_url: url, name: 'Fixture', description: 'Runtime resource fixture',
+        runtime: { language: 'html', version: '5', port: 8080 }, build_context: ['Dockerfile'],
+        apis: [], pages: [], resources: [],
+        configs: [
+          { key: 'APP_HOST', default: 'localhost', required: true, secret: false,
+            value_plan: { kind: 'resource' }, resource_id: 'shared-cache', resource_key: 'CACHE_HOST' },
+          { key: 'APP_PORT', default: '', required: true, secret: false,
+            value_plan: { kind: 'resource' }, resource_id: 'shared-cache', resource_key: 'CACHE_PORT' },
+        ],
+        storage_mounts: [{ name: 'app-data', container_path: '/app/data', kind: 'sqlite', resource_id: 'site-volume' }],
+      },
+    }
+    const signal = new AbortController().signal
+    const submit = (job: DeliveryJob, plan: AppDocument, existingMounts: AppDocument[] = []) => delivery.submit(job, root, plan, signal,
+      { dockerfileOnly: true, resourceReview: { contextId: 'fixture', existingMounts } })
+    const unchecked = structuredClone(proposal)
+    unchecked.contract.configs[0].resource_id = 'cache'
+    unchecked.contract.configs[1].resource_key = 'port'
+    unchecked.contract.storage_mounts[0].resource_id = ''
+    await assert.rejects(submit(newJob(), unchecked), error =>
+      /APP_HOST/.test(String(error)) && /APP_PORT/.test(String(error)) && /\/app\/data/.test(String(error)))
+
+    const wrongStorage = structuredClone(proposal)
+    wrongStorage.contract.storage_mounts[0].resource_id = 'site-oss'
+    await assert.rejects(submit(newJob(), wrongStorage), /\/app\/data.*本地磁盘/)
+
+    values = { ...values, APP_PORT: '' }
+    await assert.rejects(submit(newJob(), proposal), /平台资源未提供配置值：APP_PORT/)
+    values = { ...values, APP_PORT: '6379' }
+
+    const alreadyDeployed = structuredClone(proposal)
+    alreadyDeployed.contract.storage_mounts[0].resource_id = ''
+    await submit(newJob(), alreadyDeployed, [{ container_path: '/app/data', resource_id: 'original-volume' }])
+
+    const job = newJob()
+    job.proposal = unchecked
+    job.configDraft = { artifactHash: 'old-draft', versionNote: 'keep', rows: [
+      { key: 'APP_HOST', resource_id: 'cache', resource_key: 'host', value_source: 'resource' },
+      { key: 'APP_PORT', value_source: 'manual' },
+    ], storageBindings: { '/app/data': 'old-volume' } }
+    await submit(job, proposal)
+    assert.deepEqual(job.configDraft.rows, [])
+    assert.deepEqual(job.configDraft.storageBindings, {})
+    const rows = await delivery.previewDeliveryConfig(job, root, 'fixture', signal)
+    assert.deepEqual(rows.map(row => [row.key, row.resource_id, row.resource_key, row.value]), [
+      ['APP_HOST', 'shared-cache', 'CACHE_HOST', 'fixture-cache.internal'],
+      ['APP_PORT', 'shared-cache', 'CACHE_PORT', '6379'],
+    ])
+    job.proposal!.effective_configs = rows
+    const view = delivery.public(job) as AppDeliveryJob
+    const step3 = mergeJobConfigs(view)
+    assert.deepEqual(step3.configs.map(row => [row.key, row.resource_id, row.effective_value]), [
+      ['APP_HOST', 'shared-cache', 'fixture-cache.internal'],
+      ['APP_PORT', 'shared-cache', '6379'],
+    ])
+    assert.equal(view.proposal?.contract?.storage_mounts?.[0]?.resource_id, 'site-volume')
+    const edited = mergeJobConfigs(view, { rows: [{ key: 'APP_HOST', value: 'my-cache.internal', value_source: 'manual' }] })
+    assert.equal(edited.configs[0].value, 'my-cache.internal')
+    assert.equal(edited.configs[0].resource_id, undefined)
   } finally {
     await rm(workspace, { recursive: true, force: true })
   }
