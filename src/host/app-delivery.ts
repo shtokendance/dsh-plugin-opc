@@ -2140,6 +2140,17 @@ export class AppDelivery {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     return this.platform(`/${slug}/logs`, expected)
   }
+  async deploymentLogs(id: string, expected: string) {
+    const scope = this.scope(expected)
+    const { job } = await this.open(scope.directory, id)
+    scope.assertCurrent()
+    if (!job.archivedRevision) return this.logs(job.slug, expected)
+    if (!job.requestId) return {}
+    const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected, { query: { live_logs: '1' } })
+    if (receipt.status === 'unknown') return {}
+    checkPublishReceipt(job, receipt)
+    return { build_log: receipt.build_log, runtime_logs: receipt.runtime_logs, logs_unavailable: receipt.logs_unavailable }
+  }
   async storage(slug: string, expected: string) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     return this.platform(`/${slug}/storage`, expected)

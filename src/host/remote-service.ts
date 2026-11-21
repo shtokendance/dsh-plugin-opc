@@ -213,6 +213,8 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appLogs(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.logs(slug, expectedContextId)) }
   @Remote
+  async appDeploymentLogs(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.deploymentLogs(id, expectedContextId)) }
+  @Remote
   async appStorage(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.storage(slug, expectedContextId)) }
   @Remote
   async appDownload(slug: string, selectionJson: string, expectedContextId: string): Promise<string> {

@@ -131,6 +131,7 @@ export interface AppDeliveryJob {
   assessmentPending?: boolean
   assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
   id: string
+  requestId?: string
   analysisSessionId?: string
   analysisChatActive?: boolean
   analysisChatStarting?: boolean
@@ -262,6 +263,7 @@ export interface OpcApi {
   appDetails(slug: string, context: string): Promise<string>
   appVersions?(slug: string, context: string): Promise<string>
   appLogs?(slug: string, context: string): Promise<string>
+  appDeploymentLogs?(id: string, context: string): Promise<string>
   appDownload?(slug: string, selection: string, context: string): Promise<string>
   appSaveDownload(slug: string, selection: string, context: string): Promise<string>
   appStorage?(slug: string, context: string): Promise<string>
