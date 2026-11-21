@@ -64,7 +64,7 @@ function compactPreviousPlan(proposal?: AppDocument): AppDocument | undefined {
   for (const key of [
     'schema_version', 'slug', 'name', 'description', 'base_url', 'runtime', 'build_context',
     'auth_profile', 'auth_profiles', 'auth_rules', 'auth_blockers', 'admin_account',
-    'resources', 'storage_mounts', 'verification',
+    'resources', 'storage_mounts', 'verification', 'data_plan',
   ]) {
     if (key in prevContract) compactContract[key] = prevContract[key]
   }
@@ -78,6 +78,7 @@ function compactPreviousPlan(proposal?: AppDocument): AppDocument | undefined {
   )
   return {
     summary: proposal.summary,
+    readiness: proposal.readiness,
     issues: proposal.issues ?? [],
     unresolved: [...(proposal.unresolved ?? []), ...(prevContract.unresolved ?? [])],
     decisions: proposal.decisions ?? [],
@@ -104,7 +105,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const configured = job.modelSelection
     const selection = configured ? { provider: configured.provider, model: configured.model,
       reasoningEffort: configured.reasoningEffort ? ReasoningEffortId(configured.reasoningEffort) : undefined }
-      : parent?.model.current() ?? parent?.session.requestHeader()?.config
+      : job.analysisSessionId ? undefined : parent?.model.current() ?? parent?.session.requestHeader()?.config
+    if (!selection && !job.analysisSessionId) throw new Error('请在当前会话选择此次应用交付使用的 AI 模型')
     const appCtxId = delivery.core.auth.contexts.applicationContextId!
     const isRepair = Boolean(job.failedRevision || job.failedSnapshot || job.failureContext || job.analysisMode === 'repair')
     const port = job.port ?? 8080
@@ -167,7 +169,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     } catch { /* no staged draft files yet */ }
     const agentOptions = selection
       ? { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
-      : { ...parent?.options }
+      : undefined
     const live = sessions.get(job.id) ?? {}
     const round: AnalysisRound = {
       tools: new Map(),
@@ -256,7 +258,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             ({ id, name, type, env_keys, is_default, supports_auto_migration, host, port, database_name })))
         }
         if (args.action === 'config_values') {
-          const values = await delivery.previewDeliveryConfig(job, root, appCtxId, abort)
+          const values = await delivery.previewDeliveryConfig(job, root, appCtxId, abort, job.status === 'review')
           return JSON.stringify({ configs: values, resources: await delivery.resolveResourceValues(job.slug, args.bindings ?? [], appCtxId) })
         }
         if (args.action === 'active_version') {
@@ -342,6 +344,14 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           if ((strategy !== undefined || !waitingForDecision) && !strategies.includes(strategy)) {
             throw new Error(`${updating ? '应用更新' : '首次部署'}的 data_plan.strategy 只允许 ${strategies.join('、')}`)
           }
+          const readiness = candidate.readiness
+          if (!readiness || !['ready', 'blocked'].includes(readiness.outcome) ||
+              typeof readiness.reason !== 'string' || !readiness.reason.trim()) {
+            throw new Error('请根据实际证据提交 readiness.outcome（ready 或 blocked）及 readiness.reason')
+          }
+          if ((readiness.outcome === 'blocked') !== Boolean(waitingForDecision)) {
+            throw new Error('readiness 必须与 unresolved 一致。待处理的阻塞要列明原因，准备就绪时清空已解决项')
+          }
           if (updating) {
             const active = await readActiveVersion()
             candidate.base_version = active.version
@@ -367,6 +377,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
               changes: candidate.changes,
               unresolved: candidate.unresolved,
               decisions: candidate.decisions,
+              readiness: candidate.readiness,
               reason: detail,
             })
             if (rejectedProposals.has(rej)) {
@@ -383,8 +394,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         const questions = analysisQuestions(job.proposal)
         return questions.length
           ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
-          : JSON.stringify({ message: '方案通过。用几句话说明必要改造和待填项。OPC 将自动生成交付包。',
-              configs: await delivery.previewDeliveryConfig(job, root, appCtxId, abort, true) })
+          : '方案已通过校验并保存。请向用户说明关键改造和待填项。OPC 随后生成交付包，实际准备结果以任务状态为准。'
       } }))
     const options: Omit<CreateAgentOptions, 'sessionId' | 'meta'> = {
       agentOptions,
@@ -472,6 +482,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       abort.throwIfAborted()
       setDeadline(ANALYSIS_TIMEOUT_MS)
       const session = analysis.agent.session
+      const selectedModel = selection ?? analysis.agent.model?.current() ?? session.requestHeader?.()?.config
+      if (!job.modelSelection && selectedModel) {
+        job.modelSelection = { provider: selectedModel.provider, model: selectedModel.model, reasoningEffort: selectedModel.reasoningEffort }
+      }
       const titles = ctx.get('sessionTitle')
       if (titles && titles.get(session)?.source.kind !== 'user') {
         titles.rename(session, `部署${job.name}`)

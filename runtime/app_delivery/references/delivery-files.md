@@ -4,6 +4,8 @@
 
 ## 输入与归档
 
+- `readiness` 由本次任务的 AI 根据源码和实际工具证据提交。填写 `outcome` 和 `reason`。可以交给用户核对并启动候选构建时填 `ready`，尚有阻塞时填 `blocked` 并用 `unresolved` 说明原因。生成交付包、候选构建和业务验收分别依据各自的真实结果。
+
 - `summary` 说明配置、端口、持久化、必要文件和有影响的变更。新建、修改的文件在 `changes` 声明 `id, path, reason, content`。路径以应用源码根目录为准。正文必须是完整文件。部署包包含所有改造文件，配置与 SQL 路径由应用实际读取方式决定。沿用的文件不进 `changes`。
 - `contract` 是完整部署契约，包含 `schema_version: 1`、应用名称和说明、`runtime: {language, version, port}` 及 `build_context`。构建上下文必须覆盖 Dockerfile、启动文件、依赖和本次提交的文件。应用 ID、地址由向导绑定。
 - `configs` 只列应用实际使用的环境变量。每个条目填写 `key, description, required, secret, default`，可用 `source: {path, keys}` 引用真实配置。`default` 或 `app_default` 填源码确认的值；用户给出的本次实际值写 `value`。选择平台资源时填写 `resource_id` 和 `resource_key`，使用 `config_values` 读取已选字段的实际值。配置文件本身通过改造差异展示并随应用包保存。

@@ -319,13 +319,7 @@ export function AppDeliveryReview({
     setBusy(true)
     setError('')
     try {
-      let hash = pHash
-      if (currentRef.current?.failureStage === 'preparation' && api.appReopenReview) {
-        const reopened = JSON.parse(await api.appReopenReview(jobId, contextId)) as AppDeliveryJob
-        if (!reopened.proposalHash) throw new Error('找不到上次核对的方案')
-        hash = reopened.proposalHash
-      }
-      const raw = await api.appPrepare(jobId, hash, contextId)
+      const raw = await api.appPrepare(jobId, pHash, contextId)
       const result = JSON.parse(raw) as AppDeliveryJob
       accept(result)
       if (result.status !== 'ready') setError(result.error || '交付包生成未完成')
@@ -389,7 +383,7 @@ export function AppDeliveryReview({
   const isTechnicalEvent = (event: string) => isRejected(event) || event.includes('完整提案尚未通过')
   const visibleEvents = events.filter(event => !isTechnicalEvent(event))
   const technicalEvents = events.filter(isTechnicalEvent)
-  const recovering = running && events.some(event => isTechnicalEvent(event) || event.startsWith('🔄'))
+  const recovering = running && job?.status !== 'preparing' && Boolean(job?.analysis_failure)
   const isConnectionError = /timed out|超时|connection reset|连接中断/i.test(activeError)
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -602,9 +596,9 @@ export function AppDeliveryReview({
           </div>
         )}
 
-        {technicalEvents.length > 0 && !activeError && (
+        {technicalEvents.length > 0 && (
           <details style={{ fontSize: 12, color: 'var(--oa-muted)' }}>
-            <summary style={{ cursor: 'pointer' }}>查看技术检查记录</summary>
+            <summary style={{ cursor: 'pointer' }}>查看历史提案校验记录</summary>
             <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
               {technicalEvents.map((ev, index) => (
                 <li key={index}>{isRejected(ev) ? '× ' : ''}{ev}</li>
@@ -621,30 +615,25 @@ export function AppDeliveryReview({
             <div role="alert" className="oa-bubble oa-alert-danger">
               <div style={{ fontWeight: 600 }}>
                 {isConnectionError ? '暂时无法连接 AI 服务。' : '这次应用准备没有完成。'}
-                {job?.status === 'failed' ? ' 原始源码和你的选择已保留，可以继续准备。' : ' 请重试当前操作。'}
+                {job?.failureStage === 'preparation' && plan
+                  ? ' 已通过校验的方案已保存，可以直接重试生成交付包。'
+                  : job?.status === 'failed' ? ' 原始源码和你的选择已保留，可以继续准备。' : ' 请重试当前操作。'}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {job?.status === 'failed' && api.appAnalyzeWithMode && (
-                  <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void resumeAnalysis()}>
-                    {job.failureStage === 'preparation' ? '让 AI 继续修复' : '继续准备'}
+                {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
+                  <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void prepare()}>
+                    重试准备
                   </button>
                 )}
-                {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
-                  <button type="button" className="oa-btn oa-btn-sm" disabled={running} onClick={() => void prepare()}>
-                    重试准备
+                {job?.status === 'failed' && api.appAnalyzeWithMode && (
+                  <button type="button" className={`oa-btn oa-btn-sm${job.failureStage === 'preparation' ? '' : ' oa-btn-primary'}`} disabled={running} onClick={() => void resumeAnalysis()}>
+                    {job.failureStage === 'preparation' ? '让 AI 查看失败证据' : '让 AI 继续准备'}
                   </button>
                 )}
               </div>
               <details style={{ fontSize: 12 }}>
                 <summary style={{ cursor: 'pointer' }}>查看技术详情</summary>
                 <p style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{activeError}</p>
-                {technicalEvents.length > 0 && (
-                  <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-                    {technicalEvents.map((ev, index) => (
-                      <li key={index}>{isRejected(ev) ? '× ' : ''}{ev}</li>
-                    ))}
-                  </ul>
-                )}
               </details>
             </div>
           </div>
@@ -667,7 +656,7 @@ export function AppDeliveryReview({
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>应用改造和交付包检查已完成</div>
                   <div className="oa-hint" style={{ marginTop: 2 }}>
-                    {transformation?.headline || '可以核对要部署的应用内容和配置。'}
+                    {plan?.readiness?.reason || transformation?.headline || '可以核对要部署的应用内容和配置。'}
                   </div>
                 </div>
                 {footerMode === 'inline' && canContinue && (

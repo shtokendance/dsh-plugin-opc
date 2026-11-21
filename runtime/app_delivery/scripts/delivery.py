@@ -352,6 +352,55 @@ def validate_credential_references(contract):
             login_method(profile)
 
 
+def contract_shape_errors(contract):
+    errors = []
+
+    def entries(value, path):
+        if not isinstance(value, list):
+            errors.append(f"{path} 必须是数组")
+            return []
+        return enumerate(value)
+
+    def check_fields(item, path, fields):
+        if not isinstance(item, dict):
+            errors.append(f"{path} 必须是对象")
+            return
+        missing = [field for field, valid in fields.items() if not valid(item.get(field))]
+        if missing:
+            errors.append(f"{path} 缺少或格式无效：{', '.join(missing)}")
+
+    def nonempty(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    for i, api in entries(contract.get("apis"), "contract.apis"):
+        path = f"contract.apis[{i}]"
+        if not isinstance(api, dict):
+            errors.append(f"{path} 必须是对象")
+            continue
+        for j, param in entries(api.get("parameters"), f"{path}.parameters"):
+            check_fields(param, f"{path}.parameters[{j}]", {
+                "name": nonempty,
+                "in": lambda value: value in ("path", "query", "header"),
+                "type": lambda value: value in ("string", "integer", "number", "boolean"),
+                "description": nonempty,
+                "required": lambda value: type(value) is bool,
+            })
+        if "request_body" not in api:
+            errors.append(f"{path}.request_body 必须明确声明，无请求体时填 null")
+        elif api["request_body"] is not None:
+            check_fields(api["request_body"], f"{path}.request_body", {
+                "schema": bool, "required": lambda value: type(value) is bool,
+            })
+    for i, page in entries(contract.get("pages"), "contract.pages"):
+        check_fields(page, f"contract.pages[{i}]", {
+            "path": lambda value: isinstance(value, str) and value.startswith("/") and not value.startswith("//"),
+            "purpose": nonempty,
+            "evidence": lambda value: isinstance(value, list) and bool(value),
+            "actions": lambda value: isinstance(value, list) and all(isinstance(action, (str, dict)) for action in value),
+        })
+    return errors
+
+
 def check_work(work, *, require_legacy_probe=True):
     inventory = load(work / "inventory.json")
     contract = load(work / "app-contract.json")
@@ -531,6 +580,7 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
                if delivery_plan.get("config_format") == 1 else {}),
             "base_version": delivery_plan.get("base_version", 0),
             "summary": delivery_plan["summary"],
+            **({"readiness": delivery_plan["readiness"]} if "readiness" in delivery_plan else {}),
             **({"effective_configs": delivery_plan["effective_configs"]} if "effective_configs" in delivery_plan else {}),
             "files": [
                 {"path": f["path"], "reason": f["reason"], "sha256": sha(files[f["path"]].read_bytes())}

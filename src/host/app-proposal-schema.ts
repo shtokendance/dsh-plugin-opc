@@ -18,6 +18,10 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
   // Keep fields optional at the top level for the legacy proposal string.
   return {
     summary: { ...str, description: '中文改造摘要；使用结构化参数时必填' },
+    readiness: { ...object, description: '由当前 AI 根据源码和工具证据判断，是否可以交给用户核对并开始候选构建。', properties: {
+      outcome: { ...text, enum: ['ready', 'blocked'] },
+      reason: text,
+    } },
     skill_markdown: { ...str, description: '按当前改造技能要求生成可用的应用 SKILL.md，含 YAML 名称与说明，记录真实业务操作与调用方式，通过配置键引用部署值' },
     issues: { ...objects, items: { ...object, properties: {
       id: text, evidence: text, impact: text, recommendation: text,
@@ -83,14 +87,24 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
       } } },
       apis: { ...objects, required: true, description: '填写技能可使用的真实接口，没有时为 []。', items: { ...object, properties: {
         id: text, method: text, path: text, purpose: text,
-        evidence: { ...strings, required: true }, parameters: { ...objects, required: true },
-        request_body: { oneOf: [{ type: 'null' }, object], required: true },
+        evidence: { ...strings, required: true },
+        parameters: { ...objects, required: true, items: { ...object, properties: {
+          name: text, in: { ...text, enum: ['path', 'query', 'header'] },
+          type: { ...text, enum: ['string', 'integer', 'number', 'boolean'] },
+          description: text, required: { ...bool, required: true },
+        } } },
+        request_body: { oneOf: [{ type: 'null' }, { ...object, properties: {
+          schema: { type: 'json', required: true }, required: { ...bool, required: true }, description: str,
+        } }], required: true },
         responses: { ...object, required: true }, auth: { ...routeAuth, required: true },
         effect: { ...text, enum: ['read', 'write', 'destructive', 'external'] },
         confirmation_required: { ...bool, required: true, description: 'effect 为 write、destructive 或 external 时必须为 true' },
       } } },
       pages: { ...objects, required: true, description: '填写技能可使用的真实页面，没有时为 []。',
-        items: { ...object, properties: { auth: routeAuth } } },
+        items: { ...object, properties: {
+          path: text, purpose: text, evidence: { ...strings, required: true },
+          actions: { type: 'array', required: true, items: { oneOf: [str, object] } }, auth: routeAuth,
+        } } },
       verification: { ...object, description: '说明 AI 部署验收的业务目标和可取得的证据。' },
       unresolved: { ...strings, description: '仅保留阻塞部署且需用户决定的问题。可选集成配置、改密建议、部署后才能确认的事项放在摘要。' },
     } },

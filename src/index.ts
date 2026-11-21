@@ -51,7 +51,7 @@ export function apply(ctx: Context, config: Config): void {
     async write(id, payload) {
       await ctx.credentials.modifyRecord(credentialKey(name, `app-${id}`), async () => ({ kind: 'grant', payload }))
     },
-  }, { appDomainRoot: initialConfig.app_domain_root, appDefaultPort: initialConfig.app_default_port })
+  }, { appDomainRoot: initialConfig.app_domain_root, appDefaultPort: initialConfig.app_default_port, requireSkillDelivery: true })
   ctx.plugin(OpcRemoteService, { core, delivery, configStore })
   ctx.inject(['systemPrompt'], child => attachAppAgent(child, delivery))
   ctx.effect(() => ctx.skills.registerProvider(control => new AppSkillProvider(delivery, control)))

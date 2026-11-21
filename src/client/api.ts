@@ -173,6 +173,7 @@ export interface AppDeliveryJob {
   transformationReport?: NonNullable<AppDeliveryJob['proposal']>['transformation_report']
   verification?: { status: string; checks: { operation: string; status?: number; passed: boolean }[]; pages_verified: boolean; detail?: string; skill_enabled?: boolean }
   proposal?: {
+    readiness?: { outcome: 'ready' | 'blocked'; reason: string }
     delivery_format?: number
     summary: string
     issues?: { id?: string; evidence?: unknown; impact?: string; recommendation?: string; severity?: string; title?: string; detail?: string; resolution?: string }[]

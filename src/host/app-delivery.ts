@@ -272,6 +272,7 @@ export class AppRequestError extends Error {
 export interface AppDeliveryOptions {
   appDomainRoot?: string
   appDefaultPort?: number
+  requireSkillDelivery?: boolean
 }
 
 export class AppDelivery {
@@ -363,6 +364,7 @@ export class AppDelivery {
     }
   }
   private async recoverInterrupted(root: string, job: DeliveryJob) {
+    if (this.analyses.has(job.id)) return
     const interrupted = { importing: 'import', analyzing: 'analysis', preparing: 'preparation', verifying: 'verification' } as const
     if (job.status === 'publishing') {
       job.status = 'unknown'
@@ -634,6 +636,7 @@ export class AppDelivery {
       },
       proposal: proposal && {
         delivery_format: proposal.delivery_format,
+        readiness: proposal.readiness,
         summary: proposal.summary,
         issues: proposal.issues ?? [],
         unresolved: analysisQuestions(proposal),
@@ -869,7 +872,7 @@ export class AppDelivery {
     const editing = options?.fromChat && ['review', 'ready'].includes(job.status)
     if (resume && ((!waitingForReply && !editing && job.status !== 'failed') || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
     this.busy.add(id)
-    if (session && !job.analysisSessions?.includes(session)) job.session = session
+    if (session && !job.analysisSessionId && !job.analysisSessions?.includes(session)) job.session = session
     let trimmedFeedback: string
     try {
       trimmedFeedback = feedback.slice(0, 20_000)
@@ -1258,9 +1261,12 @@ export class AppDelivery {
   }
   async prepare(id: string, proposalHash: string, expected: string) {
     const scope = this.scope(expected)
-    const { root, job } = await this.open(scope.directory, id)
     return this.exclusive(id, async () => {
-      if (job.status !== 'review' || !job.proposal || fingerprint(job.proposal) !== proposalHash) throw new Error('方案已变化，请刷新后核对')
+      const { root, job } = await this.open(scope.directory, id)
+      const retry = job.status === 'failed' && job.failureStage === 'preparation'
+      if ((job.status !== 'review' && !retry) || !job.proposal || fingerprint(job.proposal) !== proposalHash) {
+        throw new Error('方案已变化，请刷新后核对')
+      }
       if (analysisQuestions(job.proposal).length) throw new Error('请先在左侧会话处理待确认事项')
       await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected)
       return this.public(job, root)
@@ -1434,6 +1440,9 @@ export class AppDelivery {
     return values
   }
   private async deploymentConfiguration(job: DeliveryJob, input: AppDocument, expected: string) {
+    if (this.options.requireSkillDelivery && job.proposal?.delivery_format !== 1) {
+      throw new Error('此旧交付稿缺少技能驱动的 AI 方案。请保留源码并由所选 AI 重新准备后再发布')
+    }
     const migrationApproved = job.proposal?.contract?.data_plan?.strategy === 'postgres_copy' && input.migrationApproved === true
     if (job.proposal?.contract?.data_plan?.strategy === 'postgres_copy' && !migrationApproved) throw new Error('请确认本轮数据库迁移和停写窗口')
     const rawConfigs = input.config as { key: string; value: string; resource_id?: string; resource_key?: string; local_connection_confirmed?: boolean; has_value?: boolean; value_source?: string }[]
@@ -1467,8 +1476,11 @@ export class AppDelivery {
         }
       }
     }
-    const needsDefaultMountResolution = input.storageBindings !== undefined && declaredMounts.some(mount =>
+    const needsDefaultMountResolution = (job.proposal!.delivery_format === 1 || input.storageBindings !== undefined) && declaredMounts.some(mount =>
       !storageBindings[mount.container_path] && !existingMounts.some(old => old.container_path === mount.container_path))
+    if (needsDefaultMountResolution && job.proposal!.delivery_format === 1) {
+      throw new Error('新增挂载必须使用 AI 方案声明的资源，或由用户在核对页选择')
+    }
     const ids = [...new Set(configs.flatMap(c => c.resource_id ? [c.resource_id] : []))].sort()
     const available: AppDocument[] = ids.length || Object.keys(storageBindings).length || needsDefaultMountResolution
       ? (await this.platform('/resources', expected, { query: { slug: job.slug } })).resources ?? [] : []
@@ -1501,7 +1513,8 @@ export class AppDelivery {
       if (item.resource_id && (item.value || !available.some(r => r.id === item.resource_id && r.env_keys?.includes(item.resource_key || item.key)))) {
         throw new Error(`配置项的资源选择无效：${item.key}`)
       }
-      if (!item.resource_id && loopbackConnection(item.key, item.value) && item.local_connection_confirmed !== true) {
+      if (job.proposal!.delivery_format !== 1 && !item.resource_id &&
+          loopbackConnection(item.key, item.value) && item.local_connection_confirmed !== true) {
         throw new Error(`连接仍指向应用容器自己，请更换为服务器可访问地址；若服务确实就在同一容器内，请明确确认：${item.key}`)
       }
       if (item.key === 'PORT' && (item.resource_id || (item.value && item.value !== String(job.port ?? 8080)))) {
@@ -1659,11 +1672,6 @@ export class AppDelivery {
     const scope = this.scope(expected)
     if (options?.automatic === true && this.busy.has(id)) {
       const { root, job } = await this.open(scope.directory, id)
-      if (job.proposal?.delivery_format === 1 && job.archivedRevision && job.requestId) {
-        if (this.analyses.has(id) || (options?.automatic && job.assessmentPending)) return this.public(job, root)
-        if (!['building', 'unknown', 'verifying', 'failed', 'verified'].includes(job.status)) return this.public(job, root)
-        return this.advancePreparedDelivery(root, job, expected)
-      }
       return this.public(job, root)
     }
     return this.exclusive(id, async () => {
@@ -1674,6 +1682,11 @@ export class AppDelivery {
         return view
       }
       if (!['building', 'unknown', 'awaiting_page_verification', 'verified', 'failed', 'publishing', 'verifying'].includes(job.status) || !job.hashes || !job.proposal) throw new Error('应用尚未发布')
+      if (job.proposal.delivery_format === 1) {
+        if (this.analyses.has(id) || (options?.automatic && job.assessmentPending)) return this.public(job, root)
+        if (!job.archivedRevision || !job.requestId) throw new Error('缺少本轮交付归档或发布请求号，无法启动 AI 验收')
+        return this.advancePreparedDelivery(root, job, expected)
+      }
       if (job.status === 'unknown' || job.status === 'publishing' || (job.status === 'building' && !job.version && job.requestId)) {
         if (!job.requestId) throw new Error('缺少上次发布请求号，无法核对结果')
         const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected)
@@ -1863,11 +1876,13 @@ export class AppDelivery {
   private async completeAssessedDelivery(root: string, job: DeliveryJob, receipt: AppDocument, expected: string) {
     const scope = this.scope(expected)
     checkPublishReceipt(job, receipt)
-    let assessment: DeliveryAssessment | undefined
-    if (typeof receipt.delivery_assessment === 'string') {
-      assessment = JSON.parse(receipt.delivery_assessment || '{}').runtime
+    const reports: { build?: DeliveryAssessment; runtime?: DeliveryAssessment } =
+      typeof receipt.delivery_assessment === 'string' ? JSON.parse(receipt.delivery_assessment || '{}') : {}
+    const assessment = reports.runtime
+    if (reports.build?.outcome !== 'passed' || !reports.build.evidence?.length ||
+        assessment?.outcome !== 'passed' || !assessment.evidence?.length) {
+      throw new Error('发布记录缺少本版本的 AI 构建或业务验收结论')
     }
-    if (assessment?.outcome !== 'passed' || !assessment.evidence.length) throw new Error('发布记录缺少本版本的 AI 业务验收结论')
     const remote = await this.platform(`/${job.slug}`, expected)
     if (remote.current_version !== receipt.published_version || remote.app_url !== job.url || !matchesReceipt(remote.build_log, job.hashes)) {
       throw new Error('验收结果与当前生效版本不一致')
