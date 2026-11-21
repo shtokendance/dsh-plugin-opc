@@ -465,7 +465,7 @@ export function AppsPanel({
       const fallback = skillDrivenDelivery ? undefined : options.find(resource => resource.is_default) ?? options[0]
       return [mount.container_path, (selected ?? fallback)?.id ?? '']
     }))
-  const hasMissingStorage = Object.values(storageSelections).some(id => !id)
+  const hasMissingStorage = volumeMounts.some(mount => !mount.container_path) || Object.values(storageSelections).some(id => !id)
 
   const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
   const [sourceConfiguration, setSourceConfiguration] = useState<SourceConfiguration | null>(null)
@@ -2137,6 +2137,13 @@ export function AppsPanel({
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                         {volumeMounts.map((mount, index) => {
+                          if (!mount.container_path) {
+                            return (
+                              <p key={index} className="oa-config-field-warning">
+                                此挂载缺少容器内路径，请返回核对方案，由原会话的 AI 补全。
+                              </p>
+                            )
+                          }
                           const existing = existingStorage.find(old => old.container_path === mount.container_path)
                           const options = volumeOptions(mount)
                           const missingResource = !existing && !storageSelections[mount.container_path]

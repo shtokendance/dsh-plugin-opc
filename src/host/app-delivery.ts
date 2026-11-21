@@ -790,17 +790,27 @@ export class AppDelivery {
   }
   async reopenReview(id: string, expected: string) {
     const scope = this.scope(expected)
-    const { root, job } = await this.open(scope.directory, id)
     return this.exclusive(id, async () => {
+      const { root, job } = await this.open(scope.directory, id)
       if (!['ready', 'awaiting_page_verification', 'failed'].includes(job.status) || !job.proposal) throw new Error('当前状态无法返回改造方案核对')
-      job.analysisFailure = undefined
-      job.status = 'review'
+      let validationError: string | undefined
+      if (job.status === 'ready' && job.proposal.delivery_format === 1) {
+        try {
+          await worker({ action: 'validate_deployment_scope', root, proposal: job.proposal }, scope.signal)
+        } catch (error) {
+          scope.assertCurrent()
+          validationError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      job.analysisFailure = validationError
+      job.status = validationError ? 'failed' : 'review'
+      if (validationError) job.failureStage = 'analysis'
       if (job.proposal.contract.admin_account && !job.proposal.contract.admin_account.source && !job.skillMarkdown && !this.adminReplies.has(id)) {
         job.proposal.adminAccountPending = true
       }
       job.confirmationToken = undefined
-      job.error = undefined
-      job.events.push('已返回改造方案核对阶段')
+      job.error = validationError
+      job.events.push(validationError ? '交付声明未通过校验，可在原分析会话继续修正' : '已返回改造方案核对阶段')
       await this.save(root, job)
       this.core.emit('skills-changed')
       return this.public(job, root)
