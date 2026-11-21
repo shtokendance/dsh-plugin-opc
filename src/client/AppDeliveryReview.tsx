@@ -617,7 +617,7 @@ export function AppDeliveryReview({
                 {isConnectionError ? '暂时无法连接 AI 服务。' : '这次应用准备没有完成。'}
                 {job?.failureStage === 'preparation' && plan
                   ? ' 已通过校验的方案已保存，可以直接重试生成交付包。'
-                  : job?.status === 'failed' ? ' 原始源码和你的选择已保留，可以继续准备。' : ' 请重试当前操作。'}
+                  : job?.status === 'failed' || job?.status === 'cancelled' ? ' 原始源码和你的选择已保留，可以继续准备。' : ' 请重试当前操作。'}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
@@ -625,7 +625,7 @@ export function AppDeliveryReview({
                     重试准备
                   </button>
                 )}
-                {job?.status === 'failed' && api.appAnalyzeWithMode && (
+                {(job?.status === 'failed' || job?.status === 'cancelled') && api.appAnalyzeWithMode && (
                   <button type="button" className={`oa-btn oa-btn-sm${job.failureStage === 'preparation' ? '' : ' oa-btn-primary'}`} disabled={running} onClick={() => void resumeAnalysis()}>
                     {job.failureStage === 'preparation' ? '让 AI 查看失败证据' : '让 AI 继续准备'}
                   </button>

@@ -108,7 +108,7 @@ function checkPublishReceipt(job: DeliveryJob, receipt: AppDocument) {
   if (Object.hasOwn(receipt, 'published_version') &&
       (!Number.isSafeInteger(receipt.published_version) || receipt.published_version < 0 ||
         (receipt.status === 'running' && receipt.published_version !== receipt.version))) throw new Error('发布回执正式版本无效')
-  if (['accepted', 'building', 'built', 'activating', 'runtime_ready', 'running', 'failed'].includes(receipt.status) &&
+  if (['accepted', 'building', 'built', 'activating', 'runtime_ready', 'promoting', 'running', 'failed'].includes(receipt.status) &&
       (!Number.isSafeInteger(receipt.version) || receipt.version < 1)) throw new Error('发布回执缺少有效版本')
 }
 
@@ -400,11 +400,13 @@ export class AppDelivery {
   }
   private async applyPublishReceipt(scopeDir: string, root: string, job: DeliveryJob, receipt: AppDocument) {
     checkPublishReceipt(job, receipt)
-    if (!['accepted', 'building', 'built', 'activating', 'runtime_ready', 'running', 'failed'].includes(receipt.status)) return false
+    if (!['accepted', 'building', 'built', 'activating', 'runtime_ready', 'promoting', 'running', 'failed'].includes(receipt.status)) return false
     job.published = true
     job.version = Object.hasOwn(receipt, 'published_version') ? receipt.published_version || undefined : receipt.version
     if (receipt.status === 'failed') {
-      this.recordFailureState(job, receipt.error_message || '部署失败', receipt.build_log?.slice(-8000), job.version)
+      const facts = [receipt.build_log?.slice(-8000), receipt.delivery_step && `发布阶段：${receipt.delivery_step}`,
+        receipt.migration_execution && `数据库迁移回执：${receipt.migration_execution}`].filter(Boolean).join('\n')
+      this.recordFailureState(job, receipt.error_message || '部署失败', facts, job.version)
     } else {
       job.status = 'building'
       job.error = undefined
@@ -652,6 +654,7 @@ export class AppDelivery {
           description: proposal.contract.description,
           data_plan: proposal.contract.data_plan,
           runtime: proposal.contract.runtime,
+          build_inputs: proposal.contract.build_inputs,
           health: proposal.contract.health,
           configs: (proposal.contract.configs ?? []).map((c: AppDocument) => ({
             ...c,
@@ -669,8 +672,8 @@ export class AppDelivery {
       },
     }
   }
-  async platform(path: string, expected: string, options: { method?: string; body?: unknown; form?: FormData; query?: Record<string, string>; download?: boolean; stream?: boolean } = {}): Promise<any> {
-    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|deliveries|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json|delivery\.json|confirmed-deployment\.json))?|deliveries(?:\/[a-f0-9-]+\/artifacts\/(?:app\.tar|skill\.zip|delivery\.json))?|database-schema|storage(?:\/backup)?|recheck|verify|rollback|migrate-data|config|config-values|requests\/[A-Za-z0-9_-]+(?:\/(?:assessment|rehearsal))?))?)?$/.test(path)) throw new Error('不支持的应用操作')
+  async platform(path: string, expected: string, options: { method?: string; body?: unknown; form?: FormData; query?: Record<string, string>; download?: boolean; stream?: boolean; signal?: AbortSignal } = {}): Promise<any> {
+    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|deliveries|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json|delivery\.json|confirmed-deployment\.json))?|deliveries(?:\/[a-f0-9-]+\/artifacts\/(?:app\.tar|skill\.zip|delivery\.json))?|database-schema|storage(?:\/backup)?|recheck|verify|rollback|migrate-data|config|config-values|requests\/[A-Za-z0-9_-]+(?:\/(?:assessment|rehearsal|probe))?))?)?$/.test(path)) throw new Error('不支持的应用操作')
     const scope = this.scope(expected)
     const token = await this.core.auth.token(); scope.assertCurrent()
     const url = new URL('/integration/v1/apps' + (path === '/' ? '' : path), this.core.auth.http.base)
@@ -678,7 +681,7 @@ export class AppDelivery {
     const response = await fetch(url, { method: options.method ?? (options.body || options.form ? 'POST' : 'GET'),
       headers: { Authorization: `Bearer ${token}`, ...(options.form ? {} : { 'Content-Type': 'application/json' }) },
       body: options.form ?? (options.body ? JSON.stringify(options.body) : undefined), redirect: 'error',
-      signal: AbortSignal.any([scope.signal, AbortSignal.timeout(
+      signal: AbortSignal.any([scope.signal, ...(options.signal ? [options.signal] : []), AbortSignal.timeout(
         path.endsWith('/rollback') ? 660_000 : path.endsWith('/storage/backup') ? 300_000 : options.form ? 180_000 : 30_000,
       )]) })
     scope.assertCurrent()
@@ -719,9 +722,11 @@ export class AppDelivery {
     if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error('容器端口必须为 1 至 65535 的整数')
     let targetDesc = typeof input.description === 'string' ? input.description.trim() : ''
     let defaultVersionNote = ''
-    const previous = input.previousJobId ? (await this.open(scope.directory, input.previousJobId)).job : undefined
+    const previousRecord = input.previousJobId ? await this.open(scope.directory, input.previousJobId) : undefined
+    const previous = previousRecord?.job
     if (previous && previous.slug !== input.slug) throw new Error('重新导入须保持原应用标识')
     const isUpgrade = Boolean(input.upgrade || previous?.upgrade || previous?.published)
+    let reusedSource: string | undefined
     if (isUpgrade) {
       const existing = await this.platform('/' + input.slug, expected)
       if (!existing.can_manage) throw new Error('只有应用创建人或管理员可以升级此应用')
@@ -734,6 +739,20 @@ export class AppDelivery {
         targetDesc = existing.description
       }
       defaultVersionNote = '应用升级'
+      if (input.reuseSourceVersion !== undefined) {
+        const releaseVersion = input.reuseSourceVersion
+        if (!Number.isSafeInteger(releaseVersion) || releaseVersion < 1 || !previousRecord || !previous ||
+            previous.version !== releaseVersion || !previous.published || !previous.revision || !previous.hashes ||
+            !/^[a-z0-9]+$/i.test(previous.revision)) {
+          throw new Error('本机没有对应发布版本的源码副本，请选择本地源码')
+        }
+        const { versions } = await this.platform(`/${input.slug}/versions`, expected)
+        const archived = (Array.isArray(versions) ? versions : []).find((version: AppDocument) => version.version === releaseVersion && version.status === 'running')
+        if (!archived || archived.app_tar_sha256 !== previous.hashes['app.tar'] || archived.skill_zip_sha256 !== previous.hashes['skill.zip']) {
+          throw new Error('本机源码对应的制品与服务器归档不一致，请选择本地源码')
+        }
+        reusedSource = join(previousRecord.root, previous.revision, 'approved/source')
+      }
     } else {
       const reserved = await this.checkSlug(input.slug, expected)
       if (!reserved.available) throw new Error('应用标识已被使用，请换一个标识；若需升级已有应用请选择升级')
@@ -767,7 +786,9 @@ export class AppDelivery {
       await this.save(root, job)
       try {
         let source: string
-        if (input.zip) {
+        if (reusedSource) {
+          source = reusedSource
+        } else if (input.zip) {
           if (typeof input.zip !== 'string' || input.zip.length > 90_000_000) throw new Error('ZIP 不能超过 64 MiB')
           const bytes = Buffer.from(input.zip, 'base64')
           if (bytes.length > 64 * 1024 * 1024) throw new Error('ZIP 不能超过 64 MiB')
@@ -880,7 +901,7 @@ export class AppDelivery {
     const resume = options?.mode === 'resume'
     const waitingForReply = resume && job.status === 'review' && analysisQuestions(job.proposal).length > 0
     const editing = options?.fromChat && ['review', 'ready'].includes(job.status)
-    if (resume && ((!waitingForReply && !editing && job.status !== 'failed') || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
+    if (resume && ((!waitingForReply && !editing && !['failed', 'cancelled'].includes(job.status)) || feedback.trim())) throw new Error('只能继续已暂停的应用准备')
     this.busy.add(id)
     if (session && !job.analysisSessionId && !job.analysisSessions?.includes(session)) job.session = session
     let trimmedFeedback: string
@@ -1034,7 +1055,7 @@ export class AppDelivery {
     const dockerfile = job.dockerfileContent ?? ''
     const authored = job.proposal?.delivery_format === 1
     const catalog = authored
-      ? await this.platform('/resources', expected, { query: { slug: job.slug } }).catch(() => undefined)
+      ? await this.platform('/resources', expected, { query: { slug: job.slug } })
       : undefined
     const resources = catalog?.resources
     const values = job.configDraft ? await this.credentials.read(`draft-${id}`) : {}
@@ -1060,6 +1081,7 @@ export class AppDelivery {
     }
     return {
       ...job.configDraft,
+      artifactHash: fingerprint(job.hashes),
       rows: (job.configDraft?.rows ?? []).filter(row => !authored || job.proposal?.contract.configs?.some((config: AppDocument) => config.key === row.key))
         .map(row => ({ ...row, value: values[row.key] ?? '' })),
       originalValues,
@@ -1369,6 +1391,7 @@ export class AppDelivery {
       job.confirmationToken = undefined
       job.assessment = undefined
       job.assessmentPending = undefined
+      job.configFingerprint = undefined
       job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
     } catch (error) {
       signal.throwIfAborted()
@@ -1395,10 +1418,10 @@ export class AppDelivery {
     }
     return String(receipt.revision)
   }
-  async resolveResourceValues(slug: string, bindings: AppDocument[], expected: string): Promise<Record<string, string>> {
+  async resolveResourceValues(slug: string, bindings: AppDocument[], expected: string, signal?: AbortSignal): Promise<Record<string, string>> {
     if (!bindings.length) return {}
     const result = await this.platform(`/${slug}/config-values`, expected, {
-      body: { bindings: bindings.map(({ key, resource_id, resource_key }) => ({ key, resource_id, resource_key })) },
+      body: { bindings: bindings.map(({ key, resource_id, resource_key }) => ({ key, resource_id, resource_key })) }, signal,
     })
     return result.values ?? {}
   }
@@ -1410,24 +1433,28 @@ export class AppDelivery {
       worker({ action: 'original_config_values', root, configs: declarations }, signal),
       this.generatedConfigValues(job, allocate),
       job.configDraft ? this.credentials.read(`draft-${job.id}`) : {} as Record<string, string>,
-      job.upgrade || job.published ? this.platform(`/${job.slug}`, expected) : undefined,
+      declarations.some(c => c.value_plan?.kind === 'inherit') ? this.platform(`/${job.slug}`, expected) : undefined,
     ])
     const inputs = new Map(job.configDraft?.rows.map(row => [row.key, row]))
     const prior = new Map<string, AppDocument>((active?.app_config ?? []).map((row: AppDocument) => [row.key, row]))
     const rows = declarations.map(c => {
       const draft = inputs.get(c.key)
-      const old = c.value_plan?.kind === 'inherit' ? prior.get(c.key) : undefined
+      const kind = c.value_plan?.kind
+      const old = kind === 'inherit' ? prior.get(c.key) : undefined
+      if (kind === 'inherit' && !old) {
+        throw new Error(`配置 ${c.key} 无法沿用：当前生效版本没有该配置项。请由所选 AI 重新声明本次的取值方式。`)
+      }
       const resource_id = draft ? draft.resource_id : old?.resource_id ?? c.resource_id
       const resource_key = draft ? draft.resource_key : old?.resource_key ?? c.resource_key
-      const kind = c.value_plan?.kind
       const value = resource_id ? '' : draft?.value_source === 'manual' ? manual[c.key] ?? ''
         : old ? old.value ?? '' : kind === 'generate' ? generated[c.key] ?? ''
+        : kind === 'default' ? c.value ?? (c.default || c.app_default || '')
         : c.value ?? (kind === 'input' ? '' : original[c.key] ?? c.default ?? c.app_default ?? '')
       return { key: c.key, description: c.description ?? '', required: Boolean(c.required), secret: Boolean(c.secret),
         value, resource_id, resource_key, value_source: resource_id ? 'resource' : draft?.value_source ??
           (old ? 'configured' : kind === 'generate' ? 'generated' : original[c.key] !== undefined ? 'original' : 'manual') }
     })
-    const resolved = await this.resolveResourceValues(job.slug, rows.filter(row => row.resource_id), expected)
+    const resolved = await this.resolveResourceValues(job.slug, rows.filter(row => row.resource_id), expected, signal)
     return rows.map(row => row.resource_id ? { ...row, value: resolved[row.key] ?? '' } : row)
   }
 
@@ -1615,9 +1642,13 @@ export class AppDelivery {
         form.append(name === 'app.tar' ? 'app_tar' : 'skill_zip', new Blob([new Uint8Array(bytes)]), name)
       }
       if (job.proposal.delivery_format === 1) {
+        if (!Array.isArray(contract.verification?.targets) || !contract.verification.targets.length) {
+          throw new Error('本次交付尚未声明只读业务验收目标，请返回原会话让所选 AI 补全。')
+        }
         if (job.archivedRevision?.replaceAll('-', '') !== job.revision) throw new Error('本轮交付尚未归档，请重新准备')
         const capabilities = await this.platform('/resources', expected, { query: { slug: job.slug } })
         if (capabilities.delivery_format !== 1) throw new Error('当前 Platform 版本不支持技能驱动交付，请升级平台后重新发布')
+        if (capabilities.isolated_candidate !== true) throw new Error('当前 Platform 版本不支持隔离候选验收，请升级平台后重新发布')
         if (job.proposal.config_format === 1 && (capabilities.config_format !== 1 || capabilities.visible_config_values !== true)) {
           throw new Error('当前 Platform 版本不支持明文配置确认和版本归档，请先升级平台')
         }
@@ -1747,7 +1778,7 @@ export class AppDelivery {
       job.status = 'verifying'; job.failureStage = undefined; job.error = undefined; job.checks = undefined; job.pagesVerified = undefined; await this.save(root, job)
       try {
         await worker({ action: 'validate_verification_contract', root, contract }, scope.signal)
-        const credentials = { ...await this.readVersionCredentials(job, remote.app_config), ...supplied }
+        const credentials = { ...await this.readVersionCredentials(job, expected, remote.app_config), ...supplied }
         const healthPath = contract.health?.path
         const checks: AppDocument[] = []
         for (const test of contract.verification?.cases ?? []) {
@@ -1836,7 +1867,15 @@ export class AppDelivery {
       onChatReady?.()
       return this.public(job, root)
     }
-    if (receipt.status !== 'built' && receipt.status !== 'runtime_ready') { onChatReady?.(); return this.public(job, root) }
+    if (receipt.status !== 'built' && receipt.status !== 'runtime_ready') {
+      if (job.status !== 'building' && await this.applyPublishReceipt(scope.directory, root, job, receipt)) {
+        job.assessmentPending = undefined
+        job.failureStage = undefined
+        await this.save(root, job)
+      }
+      onChatReady?.()
+      return this.public(job, root)
+    }
     if (!this.analyze) throw new Error('当前 DSH 版本不支持应用 AI 验收')
     const controller = new AbortController()
     const signal = AbortSignal.any([scope.signal, controller.signal])
@@ -1897,6 +1936,9 @@ export class AppDelivery {
     if (remote.current_version !== receipt.published_version || remote.app_url !== job.url || !matchesReceipt(remote.build_log, job.hashes)) {
       throw new Error('验收结果与当前生效版本不一致')
     }
+    if (job.configFingerprint && job.configFingerprint !== remote.config_fingerprint) {
+      throw new Error('运行配置已变化，请通过 AI 更新流程重新验收。')
+    }
     await this.applyPublishReceipt(scope.directory, root, job, receipt)
     await this.demoteOtherJobsForSlug(scope.directory, job.slug, job.id)
     job.status = 'verified'
@@ -1909,34 +1951,54 @@ export class AppDelivery {
   }
 
   async observeDeployment(job: DeliveryJob, root: string, input: AppDocument, expected: string, signal: AbortSignal) {
-    const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected)
+    const request = `/${job.slug}/requests/${job.requestId}`
+    const modern = job.proposal?.delivery_format === 1
+    const receipt = await this.platform(request, expected, { signal })
     checkPublishReceipt(job, receipt)
     if (input.kind === 'rehearsal') {
       if (receipt.status !== 'built' || job.proposal?.contract?.data_plan?.strategy !== 'postgres_copy') throw new Error('本轮交付没有待演练的数据迁移')
-      return this.platform(`/${job.slug}/requests/${job.requestId}/rehearsal`, expected, { body: {} })
+      const path = `${request}/rehearsal`
+      let rehearsal = await this.platform(path, expected, { body: {}, signal })
+      while (rehearsal.status === 'running') {
+        await delay(2000, undefined, { signal })
+        rehearsal = await this.platform(path, expected, { signal })
+      }
+      return rehearsal
     }
     if (input.kind === 'state') {
       const logs = receipt.status === 'runtime_ready'
-        ? await this.platform(`/${job.slug}/logs`, expected).catch(() => ({})) : {}
-      const log = [receipt.build_log, receipt.error_message, logs.runtime_logs].filter(Boolean).join('\n').slice(-8000)
-      return { status: receipt.status, image: receipt.image, rehearsal: receipt.migration_rehearsal || undefined,
+        ? await this.platform(modern ? `${request}/probe` : `/${job.slug}/logs`, expected, { signal }).catch(() => ({})) : {}
+      signal.throwIfAborted()
+      const log = [receipt.build_log, receipt.error_message, modern ? logs.logs : logs.runtime_logs].filter(Boolean).join('\n').slice(-8000)
+      return { status: receipt.status, image: receipt.image, delivery_step: receipt.delivery_step, rehearsal: receipt.migration_rehearsal || undefined,
         migration: receipt.migration_execution || undefined, logs: await worker({ action: 'redact_feedback', root, text: log }, signal) }
     }
     if (receipt.status !== 'runtime_ready') throw new Error('候选版本还没有进入运行态')
+    const targets: AppDocument[] = job.proposal?.contract?.verification?.targets ?? []
+    const target = modern ? targets.find(item => item.id === input.target && item.kind === input.kind) : undefined
+    if (modern && !target) throw new Error('请选择当前 AI 方案中声明的只读业务验收目标')
     if (input.kind === 'operation') {
       const contract = job.proposal!.contract
-      const api = contract.apis.find((item: AppDocument) => item.id === input.operation)
+      const operation = target?.operation ?? input.operation
+      const api = contract.apis.find((item: AppDocument) => item.id === operation)
       if (!api || api.effect !== 'read') throw new Error('验收只允许调用已声明的只读业务操作')
-      const credentials = await this.readVersionCredentials(job)
-      const result = await worker({ action: 'probe', root, contract, operation: input.operation, params: input.params ?? {}, body: input.body,
-        credentials, skill_markdown: job.skillMarkdown }, signal)
+      const credentials = await this.readVersionCredentials(job, expected, undefined, operation, signal)
+      const candidateProbe = modern ? {
+        url: new URL(`/integration/v1/apps${request}/probe`, this.core.auth.http.base).href,
+        token: await this.core.auth.token(),
+        target: target?.id,
+      } : undefined
+      if (modern) this.scope(expected).assertCurrent()
+      const result = await worker({ action: 'probe', root, contract, operation, params: input.params ?? {}, body: input.body,
+        candidate_probe: candidateProbe, credentials, skill_markdown: job.skillMarkdown }, signal)
       let content = String(result.content ?? '').slice(0, 4000)
       for (const value of Object.values(credentials)) if (typeof value === 'string' && value) content = content.replaceAll(value, '[REDACTED]')
-      return { operation: input.operation, status: result.status, content_type: result.content_type,
-        content: await worker({ action: 'redact_feedback', root, text: content }, signal) }
+      return { operation, status: result.status, content_type: result.content_type,
+        content: await worker({ action: 'redact_feedback', root, text: content }, signal),
+        ...(typeof result.proof === 'string' ? { proof: result.proof } : {}) }
     }
-    const path = String(input.path ?? '/')
-    if (!path.startsWith('/') || path.startsWith('//') || /[\\\0\r\n]/.test(path)) throw new Error('请提供该应用的站内路径')
+    const path = String(target?.path ?? input.path ?? '/')
+    if (!path.startsWith('/') || path.startsWith('//') || /[\\\0\r\n#]/.test(path)) throw new Error('请提供该应用的站内路径')
     const url = new URL(path, job.url)
     if (url.origin !== new URL(job.url).origin) throw new Error('验收请求必须留在应用域名内')
     const expectedStatuses: number[] = input.expected_statuses ?? []
@@ -1946,19 +2008,41 @@ export class AppDelivery {
       throw new Error('等待入口就绪时需提供预期 HTTP 状态及 1–90 秒的等待时间')
     }
     const deadline = Date.now() + waitSeconds * 1000
-    const method = input.method === 'HEAD' ? 'HEAD' : 'GET'
+    const method = (target?.method ?? input.method) === 'HEAD' ? 'HEAD' : 'GET'
     let last: AppDocument = { path }
     do {
       signal.throwIfAborted()
       const timeout = waitSeconds ? Math.min(10_000, Math.max(1, deadline - Date.now())) : 10_000
       try {
-        const response = await fetch(url, { method, redirect: 'manual', signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]) })
-        await response.body?.cancel()
-        const location = response.headers.get('location')
+        const attemptSignal = AbortSignal.any([signal, AbortSignal.timeout(timeout)])
+        let status: number
+        let contentType: string | undefined
+        let location: string | undefined
+        let content: string | undefined
+        let proof: string | undefined
+        if (modern) {
+          const response = await this.platform(`${request}/probe`, expected, { body: { method, path, target: target?.id }, signal: attemptSignal })
+          if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) throw new Error('候选入口返回了无效回执')
+          const entries = new Map(Object.entries(response.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]))
+          status = response.status
+          contentType = (entries.get('content-type') as string[] | undefined)?.[0]
+          location = (entries.get('location') as string[] | undefined)?.[0]
+          if (typeof response.proof === 'string') proof = response.proof
+          if (method === 'GET' && typeof response.body === 'string' && response.body) {
+            content = await worker({ action: 'redact_feedback', root, text: response.body.slice(0, 4000) }, signal)
+          }
+        } else {
+          const response = await fetch(url, { method, redirect: 'manual', signal: attemptSignal })
+          await response.body?.cancel()
+          status = response.status
+          contentType = response.headers.get('content-type') ?? undefined
+          location = response.headers.get('location') ?? undefined
+        }
         const redirectPath = location ? URL.parse(location, url) : undefined
-        last = { path, status: response.status, content_type: response.headers.get('content-type'),
+        last = { path, status, content_type: contentType, ...(content === undefined ? {} : { content }),
+          ...(proof === undefined ? {} : { proof }),
           redirect_path: redirectPath?.origin === url.origin ? redirectPath?.pathname : undefined }
-        if (!expectedStatuses.length || expectedStatuses.includes(response.status)) return last
+        if (!expectedStatuses.length || expectedStatuses.includes(status)) return last
       } catch {
         signal.throwIfAborted()
         last = { path, connection_error: '未收到有效的 HTTP 响应' }
@@ -2037,6 +2121,10 @@ export class AppDelivery {
   async updateConfig(slug: string, body: AppDocument, expected: string) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     const scope = this.scope(expected)
+    const current = await this.platform(`/${slug}`, expected)
+    if (current.delivery_format === 1 || /\[Artifact\] delivery\.json:[a-f0-9]{64}/.test(current.build_log ?? '')) {
+      throw new Error('请在应用更新向导中由所选 AI 分析配置变更并验收。')
+    }
     const result = await this.platform(`/${slug}/config`, expected, { method: 'PUT', body })
     const activeVersion = result.current_version ?? result.version
     for (const parent of await this.directories(scope.directory)) {
@@ -2259,7 +2347,7 @@ export class AppDelivery {
             const saved = await this.credentials.read(`version-${archivedJobId}-${targetVersion}`)
             if (Object.keys(saved).length) await this.credentials.write(`version-${opened.job.id}-${targetVersion}`, saved)
           }
-          const credentials = await this.readVersionCredentials(opened.job)
+          const credentials = await this.readVersionCredentials(opened.job, expected, current.app_config)
           const checks: AppDocument[] = []
           for (const test of contract.verification?.cases ?? []) {
             const api = (contract.apis ?? []).find((a: AppDocument) => a.id === test.operation)
@@ -2353,20 +2441,42 @@ export class AppDelivery {
     if (!allowDisabled && await this.isSkillDisabled(scope.directory, job.slug)) throw new Error('应用技能已停用')
     return { job, root, signal: scope.signal, runtimeConfigs: remote.app_config as AppDocument[] | undefined }
   }
-  private async readVersionCredentials(job: DeliveryJob, runtimeConfigs?: AppDocument[]) {
+  private async readVersionCredentials(job: DeliveryJob, expected: string, runtimeConfigs?: AppDocument[], operation?: string, signal?: AbortSignal) {
     if (!job.version && !job.requestId) return {}
     const config = job.requestId ? await this.credentials.read(`publish-config-${job.requestId}`) : {}
-    const authKeys = new Set(verificationCredentialFields(job.proposal!.contract).map(field => field.key))
+    const contract = job.proposal!.contract
+    const api = operation ? (contract.apis ?? []).find((item: AppDocument) => item.id === operation) : undefined
+    const auth = api?.auth
+    let credentialContract = contract
+    if (operation) {
+      credentialContract = auth?.type === 'header' || auth?.type === 'bearer'
+        ? { apis: [api], auth_profile: auth.profile ? contract.auth_profiles?.[auth.profile] : contract.auth_profile }
+        : {}
+    }
+    const authKeys = new Set(verificationCredentialFields(credentialContract).map(field => field.key))
     const rows: AppDocument[] = config.rows ? JSON.parse(config.rows) : []
-    const configured = Object.fromEntries(rows.filter(row => authKeys.has(row.key) && !row.resource_id && row.value).map(row => [row.key, row.value]))
-    const runtime = Object.fromEntries((runtimeConfigs ?? []).filter(row => authKeys.has(row.key) && !row.resource_id && row.value)
-      .map(row => [row.key, row.value]))
+    const selected = new Map(rows.filter(row => authKeys.has(row.key)).map(row => [row.key, row]))
+    for (const row of runtimeConfigs ?? []) {
+      if (authKeys.has(row.key) && (row.resource_id || row.value || !selected.has(row.key))) selected.set(row.key, row)
+    }
+    const configured = Object.fromEntries([...selected.values()].filter(row => !row.resource_id && row.value).map(row => [row.key, row.value]))
+    const bound = [...selected.values()].filter(row => row.resource_id)
+    const resolved = await this.resolveResourceValues(job.slug, bound.filter(row => typeof row.effective_value !== 'string'), expected, signal)
+    for (const row of bound) {
+      const value = row.effective_value ?? resolved[row.key]
+      if (!value && job.proposal?.delivery_format === 1) throw new Error(`本应用的凭据资源未提供配置 ${row.key}`)
+      if (typeof value !== 'string' || !value) continue
+      configured[row.key] = value
+    }
     const version = job.version ? await this.credentials.read(`version-${job.id}-${job.version}`) : {}
     const source = job.proposal?.delivery_format === 1 && job.revision
       ? await this.credentials.read(`skill-credentials-${job.id}-${job.revision}`)
       : {}
     const legacy = job.confirmationToken ? {} : await this.credentials.read(job.id)
-    return { ...legacy, ...source, ...configured, ...runtime, ...version }
+    const current = job.proposal?.delivery_format === 1
+      ? { ...legacy, ...source, ...version, ...configured }
+      : { ...legacy, ...source, ...configured, ...version }
+    return operation ? Object.fromEntries(Object.entries(current).filter(([key]) => authKeys.has(key))) : current
   }
   async invoke(id: string, operation: string, params: AppDocument, body: unknown, expected: string, approve: (reason: string) => Promise<boolean>, turn?: AbortSignal) {
     const { job, root, signal, runtimeConfigs } = await this.verifiedJob(id, expected)
@@ -2381,8 +2491,8 @@ export class AppDelivery {
     }
     const invocationSignal = turn ? AbortSignal.any([signal, turn]) : signal
     invocationSignal.throwIfAborted()
-    return worker({ action: 'probe', root, contract: job.proposal!.contract, operation, params, body, approved,
-      credentials: await this.readVersionCredentials(job, runtimeConfigs), skill_markdown: job.skillMarkdown }, invocationSignal).catch(error => {
+    return worker({ action: 'probe', root, contract: job.proposal!.contract, operation, params, body, approved, strict_auth: job.proposal?.delivery_format === 1,
+      credentials: await this.readVersionCredentials(job, expected, runtimeConfigs, operation, invocationSignal), skill_markdown: job.skillMarkdown }, invocationSignal).catch(error => {
       if (approved) throw new Error('操作结果未知，请先查询实际结果再决定下一步', { cause: error })
       throw error
     })

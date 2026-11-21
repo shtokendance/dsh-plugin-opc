@@ -46,6 +46,8 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
         },
       } },
       build_context: { ...strings, required: true },
+      build_inputs: { ...objects, description: '只声明 Dockerfile 实际使用的非秘密构建 ARG。引用本次用户确认的配置键，提供根 Dockerfile 行号；私有依赖凭据没有构建秘密通道时填写阻塞。',
+        items: { ...object, properties: { arg: text, key: text, evidence: { ...strings, required: true } } } },
       data_plan: { ...object, required: true, properties: {
         strategy: { ...text, enum: deliveryDataStrategies(updating) },
         summary: text, recovery: text,
@@ -57,7 +59,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
       health: { ...object, description: '可选。仅用于标识源码已有的健康入口，业务验证不得使用该入口。没有则省略。', properties: { path: text, status: { type: 'integer' }, json_contains: object } },
       configs: { ...objects, description: '完整列出本次部署使用的运行配置。已核实没有运行配置时填 []。默认值须有源码依据，用户给定的值写 value；平台注入项填写 resource_id 和 resource_key。', items: { ...object, properties: {
         key: text, default: text, value: { ...str, description: '本次部署已确定的实际值，包括用户给出的口令或连接串。未确定时省略。' }, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
-        app_default: { ...str, description: '填写源码中的兜底默认值（只读展示参考，不会自动注入）' },
+        app_default: { ...str, description: '填写已证实的源码兜底值。value_plan.kind 为 default 且未提供覆盖值或非空 default 时，此值作为第三步生效值。' },
         source: { ...object, description: '使用 path 和 keys 定位源配置' },
         resource_id: str,
         resource_key: str,
@@ -89,7 +91,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
         question: text, evidence: { ...strings, required: true }, affected: { ...strings, required: true }, action: text,
         reason: { ...text, enum: ['external_authorization', 'missing_credential', 'role_change'] },
       } } },
-      apis: { ...objects, required: true, description: '填写技能可使用的真实接口，没有时为 []。', items: { ...object, properties: {
+      apis: { ...objects, required: true, description: '填写技能可使用的真实接口，没有时为 []。auth 写入实际规则，仅沿用共同规则时可省略。', items: { ...object, properties: {
         id: text, method: text, path: text, purpose: text,
         evidence: { ...strings, required: true },
         parameters: { ...objects, required: true, items: { ...object, properties: {
@@ -100,7 +102,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
         request_body: { oneOf: [{ type: 'null' }, { ...object, properties: {
           schema: { type: 'json', required: true }, required: { ...bool, required: true }, description: str,
         } }], required: true },
-        responses: { ...object, required: true }, auth: { ...routeAuth, required: true },
+        responses: { ...object, required: true }, auth: routeAuth,
         effect: { ...text, enum: ['read', 'write', 'destructive', 'external'] },
         confirmation_required: { ...bool, required: true, description: 'effect 为 write、destructive 或 external 时必须为 true' },
       } } },
@@ -109,7 +111,19 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
           path: text, purpose: text, evidence: { ...strings, required: true },
           actions: { type: 'array', required: true, items: { oneOf: [str, object] } }, auth: routeAuth,
         } } },
-      verification: { ...object, description: '说明 AI 部署验收的业务目标和可取得的证据。' },
+      configuration_review: { ...object, description: '总结实际读取的配置、资源和挂载及其源码证据。没有部署配置也要说明核实依据。', properties: {
+        summary: text, evidence: { ...strings, required: true, description: '实际读取的源码文件:行号' },
+      } },
+      verification: { ...object, description: '由所选 AI 声明适合该应用并可以实际执行的只读验收。', properties: {
+        targets: { ...objects, required: true, items: { ...object, properties: {
+          id: text, kind: { ...text, enum: ['http', 'operation'] },
+          path: { ...str, description: 'http 使用已核实为只读的站内路径' },
+          method: { ...str, enum: ['GET', 'HEAD'], description: 'http 必填；必须有源码证据' },
+          operation: { ...str, description: 'operation 必须引用契约中 effect=read 的操作 ID' },
+          expected: { ...text, description: '从实际响应核对的业务现象或身份依据' },
+          evidence: { ...strings, description: 'http 必填，证据为源码相对路径:行号' },
+        } } },
+      } },
       unresolved: { ...strings, description: '仅保留阻塞部署且需用户决定的问题。可选集成配置、改密建议、部署后才能确认的事项放在摘要。' },
     } },
     decisions: { ...objects, items: { ...object, properties: {

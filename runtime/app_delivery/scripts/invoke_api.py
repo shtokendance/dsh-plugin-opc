@@ -2,6 +2,8 @@
 """Invoke a documented application operation without embedding credentials."""
 
 import argparse
+from email.message import Message
+import io
 import json
 import math
 import os
@@ -11,11 +13,66 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.response
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+class LoginContractError(ValueError):
+    pass
+
+
+def application_opener(candidate_probe=None):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    return CandidateProbeOpener(opener, candidate_probe) if candidate_probe else opener
+
+
+class CandidateProbeOpener:
+    def __init__(self, opener, target):
+        self.opener = opener
+        self.target = target
+
+    def open(self, request, timeout):
+        url = urllib.parse.urlsplit(request.full_url)
+        path = urllib.parse.urlunsplit(("", "", url.path or "/", url.query, ""))
+        if not path.startswith("/") or path.startswith("//"):
+            raise ValueError("candidate operation must use an application path")
+        probe = {"method": request.get_method(), "path": path, "headers": dict(request.header_items())}
+        target_id = self.target.get("target")
+        if target_id:
+            self.target.pop("proof", None)
+            probe["target"] = target_id
+        if request.data is not None:
+            probe["body"] = request.data.decode("utf-8")
+        envelope = urllib.request.Request(
+            self.target["url"],
+            data=json.dumps(probe, ensure_ascii=False).encode("utf-8"),
+            headers={"Authorization": "Bearer " + self.target["token"], "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with self.opener.open(envelope, timeout=min(timeout, 30)) as response:
+                result = json.loads(response.read(16 * 1024 * 1024).decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise OSError(f"候选验收代理返回 HTTP {exc.code}") from exc
+        status = result.get("status")
+        content = result.get("body", "")
+        if not isinstance(status, int) or not 100 <= status <= 599 or not isinstance(content, str):
+            raise ValueError("候选验收代理返回无效结果")
+        if target_id and isinstance(result.get("proof"), str):
+            self.target["proof"] = result["proof"]
+        headers = Message()
+        for name, values in result.get("headers", {}).items():
+            for value in values:
+                headers.add_header(name, value)
+        payload = io.BytesIO(content.encode("utf-8"))
+        if status >= 300:
+            raise urllib.error.HTTPError(request.full_url, status, "candidate application response", headers, payload)
+        return urllib.response.addinfourl(payload, headers, request.full_url, status)
 
 
 def valid_origin(value):
@@ -102,7 +159,7 @@ def login_method(profile):
     return method
 
 
-def _resolve_contract_auth_credential(contract, auth, credential_env=None):
+def _resolve_contract_auth_credential(contract, auth, credential_env=None, candidate_probe=None, strict_auth=False):
     """Use a supplied session token or exchange supplied credentials at the app login endpoint."""
     environment = os.environ if credential_env is None else credential_env
     profile_id = auth.get("profile")
@@ -130,13 +187,20 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
                 body_tpl = {"username": username, "password": password}
             resolved_body = {}
             for k, v in body_tpl.items():
-                if v in ("${username}", f"env:{u_key}", "env:USERNAME"):
+                if v == "${username}" or (not strict_auth and v in (f"env:{u_key}", "env:USERNAME")):
+                    if strict_auth and not username:
+                        raise LoginContractError("登录模板引用用户名，但方案没有提供用户名配置值")
                     resolved_body[k] = username
-                elif v in ("${password}", f"env:{p_key}", "env:PASSWORD"):
+                elif v == "${password}" or (not strict_auth and v in (f"env:{p_key}", "env:PASSWORD")):
+                    if strict_auth and not password:
+                        raise LoginContractError("登录模板引用口令，但方案没有提供口令配置值")
                     resolved_body[k] = password
                 elif isinstance(v, str) and v.startswith("env:"):
                     env_k = v[4:]
-                    resolved_body[k] = environment.get(env_k) or (username if "USER" in env_k else password)
+                    value = environment.get(env_k)
+                    if strict_auth and not value:
+                        raise LoginContractError("登录模板引用了没有配置值的键：" + env_k)
+                    resolved_body[k] = value or (username if "USER" in env_k else password)
                 else:
                     resolved_body[k] = v
 
@@ -147,16 +211,21 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 method=login_method(profile),
             )
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            login_probe = {key: candidate_probe[key] for key in ("url", "token")} if candidate_probe else None
+            opener = application_opener(login_probe)
             with opener.open(req, timeout=10) as resp:
                 if auth.get("type") == "header" and auth.get("header", "").lower() == "cookie":
                     cookies = resp.headers.get_all("Set-Cookie") or []
                     if cookies:
                         return "; ".join(c.split(";", 1)[0] for c in cookies)
+                    if strict_auth:
+                        raise LoginContractError("应用登录响应缺少方案声明的 Cookie")
+                token_path = str(profile.get("token_json_path") or "").strip()
+                if strict_auth and not token_path:
+                    raise LoginContractError("登录方案须声明应用响应中的 token_json_path")
                 raw = json.loads(resp.read(65536).decode("utf-8"))
-                token_path = str(profile.get("token_json_path") or "token").strip()
                 cur = raw
-                for part in token_path.split("."):
+                for part in (token_path or "token").split("."):
                     if isinstance(cur, dict) and part in cur:
                         cur = cur[part]
                     else:
@@ -164,6 +233,8 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
                         break
                 if isinstance(cur, str) and cur.strip():
                     return cur.strip()
+                if strict_auth:
+                    raise LoginContractError("登录响应缺少方案声明的 Token 路径：" + token_path)
                 if isinstance(raw, dict):
                     for candidate_key in ("token", "access_token", "jwt", "session_token"):
                         if isinstance(raw.get(candidate_key), str) and raw[candidate_key].strip():
@@ -174,6 +245,8 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
             if exc.code in (401, 403):
                 raise ValueError("应用登录失败，请核对账号权限或更新登录凭据") from exc
             raise ValueError(f"应用登录接口返回 HTTP {exc.code}，请检查应用日志或登录配置") from exc
+        except LoginContractError:
+            raise
         except (urllib.error.URLError, ValueError, OSError) as exc:
             raise ValueError("应用登录请求失败，请检查连接和登录配置") from exc
     if username and password and auth.get("type") == "header" and auth.get("header", "").lower() == "authorization":
@@ -182,7 +255,7 @@ def _resolve_contract_auth_credential(contract, auth, credential_env=None):
     return ""
 
 
-def build_request(contract, operation, params, body, approve_write=False, credential_env=None):
+def build_request(contract, operation, params, body, approve_write=False, credential_env=None, candidate_probe=None, strict_auth=False):
     origin = valid_origin(contract["base_url"])
     matches = [a for a in contract["apis"] if a["id"] == operation]
     if len(matches) != 1:
@@ -230,7 +303,7 @@ def build_request(contract, operation, params, body, approve_write=False, creden
     if auth["type"] != "none":
         credential = (os.environ if credential_env is None else credential_env).get(auth.get("env", ""), "")
         if not credential:
-            credential = _resolve_contract_auth_credential(contract, auth, credential_env)
+            credential = _resolve_contract_auth_credential(contract, auth, credential_env, candidate_probe, strict_auth)
         if not credential:
             raise ValueError("missing credential connection / 应用账号连接不可用，请检查认证方案：" + str(auth.get("profile") or auth.get("env") or "default"))
         if auth["type"] == "bearer":
@@ -265,10 +338,12 @@ def build_request(contract, operation, params, body, approve_write=False, creden
     return urllib.request.Request(url, data=payload, headers=headers, method=api["method"])
 
 
-def execute(contract, operation, params, body=None, approve_write=False, credential_env=None):
-    request = build_request(contract, operation, params, body, approve_write, credential_env)
+def execute(contract, operation, params, body=None, approve_write=False, credential_env=None, candidate_probe=None, strict_auth=False):
+    verification = contract.get("verification")
+    explicit_auth = bool(strict_auth or candidate_probe or (isinstance(verification, dict) and verification.get("targets")))
+    request = build_request(contract, operation, params, body, approve_write, credential_env, candidate_probe, explicit_auth)
     # Do not forward credentials through redirects or system proxies.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    opener = application_opener(candidate_probe)
     try:
         with opener.open(request, timeout=180) as response:
             return response.status, response.headers.get("Content-Type", ""), response.read(100_000_001)
