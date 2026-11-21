@@ -307,7 +307,7 @@ export type ConfigPublishIssue = {
   message: string
 }
 
-export function getConfigPublishIssues(configs: AppConfigItem[], expectedPort?: number): Map<number, ConfigPublishIssue> {
+export function getConfigPublishIssues(configs: AppConfigItem[], expectedPort?: number, skillDriven = false): Map<number, ConfigPublishIssue> {
   const seen = new Set<string>()
   const issues = new Map<number, ConfigPublishIssue>()
   configs.forEach((item, index) => {
@@ -330,7 +330,7 @@ export function getConfigPublishIssues(configs: AppConfigItem[], expectedPort?: 
       issues.set(index, { kind: 'port', message: `PORT 必须与已确认的容器端口（${expectedPort}）一致，如需修改请返回上一步调整` })
       return
     }
-    if (!item.resource_id && needsConnectionDecision(item)) {
+    if (!skillDriven && !item.resource_id && needsConnectionDecision(item)) {
       issues.set(index, { kind: 'loopback', message: `配置项 ${key} 当前指向本地回环地址（localhost / 127.0.0.1），请选用平台托管资源、填写可达主机地址，或明确勾选确认同容器运行` })
       return
     }

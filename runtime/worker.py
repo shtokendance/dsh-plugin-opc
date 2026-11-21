@@ -315,7 +315,7 @@ def resolve_and_enrich_proposal(
                     raise ValueError("本轮未修改失败制品中的文件，不能将相同程序错误标记为已修复；请读取出错文件并修正")
 
     if isinstance(contract, dict):
-        errors: list[str] = []
+        errors: list[str] = d.contract_shape_errors(contract) if skill_delivery else []
         configs = contract.get("configs", [])
         valid_config_dicts = isinstance(configs, list)
         if not valid_config_dicts:

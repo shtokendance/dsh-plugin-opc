@@ -115,6 +115,7 @@ export function AppDeliveryConfig({
   lockedPort,
   readOnly = false,
   publishIssues,
+  skillDriven = false,
 }: {
   configs: AppConfigItem[]
   allowNew?: boolean
@@ -124,6 +125,7 @@ export function AppDeliveryConfig({
   lockedPort?: number
   readOnly?: boolean
   publishIssues?: ReadonlyMap<number, ConfigPublishIssue>
+  skillDriven?: boolean
   onChange: (items: AppConfigItem[]) => void
 }) {
   const configId = useId()
@@ -206,8 +208,8 @@ export function AppDeliveryConfig({
             (r.type !== 'minio-app-storage' || configs.some(config => config.resource_id === r.id)),
         )
     const status = getStatus(item, original, selected)
-    const bindWarning = needsContainerBindWarning(item, original)
-    const loopbackWarning = needsConnectionDecision(item)
+    const bindWarning = !skillDriven && needsContainerBindWarning(item, original)
+    const loopbackWarning = !skillDriven && needsConnectionDecision(item)
     const issue = publishIssues?.get(index)
     const keyIssue = issue?.kind === 'key' ? issue : undefined
     const valueIssue = issue?.kind === 'key' ? undefined : issue
@@ -411,7 +413,7 @@ export function AppDeliveryConfig({
           </div>
         )}
 
-        {(loopbackWarning || item.local_connection_confirmed) && (
+        {!skillDriven && (loopbackWarning || item.local_connection_confirmed) && (
           <div role="note" className="oa-config-field-warning">
             {valueIssue?.kind !== 'loopback' && (
               <div>这个连接指向容器自己，部署后不能连接你电脑上的服务。请选择下方平台资源，或填写服务器可访问地址。</div>
@@ -495,7 +497,7 @@ export function AppDeliveryConfig({
 
   const hasContainerIssue = containerDefaultConfigs.some(({ item, index }) => {
     const orig = originals.find(o => o.key === item.key)
-    if (publishIssues) return publishIssues.has(index) || needsContainerBindWarning(item, orig)
+    if (publishIssues) return publishIssues.has(index) || (!skillDriven && needsContainerBindWarning(item, orig))
     const preserves =
       (item.value_source === 'original' && Boolean(orig?.has_original_value || orig?.has_value)) ||
       (item.value_source !== 'manual' && Boolean(orig?.has_value))

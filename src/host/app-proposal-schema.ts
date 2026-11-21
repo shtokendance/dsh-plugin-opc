@@ -10,10 +10,18 @@ const routeAuth = { ...object, properties: {
   evidence: { ...strings, description: '该路由的认证源码位置，使用源码读取工具返回的文件路径和行号' },
 } } as const
 
-export function proposalParameters(port: number, portLocked = true) {
+export function deliveryDataStrategies(updating: boolean): string[] {
+  return updating ? ['reuse', 'postgres_copy'] : ['initialize']
+}
+
+export function proposalParameters(port: number, portLocked: boolean, updating: boolean) {
   // Keep fields optional at the top level for the legacy proposal string.
   return {
     summary: { ...str, description: '中文改造摘要；使用结构化参数时必填' },
+    readiness: { ...object, description: '由当前 AI 根据源码和工具证据判断，是否可以交给用户核对并开始候选构建。', properties: {
+      outcome: { ...text, enum: ['ready', 'blocked'] },
+      reason: text,
+    } },
     skill_markdown: { ...str, description: '按当前改造技能要求生成可用的应用 SKILL.md，含 YAML 名称与说明，记录真实业务操作与调用方式，通过配置键引用部署值' },
     issues: { ...objects, items: { ...object, properties: {
       id: text, evidence: text, impact: text, recommendation: text,
@@ -39,10 +47,12 @@ export function proposalParameters(port: number, portLocked = true) {
       } },
       build_context: { ...strings, required: true },
       data_plan: { ...object, required: true, properties: {
-        strategy: { ...text, enum: ['initialize', 'reuse', 'postgres_copy'] },
+        strategy: { ...text, enum: deliveryDataStrategies(updating) },
         summary: text, recovery: text,
-        source_resource_id: str, target_resource_id: str, rehearsal_resource_id: str,
-        migration_files: strings,
+        ...(updating ? {
+          source_resource_id: str, target_resource_id: str, rehearsal_resource_id: str,
+          migration_files: strings,
+        } : {}),
       } },
       health: { ...object, description: '可选。仅用于标识源码已有的健康入口，业务验证不得使用该入口。没有则省略。', properties: { path: text, status: { type: 'integer' }, json_contains: object } },
       configs: { ...objects, description: '填写应用实际使用的配置键。默认值必须能从源码确认，不能使用示例占位符。用户给定的实际值写 value。由平台注入时写资源 ID 和资源字段名。', items: { ...object, properties: {
@@ -52,8 +62,8 @@ export function proposalParameters(port: number, portLocked = true) {
         resource_id: str,
         resource_key: str,
         preserve_on_upgrade: { ...bool, description: '该值用于读取历史数据时设为 true，例如字段加密密钥或查询盐。' },
-        value_plan: { ...object, description: '每个必填项声明取值方式。generate 只提交生成规格，由系统生成；input 由用户在受保护配置表单填写。', properties: {
-          kind: { ...text, enum: ['default', 'source', 'resource', 'input', 'inherit', 'generate'] },
+        value_plan: { ...object, description: '每个必填项声明取值方式。generate 由系统按规格生成；input 由用户在部署会话或配置表单填写。', properties: {
+          kind: { ...text, enum: ['default', 'source', 'resource', 'input', 'generate', ...(updating ? ['inherit'] : [])] },
           bytes: { type: 'integer', description: 'generate 时必填，随机字节数（16–128）' },
           encoding: { ...str, enum: ['base64', 'base64url', 'hex'] },
         } },
@@ -77,14 +87,24 @@ export function proposalParameters(port: number, portLocked = true) {
       } } },
       apis: { ...objects, required: true, description: '填写技能可使用的真实接口，没有时为 []。', items: { ...object, properties: {
         id: text, method: text, path: text, purpose: text,
-        evidence: { ...strings, required: true }, parameters: { ...objects, required: true },
-        request_body: { oneOf: [{ type: 'null' }, object], required: true },
+        evidence: { ...strings, required: true },
+        parameters: { ...objects, required: true, items: { ...object, properties: {
+          name: text, in: { ...text, enum: ['path', 'query', 'header'] },
+          type: { ...text, enum: ['string', 'integer', 'number', 'boolean'] },
+          description: text, required: { ...bool, required: true },
+        } } },
+        request_body: { oneOf: [{ type: 'null' }, { ...object, properties: {
+          schema: { type: 'json', required: true }, required: { ...bool, required: true }, description: str,
+        } }], required: true },
         responses: { ...object, required: true }, auth: { ...routeAuth, required: true },
         effect: { ...text, enum: ['read', 'write', 'destructive', 'external'] },
         confirmation_required: { ...bool, required: true, description: 'effect 为 write、destructive 或 external 时必须为 true' },
       } } },
       pages: { ...objects, required: true, description: '填写技能可使用的真实页面，没有时为 []。',
-        items: { ...object, properties: { auth: routeAuth } } },
+        items: { ...object, properties: {
+          path: text, purpose: text, evidence: { ...strings, required: true },
+          actions: { type: 'array', required: true, items: { oneOf: [str, object] } }, auth: routeAuth,
+        } } },
       verification: { ...object, description: '说明 AI 部署验收的业务目标和可取得的证据。' },
       unresolved: { ...strings, description: '仅保留阻塞部署且需用户决定的问题。可选集成配置、改密建议、部署后才能确认的事项放在摘要。' },
     } },

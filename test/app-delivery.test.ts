@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { zipSync, strToU8 } from 'fflate'
+import { unzipSync, zipSync, strToU8 } from 'fflate'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SessionStore, { type Session, type SessionId } from '@deepseek-ai/dsh-session'
@@ -60,6 +60,126 @@ test('runtime assessment waits for an AI-selected HTTP status on the application
   } finally {
     server.closeAllConnections()
     await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
+test('deployment agent scopes instructions and tools by mode and reads confirmed Platform values', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-delivery-modes-'))
+  const revision = 'fixture-revision'
+  const requests: string[] = []
+  const appPath = '/integration/v1/apps/test-app'
+  const server = createServer(async (req, res) => {
+    const path = req.url ?? ''
+    requests.push(path)
+    res.setHeader('Content-Type', 'application/json')
+    const payloads: Record<string, unknown> = {
+      [appPath]: { can_manage: true, status: 'running', current_version: 3 },
+      [appPath + '/versions']: { versions: [{
+        version: 3, status: 'running', is_active: true, config_revision: revision,
+        download_urls: { 'delivery.json': '/fixture-plan', 'confirmed-deployment.json': '/fixture-snapshot' },
+      }] },
+      [appPath + '/versions/3/artifacts/delivery.json']: { base_version: 2 },
+      [appPath + '/versions/3/artifacts/confirmed-deployment.json']: {
+        config_revision: revision, app_config: [{ key: 'MODE', value: 'from-confirmation' }],
+        storage_mounts: [{ container_path: '/data' }],
+      },
+      [appPath + '/config-values']: { values: { REDIS_URL: 'fixture-resource-value' } },
+    }
+    if (path === appPath + '/config-values') {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(chunk)
+      const request = JSON.parse(Buffer.concat(chunks).toString())
+      if (req.method !== 'POST' || request.bindings?.[0]?.resource_id !== 'fixture-redis') {
+        res.writeHead(400).end('{}')
+        return
+      }
+    }
+    res.writeHead(path in payloads ? 200 : 404).end(JSON.stringify(payloads[path] ?? {}))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    const url = `http://127.0.0.1:${address.port}`
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const core = Object.assign(new EventEmitter(), { auth: {
+      contexts, http: { base: new URL(url) }, token: async () => 'fixture-token',
+    } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { read: async () => ({}), write: async () => {} })
+    delivery.submit = async (job, _root, candidate) => {
+      job.proposal = candidate
+      job.status = 'review'
+    }
+    const tools = new Map<string, any>()
+    let prompt = ''
+    attachAppAgent({
+      agents: {
+        get: () => undefined,
+        create: async ({ setup, sessionId }: any) => {
+          tools.clear()
+          const agent = {
+            session: { id: sessionId },
+            tools: { restrict() {}, register: (tool: any) => tools.set(tool.name, tool) },
+            systemPrompt: { section: ({ text }: { text: string }) => { prompt = text } },
+            on() {}, inject() {}, cancel() {},
+          }
+          setup(agent)
+          return { agent }
+        },
+      },
+      get: () => undefined,
+      on: () => () => {},
+      effect() {},
+    } as any, delivery)
+    for (const updating of [false, true]) {
+      const job: import('../src/host/app-delivery.ts').DeliveryJob = {
+        id: updating ? 'update-fixture' : 'initial-fixture', slug: 'test-app', name: '测试应用',
+        url, port: 8080, session: '', status: 'analyzing', events: [], upgrade: updating,
+        modelSelection: { provider: 'fixture-provider', model: 'fixture-model' },
+        deliveryMode: updating ? 'update' : 'initial',
+      }
+      await delivery.analyze!(job, home, '', new AbortController().signal, async () => {
+        const inspect = tools.get('opc_delivery_inspect')
+        const submit = tools.get('opc_delivery_submit')
+        const options = submit.parameters.properties.contract.properties.data_plan.properties.strategy.enum
+        assert.deepEqual(options, updating ? ['reuse', 'postgres_copy'] : ['initialize'])
+        assert.equal(inspect.parameters.properties.action.enum.includes('active_version'), updating)
+        assert.equal(inspect.parameters.properties.action.enum.includes('database_schema'), updating)
+        assert.equal(tools.get('opc_delivery_observe').parameters.properties.kind.enum.includes('rehearsal'), updating)
+        assert.doesNotMatch(prompt, /\/v1\/apps\/transform|\.work-delivery-pending/)
+        if (updating) {
+          assert.match(prompt, /name: opc-app-updater/)
+          assert.doesNotMatch(prompt, /\binitialize\b/)
+          const baseline = JSON.parse(await inspect.execute({ action: 'active_version' }))
+          assert.deepEqual(baseline.configs, [{ key: 'MODE', value: 'from-confirmation' }])
+          assert.deepEqual(baseline.mounts, [{ container_path: '/data' }])
+        } else {
+          assert.match(prompt, /name: opc-app-adapter/)
+          assert.doesNotMatch(prompt, /\b(?:active_version|postgres_copy|rehearsal)\b/)
+          await assert.rejects(inspect.execute({ action: 'active_version' }), /action|不支持/)
+        }
+        const resource = JSON.parse(await inspect.execute({ action: 'config_values',
+          bindings: [{ key: 'REDIS_URL', resource_id: 'fixture-redis', resource_key: 'REDIS_URL' }] }))
+        assert.equal(resource.resources.REDIS_URL, 'fixture-resource-value')
+        const candidate = (strategy: string) => ({ ...proposal(url),
+          readiness: { outcome: 'ready', reason: '已核对样例源码和资源' },
+          contract: { ...proposal(url).contract, storage_mounts: [], data_plan: { strategy, summary: '测试', recovery: '测试恢复' } },
+        })
+        await assert.rejects(submit.execute({ proposal: JSON.stringify(candidate(updating ? 'initialize' : 'postgres_copy')) }), /data_plan\.strategy/)
+        const { readiness, ...withoutDecision } = candidate(options[0])
+        await assert.rejects(submit.execute({ ...withoutDecision, changes: [] }), /readiness/)
+        await submit.execute({ ...candidate(options[0]), changes: [] })
+        assert.deepEqual(job.proposal?.readiness, readiness)
+        assert.equal(job.proposal?.base_version, updating ? 3 : 0)
+      })
+    }
+    assert.ok(requests.includes(appPath + '/versions/3/artifacts/confirmed-deployment.json'))
+    assert.equal(requests.filter(path => path === appPath + '/config-values').length, 2)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await rm(home, { recursive: true, force: true })
   }
 })
 
@@ -669,6 +789,10 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     assert.equal(ready.status, 'ready', ready.error)
     v1Hashes = ready.hashes
     v1SkillZipBytes = await readFile(join(jobDir, ready.revision, 'bundle/skill.zip'))
+    const packagedInvoker = unzipSync(v1SkillZipBytes)['scripts/invoke_api.py']
+    assert.ok(packagedInvoker)
+    assert.deepEqual(Buffer.from(packagedInvoker),
+      await readFile(new URL('../runtime/app_delivery/scripts/invoke_api.py', import.meta.url)))
 
     await publishConfirmed(delivery, created.id, { artifactHash: ready.artifactHash, config: [] }, expected)
     deployed = {
@@ -687,7 +811,6 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     assert.equal(afterRb.version, 1)
 
     const bundle = JSON.parse(await readFile(join(jobDir, 'job.json'), 'utf8'))
-    const { unzipSync, zipSync } = await import('fflate')
     const archive = unzipSync(new Uint8Array(v1SkillZipBytes!))
     const operationFile = Object.keys(archive).find(name => name.endsWith('references/operations.json'))!
     const historicalContract = JSON.parse(Buffer.from(archive[operationFile]).toString())
@@ -1124,6 +1247,83 @@ test('a healthy old version does not end polling for a newer build', async () =>
     assert.equal(failed.failureStage, 'deployment')
     assert.equal(failed.error, 'build failed')
   } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('skill delivery waits for the selected AI at build and runtime before enabling the version', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-ai-approval-'))
+  try {
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { async read() { return {} }, async write() {} })
+    const id = '09e1459a-16cf-4eba-85af-418b99bbc017'
+    const url = 'http://app.example.test'
+    const root = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context), id)
+    const hashes = { 'app.tar': 'a', 'skill.zip': 'b', 'delivery.json': 'c' }
+    const modelSelection = { provider: 'fixture-ai', model: 'chosen-model' }
+    const sessionId = 'e9b6a5d4-04f6-43f0-af18-fcee601de924'
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, 'job.json'), JSON.stringify({ id, name: 'App', slug: 'test-app', url, session: 'user',
+      status: 'building', published: true, version: 1, events: [], proposal: { ...proposal(url), delivery_format: 1 }, hashes,
+      archivedRevision: 'fixture-archive', requestId: 'fixture-request', modelSelection, analysisSessionId: sessionId }))
+    let status = 'built'
+    const reports: Record<string, AppDocument> = {}
+    const receipt = () => ({ status, request_id: 'fixture-request', app_url: url, version: 1,
+      published_version: status === 'running' ? 1 : 0, delivery_plan_sha256: 'c',
+      delivery_assessment: JSON.stringify(reports) })
+    delivery.platform = async (path, _context, options) => {
+      if (path.endsWith('/assessment')) {
+        const report = options?.body as AppDocument
+        reports[report.phase] = report
+        status = report.phase === 'build' ? 'runtime_ready' : 'running'
+        return receipt()
+      }
+      if (path.endsWith('/requests/fixture-request')) return receipt()
+      assert.equal(path, '/test-app')
+      return { current_version: 1, app_url: url, build_log: '[Artifact] app.tar:a\n[Artifact] skill.zip:b\n[Artifact] delivery.json:c\n' }
+    }
+    const first = Promise.withResolvers<void>()
+    const second = Promise.withResolvers<void>()
+    const phases: string[] = []
+    delivery.analyze = async (job, _root, _feedback, _signal, onSessionReady, _fromChat, assessment) => {
+      assert.deepEqual(job.modelSelection, modelSelection)
+      assert.equal(job.analysisSessionId, sessionId)
+      assert.ok(assessment)
+      phases.push(assessment.phase)
+      await onSessionReady(sessionId)
+      const gate = assessment.phase === 'build' ? first : second
+      await gate.promise
+      assessment.result = { phase: assessment.phase, outcome: 'passed', report: '由所选 AI 验收',
+        evidence: ['fixture-observation'] }
+    }
+    const waitFor = async (state: string) => {
+      const until = Date.now() + 3_000
+      do {
+        const job = await delivery.getJob(id, expected)
+        if (job.status === state) return job
+        assert.notEqual(job.status, 'failed', job.error)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      } while (Date.now() < until)
+      throw new Error(`未到达状态 ${state}`)
+    }
+    assert.equal((await delivery.verify(id, expected, { automatic: true })).status, 'verifying')
+    assert.equal((await delivery.getJob(id, expected)).status, 'verifying')
+    assert.deepEqual(reports, {})
+    assert.equal((await delivery.verify(id, expected)).status, 'verifying')
+    assert.deepEqual(phases, ['build'])
+    first.resolve()
+    await waitFor('building')
+    assert.equal((await delivery.verify(id, expected, { automatic: true })).status, 'verifying')
+    assert.deepEqual(Object.keys(reports), ['build'])
+    second.resolve()
+    const verified = await waitFor('verified')
+    assert.deepEqual(phases, ['build', 'runtime'])
+    assert.equal(reports.runtime.outcome, 'passed')
+    assert.equal(verified.verification.checks[0].operation, 'ai_delivery_assessment')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 })
 
 test('an unnumbered deployment becomes a failed request or a confirmed release from its own receipt', async () => {
@@ -1643,6 +1843,7 @@ test('attachAppAgent names the deployment session and preserves its title and id
       url: 'http://baoxiao.apps.example.test',
       port: 8080,
       status: 'review',
+      modelSelection: { provider: 'fixture-provider', model: 'fixture-model' },
       analysisSessions: ['disposed-session-1'],
       proposal: { unresolved: ['管理员账号如何创建？'], contract: { unresolved: [] } },
       events: [],
@@ -1890,20 +2091,24 @@ test('plaintext input, generated values and final configuration artifacts stay c
   const delivery = new AppDelivery(core, home, {
     async read(id) { return values.get(id) ?? {} },
     async write(id, value) { values.set(id, value) },
-  })
+  }, { requireSkillDelivery: true })
   const expected = contexts.applicationContextId!
   const url = 'http://test-app.apps.example.test'
   const digest = async (form: FormData, key: string) => createHash('sha256')
     .update(Buffer.from(await (form.get(key) as Blob).arrayBuffer())).digest('hex')
   let requestedConfig: AppDocument[] = []
+  let failArchive = false
   delivery.platform = async (path, _context, options) => {
     const form = options?.form
     if (path === '/check-slug') return { available: true, app_url: url }
     if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, resources: [] }
-    if (path === '/deliveries' && form) return {
-      revision: form.get('revision'), slug: form.get('slug'),
-      app_tar_sha256: await digest(form, 'app_tar'), skill_zip_sha256: await digest(form, 'skill_zip'),
-      delivery_plan_sha256: await digest(form, 'delivery_plan'),
+    if (path === '/deliveries' && form) {
+      if (failArchive) throw new Error('fixture archive unavailable')
+      return {
+        revision: form.get('revision'), slug: form.get('slug'),
+        app_tar_sha256: await digest(form, 'app_tar'), skill_zip_sha256: await digest(form, 'skill_zip'),
+        delivery_plan_sha256: await digest(form, 'delivery_plan'),
+      }
     }
     if (path === '/publish' && form) {
       requestedConfig = JSON.parse(String(form.get('app_config')))
@@ -1926,6 +2131,7 @@ test('plaintext input, generated values and final configuration artifacts stay c
     ]
     const plan = {
       ...base, delivery_format: 1, config_format: 1,
+      readiness: { outcome: 'ready', reason: '已有源码和配置证据' },
       skill_markdown: '---\nname: app-test-app\ndescription: 查询示例\n---\n查询记录。\n',
       contract: { ...base.contract, configs: declarations, storage_mounts: [] },
     }
@@ -1938,7 +2144,21 @@ test('plaintext input, generated values and final configuration artifacts stay c
     }
     await assert.rejects(run({ ...plan, contract: { ...plan.contract,
       configs: [{ ...declarations[0], value_plan: undefined }, declarations[1]] } }), /必须声明 value_plan/)
-    const ready = await run({ ...plan, summary: '用户已确认初值 FixturePrivate8833' })
+    await assert.rejects(run({ ...plan, contract: { ...plan.contract,
+      apis: [{ ...plan.contract.apis[0], parameters: [{ name: 'x' }], request_body: {} }],
+      pages: [{ path: '/dashboard', purpose: '查看数据' }],
+    } }), (error: unknown) => {
+      const message = String(error)
+      return message.includes('contract.apis[0].parameters[0]') && message.includes('contract.apis[0].request_body') &&
+        message.includes('contract.pages[0]') && message.includes('evidence, actions')
+    })
+    failArchive = true
+    const failed = await run({ ...plan, summary: '用户已确认初值 FixturePrivate8833' })
+    assert.equal(failed.failureStage, 'preparation')
+    assert.deepEqual(failed.proposal.readiness, plan.readiness)
+    failArchive = false
+    const ready = await delivery.prepare(failed.id, failed.proposalHash, expected)
+    assert.equal(ready.status, 'ready', ready.error)
     const generatedStore = values.get(`generated-config-${ready.id}`)!
     assert.equal(Object.keys(generatedStore).length, 1)
     const [generated] = Object.values(generatedStore)
@@ -1967,10 +2187,18 @@ test('plaintext input, generated values and final configuration artifacts stay c
     assert.match(draft?.dockerfile ?? '', /^FROM python/)
     const local = await delivery.localArtifact(ready.id, 'delivery.json', expected)
     const prepared = JSON.parse(Buffer.from(local.base64, 'base64').toString('utf8'))
+    assert.deepEqual(prepared.readiness, plan.readiness)
     assert.equal(prepared.effective_configs.find((row: AppDocument) => row.key === 'FIELD_KEY').value, generated)
     assert.equal(prepared.effective_configs.find((row: AppDocument) => row.key === 'APP_PASSWORD').value, rows[1].value)
     rows[1].value = 'FixtureUpdatedBeforeConfirmation192'
     const input = { artifactHash: rebuilt.artifactHash, config: rows, storageBindings: {} }
+    const jobFile = join(root, 'job.json')
+    const approvedJob = await readFile(jobFile, 'utf8')
+    const legacyJob = JSON.parse(approvedJob)
+    delete legacyJob.proposal.delivery_format
+    await writeFile(jobFile, JSON.stringify(legacyJob))
+    await assert.rejects(delivery.confirmDeployment(ready.id, input, expected), /旧交付稿缺少/)
+    await writeFile(jobFile, approvedJob)
     const { confirmationToken, artifactHash } = await delivery.confirmDeployment(ready.id, input, expected)
     assert.notEqual(artifactHash, rebuilt.artifactHash)
     const finalFile = await delivery.localArtifact(ready.id, 'delivery.json', expected)

@@ -446,7 +446,8 @@ export function AppsPanel({
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
-  const configIssues = getConfigPublishIssues(configDrafts, wizardJob?.port ?? opcConfig.defaultPort)
+  const skillDrivenDelivery = wizardJob?.proposal?.delivery_format === 1
+  const configIssues = getConfigPublishIssues(configDrafts, wizardJob?.port ?? opcConfig.defaultPort, skillDrivenDelivery)
   const hasConfigIssues = configIssues.size > 0
   const [jobResources, setJobResources] = useState<ResourceSummary[]>()
   const deploymentResources = jobResources ?? resources
@@ -461,7 +462,8 @@ export function AppsPanel({
     .map(mount => {
       const options = volumeOptions(mount)
       const selected = options.find(resource => resource.id === (storageBindings[mount.container_path] ?? mount.resource_id))
-      return [mount.container_path, (selected ?? options.find(resource => resource.is_default) ?? options[0])?.id ?? '']
+      const fallback = skillDrivenDelivery ? undefined : options.find(resource => resource.is_default) ?? options[0]
+      return [mount.container_path, (selected ?? fallback)?.id ?? '']
     }))
   const hasMissingStorage = Object.values(storageSelections).some(id => !id)
 
@@ -554,34 +556,8 @@ export function AppsPanel({
     void loadWorkspaceData(false)
   }, [loadWorkspaceData, refreshSignal])
 
-  // Initialize default provider / model / effort whenever modelGroups changes
-  useEffect(() => {
-    if (modelGroups.length === 0) return
-    const currentGroup = modelGroups.find(g => g.id === selectedProvider) ?? modelGroups[0]
-    if (!currentGroup) return
-    if (currentGroup.id !== selectedProvider) setSelectedProvider(currentGroup.id)
-    const currentModel = currentGroup.models.find(m => m.id === selectedModel) ?? currentGroup.models[0]
-    if (!currentModel) return
-    if (currentModel.id !== selectedModel) setSelectedModel(currentModel.id)
-    const efforts = currentModel.reasoning?.efforts ?? []
-    if (efforts.length > 0) {
-      if (!efforts.some(e => e.id === selectedEffort)) {
-        const preferred = efforts.find(e => e.id === 'medium') ?? efforts[0]
-        setSelectedEffort(preferred.id)
-      }
-    } else if (selectedEffort) {
-      setSelectedEffort('')
-    }
-  }, [modelGroups, selectedProvider, selectedModel, selectedEffort])
-
-  const selectedModelGroup = useMemo(
-    () => modelGroups.find(g => g.id === selectedProvider) ?? modelGroups[0],
-    [modelGroups, selectedProvider],
-  )
-  const selectedModelItem = useMemo(
-    () => selectedModelGroup?.models.find(m => m.id === selectedModel) ?? selectedModelGroup?.models[0],
-    [selectedModelGroup, selectedModel],
-  )
+  const selectedModelGroup = modelGroups.find(g => g.id === selectedProvider)
+  const selectedModelItem = selectedModelGroup?.models.find(m => m.id === selectedModel)
   const availableEfforts = selectedModelItem?.reasoning?.efforts ?? []
 
   // Debounced slug check in Step 1 (new app only)
@@ -903,6 +879,10 @@ export function AppsPanel({
     }
     if (!upgradingStep1 && slugCheck.available === false) {
       setWizardError('该应用标识已被占用，请更换其他标识')
+      return
+    }
+    if (selectedProvider && !selectedModelItem) {
+      setWizardError('请选择此次交付的 AI 模型，或沿用当前会话模型')
       return
     }
     if (!zipFile && !sourcePath.trim()) {
@@ -1642,6 +1622,7 @@ export function AppsPanel({
       appName.trim().length > 0 &&
       slugValid &&
       (upgradingStep1 || slugCheck.available !== false) &&
+      (!selectedProvider || Boolean(selectedModelItem)) &&
       Boolean(zipFile || sourcePath.trim())
 
     const dockerfile = preparedDockerfile?.jobId === wizardJob?.id && preparedDockerfile?.artifactHash === wizardJob?.artifactHash
@@ -1839,10 +1820,10 @@ export function AppsPanel({
               <div className="oa-form-card">
                 <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a', marginBottom: 4 }}>AI 分析模型设置</div>
                 <p className="oa-hint" style={{ marginBottom: 12 }}>
-                  用于读取项目结构、生成改造代码与部署契约。若未配置则沿用工作区默认模型。
+                  此次交付的分析、修复和验收均由同一个所选 AI 完成。
                 </p>
                 {modelGroups.length === 0 ? (
-                  <div className="oa-alert oa-alert-warn">暂无可用分析模型列表，提交时将使用默认托管配置。</div>
+                  <div className="oa-hint">将沿用当前会话已选的 AI 模型。</div>
                 ) : (
                   <div className="oa-grid-3">
                     <div className="oa-field">
@@ -1850,8 +1831,13 @@ export function AppsPanel({
                       <select id={`${formId}-provider`}
                         className="oa-select"
                         value={selectedProvider}
-                        onChange={e => setSelectedProvider(e.target.value)}
+                        onChange={e => {
+                          setSelectedProvider(e.target.value)
+                          setSelectedModel('')
+                          setSelectedEffort('')
+                        }}
                       >
+                        <option value="">沿用当前会话模型</option>
                         {modelGroups.map(g => (
                           <option key={g.id} value={g.id}>
                             {g.name || g.id}
@@ -1861,7 +1847,12 @@ export function AppsPanel({
                     </div>
                     <div className="oa-field">
                       <label className="oa-label" htmlFor={`${formId}-model`}>分析模型</label>
-                      <select id={`${formId}-model`} className="oa-select" value={selectedModel} onChange={e => setSelectedModel(e.target.value)}>
+                      <select id={`${formId}-model`} className="oa-select" value={selectedModel} disabled={!selectedModelGroup}
+                        onChange={e => {
+                          setSelectedModel(e.target.value)
+                          setSelectedEffort('')
+                        }}>
+                        <option value="">{selectedModelGroup ? '请选择模型' : '当前会话模型'}</option>
                         {(selectedModelGroup?.models ?? []).map(m => (
                           <option key={m.id} value={m.id}>
                             {m.name || m.id}
@@ -1877,15 +1868,12 @@ export function AppsPanel({
                         disabled={availableEfforts.length === 0}
                         onChange={e => setSelectedEffort(e.target.value)}
                       >
-                        {availableEfforts.length === 0 ? (
-                          <option value="">默认</option>
-                        ) : (
-                          availableEfforts.map(ef => (
+                        <option value="">模型默认值</option>
+                        {availableEfforts.map(ef => (
                             <option key={ef.id} value={ef.id}>
                               {ef.name || ef.id}
                             </option>
-                          ))
-                        )}
+                        ))}
                       </select>
                     </div>
                   </div>
@@ -2081,6 +2069,7 @@ export function AppsPanel({
                     resources={deploymentResources}
                     lockedPort={wizardJob.port ?? opcConfig.defaultPort}
                     publishIssues={configIssues}
+                    skillDriven={skillDrivenDelivery}
                     onChange={handleStep3ConfigsChange}
                   />
 
@@ -2173,8 +2162,9 @@ export function AppsPanel({
                                       scheduleDraftSave(wizardJob, configDrafts, versionNote, next)
                                     }}
                                   >
-                                    {options.length === 0 && (
-                                      <option value="">{mount.kind === 'sqlite' ? '等待管理员配置本地磁盘卷' : '等待管理员配置存储'}</option>
+                                    {(skillDrivenDelivery || options.length === 0) && (
+                                      <option value="" disabled>{options.length > 0 ? '请选择存储资源'
+                                        : mount.kind === 'sqlite' ? '等待管理员配置本地磁盘卷' : '等待管理员配置存储'}</option>
                                     )}
                                     {options.map(resource => (
                                       <option key={resource.id} value={resource.id}>
