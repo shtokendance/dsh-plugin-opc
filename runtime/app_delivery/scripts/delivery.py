@@ -372,6 +372,13 @@ def contract_shape_errors(contract):
     def nonempty(value):
         return isinstance(value, str) and bool(value.strip())
 
+    for i, resource in entries(contract.get("resources", []), "contract.resources"):
+        path = f"contract.resources[{i}]"
+        if not isinstance(resource, dict):
+            errors.append(f"{path} 必须是对象")
+        elif not nonempty(resource.get("type")):
+            errors.append(f"{path}.type 必须填写 resources 工具返回的资源类型")
+
     for i, api in entries(contract.get("apis"), "contract.apis"):
         path = f"contract.apis[{i}]"
         if not isinstance(api, dict):

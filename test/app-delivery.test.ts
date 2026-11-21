@@ -1964,7 +1964,7 @@ test('skill delivery reports malformed mounts and unresolved configuration refer
     const plan = { ...base, delivery_format: 1, config_format: 1,
       skill_markdown: '---\nname: app-test-app\ndescription: 查询记录\n---\n查询记录。\n',
       contract: { ...base.contract, storage_mounts: [{ id: 'attachments', kind: 'uploads', path: '/app/data' }],
-        resources: [{ id: 'shared-lookup', type: 'redis' }],
+        resources: [{ id: 'shared-lookup', type: 'redis' }, { id: 'undeclared-type' }],
         auth_profiles: { login: { username_env: 'LOGIN_USER', password_env: 'LOGIN_PASSWORD' } },
       },
     }
@@ -1974,6 +1974,7 @@ test('skill delivery reports malformed mounts and unresolved configuration refer
       const message = String(error)
       return message.includes('contract.storage_mounts[0]') && message.includes('name, container_path') &&
         message.includes('contract.resources[0].id') && message.includes('shared-lookup') &&
+        message.includes('contract.resources[1].type') &&
         message.includes('LOGIN_USER') && message.includes('LOGIN_PASSWORD')
     })
     const contexts = new ContextStore()
@@ -1999,6 +2000,7 @@ test('skill delivery reports malformed mounts and unresolved configuration refer
       ...plan,
       contract: { ...plan.contract,
         storage_mounts: [{ name: 'attachments', kind: 'uploads', container_path: '/app/data' }],
+        resources: [{ id: 'shared-lookup', type: 'redis' }],
         configs: [{ key: 'LOOKUP_URL', required: true, secret: false, default: '', resource_id: 'shared-lookup',
           resource_key: 'REDIS_URL', value_plan: { kind: 'resource' } }],
         credential_sources: {
