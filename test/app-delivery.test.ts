@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { zipSync, strToU8 } from 'fflate'
+import { unzipSync, zipSync, strToU8 } from 'fflate'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SessionStore, { type Session, type SessionId } from '@deepseek-ai/dsh-session'
@@ -60,6 +60,121 @@ test('runtime assessment waits for an AI-selected HTTP status on the application
   } finally {
     server.closeAllConnections()
     await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
+test('deployment agent scopes instructions and tools by mode and reads confirmed Platform values', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-delivery-modes-'))
+  const revision = 'fixture-revision'
+  const requests: string[] = []
+  const appPath = '/integration/v1/apps/test-app'
+  const server = createServer(async (req, res) => {
+    const path = req.url ?? ''
+    requests.push(path)
+    res.setHeader('Content-Type', 'application/json')
+    const payloads: Record<string, unknown> = {
+      [appPath]: { can_manage: true, status: 'running', current_version: 3 },
+      [appPath + '/versions']: { versions: [{
+        version: 3, status: 'running', is_active: true, config_revision: revision,
+        download_urls: { 'delivery.json': '/fixture-plan', 'confirmed-deployment.json': '/fixture-snapshot' },
+      }] },
+      [appPath + '/versions/3/artifacts/delivery.json']: { base_version: 2 },
+      [appPath + '/versions/3/artifacts/confirmed-deployment.json']: {
+        config_revision: revision, app_config: [{ key: 'MODE', value: 'from-confirmation' }],
+        storage_mounts: [{ container_path: '/data' }],
+      },
+      [appPath + '/config-values']: { values: { REDIS_URL: 'fixture-resource-value' } },
+    }
+    if (path === appPath + '/config-values') {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(chunk)
+      const request = JSON.parse(Buffer.concat(chunks).toString())
+      if (req.method !== 'POST' || request.bindings?.[0]?.resource_id !== 'fixture-redis') {
+        res.writeHead(400).end('{}')
+        return
+      }
+    }
+    res.writeHead(path in payloads ? 200 : 404).end(JSON.stringify(payloads[path] ?? {}))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    const url = `http://127.0.0.1:${address.port}`
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const core = Object.assign(new EventEmitter(), { auth: {
+      contexts, http: { base: new URL(url) }, token: async () => 'fixture-token',
+    } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { read: async () => ({}), write: async () => {} })
+    delivery.submit = async (job, _root, candidate) => {
+      job.proposal = candidate
+      job.status = 'review'
+    }
+    const tools = new Map<string, any>()
+    let prompt = ''
+    attachAppAgent({
+      agents: {
+        get: () => undefined,
+        create: async ({ setup, sessionId }: any) => {
+          tools.clear()
+          const agent = {
+            session: { id: sessionId },
+            tools: { restrict() {}, register: (tool: any) => tools.set(tool.name, tool) },
+            systemPrompt: { section: ({ text }: { text: string }) => { prompt = text } },
+            on() {}, inject() {}, cancel() {},
+          }
+          setup(agent)
+          return { agent }
+        },
+      },
+      get: () => undefined,
+      on: () => () => {},
+      effect() {},
+    } as any, delivery)
+    for (const updating of [false, true]) {
+      const job: import('../src/host/app-delivery.ts').DeliveryJob = {
+        id: updating ? 'update-fixture' : 'initial-fixture', slug: 'test-app', name: '测试应用',
+        url, port: 8080, session: '', status: 'analyzing', events: [], upgrade: updating,
+        deliveryMode: updating ? 'update' : 'initial',
+      }
+      await delivery.analyze!(job, home, '', new AbortController().signal, async () => {
+        const inspect = tools.get('opc_delivery_inspect')
+        const submit = tools.get('opc_delivery_submit')
+        const options = submit.parameters.properties.contract.properties.data_plan.properties.strategy.enum
+        assert.deepEqual(options, updating ? ['reuse', 'postgres_copy'] : ['initialize'])
+        assert.equal(inspect.parameters.properties.action.enum.includes('active_version'), updating)
+        assert.equal(inspect.parameters.properties.action.enum.includes('database_schema'), updating)
+        assert.equal(tools.get('opc_delivery_observe').parameters.properties.kind.enum.includes('rehearsal'), updating)
+        assert.doesNotMatch(prompt, /\/v1\/apps\/transform|\.work-delivery-pending/)
+        if (updating) {
+          assert.match(prompt, /name: opc-app-updater/)
+          assert.doesNotMatch(prompt, /\binitialize\b/)
+          const baseline = JSON.parse(await inspect.execute({ action: 'active_version' }))
+          assert.deepEqual(baseline.configs, [{ key: 'MODE', value: 'from-confirmation' }])
+          assert.deepEqual(baseline.mounts, [{ container_path: '/data' }])
+        } else {
+          assert.match(prompt, /name: opc-app-adapter/)
+          assert.doesNotMatch(prompt, /\b(?:active_version|postgres_copy|rehearsal)\b/)
+          await assert.rejects(inspect.execute({ action: 'active_version' }), /action|不支持/)
+        }
+        const resource = JSON.parse(await inspect.execute({ action: 'config_values',
+          bindings: [{ key: 'REDIS_URL', resource_id: 'fixture-redis', resource_key: 'REDIS_URL' }] }))
+        assert.equal(resource.resources.REDIS_URL, 'fixture-resource-value')
+        const candidate = (strategy: string) => ({ ...proposal(url), contract: {
+          ...proposal(url).contract, storage_mounts: [], data_plan: { strategy, summary: '测试', recovery: '测试恢复' },
+        } })
+        await assert.rejects(submit.execute({ proposal: JSON.stringify(candidate(updating ? 'initialize' : 'postgres_copy')) }), /data_plan\.strategy/)
+        await submit.execute({ ...candidate(options[0]), changes: [] })
+        assert.equal(job.proposal?.base_version, updating ? 3 : 0)
+      })
+    }
+    assert.ok(requests.includes(appPath + '/versions/3/artifacts/confirmed-deployment.json'))
+    assert.equal(requests.filter(path => path === appPath + '/config-values').length, 2)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await rm(home, { recursive: true, force: true })
   }
 })
 
@@ -669,6 +784,10 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     assert.equal(ready.status, 'ready', ready.error)
     v1Hashes = ready.hashes
     v1SkillZipBytes = await readFile(join(jobDir, ready.revision, 'bundle/skill.zip'))
+    const packagedInvoker = unzipSync(v1SkillZipBytes)['scripts/invoke_api.py']
+    assert.ok(packagedInvoker)
+    assert.deepEqual(Buffer.from(packagedInvoker),
+      await readFile(new URL('../runtime/app_delivery/scripts/invoke_api.py', import.meta.url)))
 
     await publishConfirmed(delivery, created.id, { artifactHash: ready.artifactHash, config: [] }, expected)
     deployed = {
@@ -687,7 +806,6 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     assert.equal(afterRb.version, 1)
 
     const bundle = JSON.parse(await readFile(join(jobDir, 'job.json'), 'utf8'))
-    const { unzipSync, zipSync } = await import('fflate')
     const archive = unzipSync(new Uint8Array(v1SkillZipBytes!))
     const operationFile = Object.keys(archive).find(name => name.endsWith('references/operations.json'))!
     const historicalContract = JSON.parse(Buffer.from(archive[operationFile]).toString())

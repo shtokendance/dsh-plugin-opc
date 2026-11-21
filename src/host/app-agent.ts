@@ -9,7 +9,7 @@ import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
 import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, worker } from './app-delivery.ts'
-import { proposalParameters } from './app-proposal-schema.ts'
+import { deliveryDataStrategies, proposalParameters } from './app-proposal-schema.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -111,6 +111,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const portLocked = job.portAuto !== true
     const updating = job.deliveryMode ? job.deliveryMode === 'update' : Boolean(job.upgrade)
     const skill = loadBundledSkillText(updating ? 'UPDATE.md' : 'SKILL.md')
+    const inspectActions = [
+      'inventory', 'scan_routes_and_pages', 'read', 'read_failed', 'reference', 'template',
+      'inspect_local_storage', 'read_go_dependency', 'resources', 'config_values', 'read_source_connection',
+      ...(updating ? ['active_version', 'version_file', 'database_schema'] : []),
+    ]
+    const observationKinds = ['state', 'http', 'operation', ...(updating ? ['rehearsal'] : [])]
     const repairInstructions = isRepair
       ? '\n修复失败部署时，先核对失败阶段和日志，用 read_failed 读取实际失败制品并与原源码比对。只修正根因，提交完整替换文件。'
       : ''
@@ -179,9 +185,11 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     }
     const register = (tool: ToolDefinition) => round.tools.set(tool.name, tool)
     const output = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
-    register(defineTool({ name: 'opc_delivery_observe', description: '读取候选版本的实际事实。state 读取状态和日志；rehearsal 在已确认的隔离 PostgreSQL 上演练；运行态可使用 http 或 operation 进行站内读取。',
+    register(defineTool({ name: 'opc_delivery_observe',
+      description: '读取候选版本的实际事实。state 读取状态和日志；运行态使用 http 或 operation 进行站内读取。' +
+        (updating ? '已确认 PostgreSQL 迁移时，rehearsal 在隔离库演练。' : ''),
       parameters: {
-        kind: { type: 'string', enum: ['state', 'http', 'operation', 'rehearsal'], required: true },
+        kind: { type: 'string', enum: observationKinds, required: true },
         path: { type: 'string' }, method: { type: 'string', enum: ['GET', 'HEAD'] },
         expected_statuses: { type: 'array', items: { type: 'number' } }, within_seconds: { type: 'number' },
         operation: { type: 'string' }, params: { type: 'object', additionalProperties: true },
@@ -189,6 +197,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       }, output,
       async execute(args) {
         if (!assessment || assessment.result) throw new Error('当前没有可验收的部署阶段')
+        if (!observationKinds.includes(args.kind)) throw new Error('当前部署任务不支持该验收操作')
         if (observations.size >= 30) throw new Error('本轮事实读取已达到上限，请据此提交结论')
         const result = await delivery.observeDeployment(job, root, args, appCtxId, abort)
         const id = randomUUID()
@@ -214,9 +223,11 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         return '验收结论与证据已记录。'
       },
     }))
-    register(defineTool({ name: 'opc_delivery_inspect', description: '只读检查应用。inventory 查看导入源码清单；read、read_failed 或 version_file 传 path（version_file 读取线上生效版本）；resources 读取平台资源；config_values 读取当前应用配置及所选资源字段的实际值；active_version 读取生效版本和交付清单；database_schema 读取应用专属 PostgreSQL 的表和列；reference 传 name；template 传 language 和 version。另可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency。',
+    register(defineTool({ name: 'opc_delivery_inspect',
+      description: '只读检查应用。inventory 查看导入源码清单；read 或 read_failed 传 path；resources 读取平台资源；config_values 读取配置生效值；reference 传 name；template 传 language 和 version。也可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency 和 read_source_connection。' +
+        (updating ? 'active_version 读取线上基线；version_file 传 path 读取该版本文件；database_schema 读取应用专属 PostgreSQL 的结构。' : ''),
       parameters: {
-        action: { type: 'string', required: true },
+        action: { type: 'string', enum: inspectActions, required: true },
         path: { type: 'string' },
         proposed: { type: 'boolean' },
         language: { type: 'string' },
@@ -233,23 +244,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         start: { type: 'number' },
       }, output,
       async execute(args) {
-        const allowedActions = [
-          'inventory',
-          'scan_routes_and_pages',
-          'read',
-          'read_failed',
-          'reference',
-          'template',
-          'inspect_local_storage',
-          'read_go_dependency',
-          'resources',
-          'config_values',
-          'active_version',
-          'version_file',
-          'database_schema',
-          'read_source_connection',
-        ]
-        if (!allowedActions.includes(args.action)) throw new Error('只允许读取源码与规范')
+        if (!inspectActions.includes(args.action)) throw new Error('当前部署任务不支持该读取操作')
         if (args.action === 'reference' && !['delivery-files.md', 'contract.md', 'framework-checks.md'].includes(args.name ?? '')) {
           throw new Error('请读取 delivery-files.md、contract.md 或 framework-checks.md')
         }
@@ -325,7 +320,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         return JSON.stringify(res)
       } }))
     register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
-      parameters: proposalParameters(port, portLocked), output,
+      parameters: proposalParameters(port, portLocked, updating), output,
       async execute(args) {
         if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
         if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) throw new Error('技术方案连续校验未通过，已停止自动重试')
@@ -341,6 +336,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           }
           candidate.delivery_format = 1
           candidate.config_format = 1
+          const strategy = candidate.contract?.data_plan?.strategy
+          const strategies = deliveryDataStrategies(updating)
+          const waitingForDecision = candidate.unresolved?.length || candidate.contract?.unresolved?.length
+          if ((strategy !== undefined || !waitingForDecision) && !strategies.includes(strategy)) {
+            throw new Error(`${updating ? '应用更新' : '首次部署'}的 data_plan.strategy 只允许 ${strategies.join('、')}`)
+          }
           if (updating) {
             const active = await readActiveVersion()
             candidate.base_version = active.version

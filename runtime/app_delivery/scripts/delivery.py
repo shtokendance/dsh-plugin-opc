@@ -550,7 +550,7 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
         ]} if delivery_plan is not None else contract
         member("references/operations.json", json.dumps(skill_contract, ensure_ascii=False, indent=2))
         if contract["apis"]:
-            member("scripts/invoke_api.py", (Path(__file__).parents[1] / "assets/invoke_api.py.txt").read_bytes())
+            member("scripts/invoke_api.py", Path(__file__).with_name("invoke_api.py").read_bytes())
     result = {"skill_version": VERSION, "base_url": contract["base_url"], "status": "packaged-not-deployed", "files": {p.name: sha(p.read_bytes()) for p in sorted(out.iterdir())}}
     save(out / "summary.json", result)
     return result

@@ -10,7 +10,11 @@ const routeAuth = { ...object, properties: {
   evidence: { ...strings, description: '该路由的认证源码位置，使用源码读取工具返回的文件路径和行号' },
 } } as const
 
-export function proposalParameters(port: number, portLocked = true) {
+export function deliveryDataStrategies(updating: boolean): string[] {
+  return updating ? ['reuse', 'postgres_copy'] : ['initialize']
+}
+
+export function proposalParameters(port: number, portLocked: boolean, updating: boolean) {
   // Keep fields optional at the top level for the legacy proposal string.
   return {
     summary: { ...str, description: '中文改造摘要；使用结构化参数时必填' },
@@ -39,10 +43,12 @@ export function proposalParameters(port: number, portLocked = true) {
       } },
       build_context: { ...strings, required: true },
       data_plan: { ...object, required: true, properties: {
-        strategy: { ...text, enum: ['initialize', 'reuse', 'postgres_copy'] },
+        strategy: { ...text, enum: deliveryDataStrategies(updating) },
         summary: text, recovery: text,
-        source_resource_id: str, target_resource_id: str, rehearsal_resource_id: str,
-        migration_files: strings,
+        ...(updating ? {
+          source_resource_id: str, target_resource_id: str, rehearsal_resource_id: str,
+          migration_files: strings,
+        } : {}),
       } },
       health: { ...object, description: '可选。仅用于标识源码已有的健康入口，业务验证不得使用该入口。没有则省略。', properties: { path: text, status: { type: 'integer' }, json_contains: object } },
       configs: { ...objects, description: '填写应用实际使用的配置键。默认值必须能从源码确认，不能使用示例占位符。用户给定的实际值写 value。由平台注入时写资源 ID 和资源字段名。', items: { ...object, properties: {
@@ -52,8 +58,8 @@ export function proposalParameters(port: number, portLocked = true) {
         resource_id: str,
         resource_key: str,
         preserve_on_upgrade: { ...bool, description: '该值用于读取历史数据时设为 true，例如字段加密密钥或查询盐。' },
-        value_plan: { ...object, description: '每个必填项声明取值方式。generate 只提交生成规格，由系统生成；input 由用户在受保护配置表单填写。', properties: {
-          kind: { ...text, enum: ['default', 'source', 'resource', 'input', 'inherit', 'generate'] },
+        value_plan: { ...object, description: '每个必填项声明取值方式。generate 由系统按规格生成；input 由用户在部署会话或配置表单填写。', properties: {
+          kind: { ...text, enum: ['default', 'source', 'resource', 'input', 'generate', ...(updating ? ['inherit'] : [])] },
           bytes: { type: 'integer', description: 'generate 时必填，随机字节数（16–128）' },
           encoding: { ...str, enum: ['base64', 'base64url', 'hex'] },
         } },

@@ -667,7 +667,7 @@ export class AppDelivery {
     }
   }
   async platform(path: string, expected: string, options: { method?: string; body?: unknown; form?: FormData; query?: Record<string, string>; download?: boolean; stream?: boolean } = {}): Promise<any> {
-    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|deliveries|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json|delivery\.json))?|deliveries(?:\/[a-f0-9-]+\/artifacts\/(?:app\.tar|skill\.zip|delivery\.json))?|database-schema|storage(?:\/backup)?|recheck|verify|rollback|migrate-data|config|requests\/[A-Za-z0-9_-]+(?:\/(?:assessment|rehearsal))?))?)?$/.test(path)) throw new Error('不支持的应用操作')
+    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|deliveries|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json|delivery\.json|confirmed-deployment\.json))?|deliveries(?:\/[a-f0-9-]+\/artifacts\/(?:app\.tar|skill\.zip|delivery\.json))?|database-schema|storage(?:\/backup)?|recheck|verify|rollback|migrate-data|config|config-values|requests\/[A-Za-z0-9_-]+(?:\/(?:assessment|rehearsal))?))?)?$/.test(path)) throw new Error('不支持的应用操作')
     const scope = this.scope(expected)
     const token = await this.core.auth.token(); scope.assertCurrent()
     const url = new URL('/integration/v1/apps' + (path === '/' ? '' : path), this.core.auth.http.base)
