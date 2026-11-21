@@ -2197,6 +2197,7 @@ test('plaintext input, generated values and final configuration artifacts stay c
   const url = 'http://test-app.apps.example.test'
   const digest = async (form: FormData, key: string) => createHash('sha256')
     .update(Buffer.from(await (form.get(key) as Blob).arrayBuffer())).digest('hex')
+  const archivedPlans = new Map<FormDataEntryValue | null, string>()
   let requestedConfig: AppDocument[] = []
   let failArchive = false
   delivery.platform = async (path, _context, options) => {
@@ -2205,15 +2206,24 @@ test('plaintext input, generated values and final configuration artifacts stay c
     if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, isolated_candidate: true, resources: [] }
     if (path === '/deliveries' && form) {
       if (failArchive) throw new Error('fixture archive unavailable')
+      const planHash = await digest(form, 'delivery_plan')
+      archivedPlans.set(form.get('revision'), planHash)
       return {
         revision: form.get('revision'), slug: form.get('slug'),
         app_tar_sha256: await digest(form, 'app_tar'), skill_zip_sha256: await digest(form, 'skill_zip'),
-        delivery_plan_sha256: await digest(form, 'delivery_plan'),
+        delivery_plan_sha256: planHash,
       }
     }
     if (path === '/publish' && form) {
-      requestedConfig = JSON.parse(String(form.get('app_config')))
-      return { app_url: url, status: 'building', version: 1 }
+      // Inspect the multipart on the wire, where FormData transforms string line endings.
+      const wire = await new Request(url, { method: 'POST', body: form }).formData()
+      const manifest = wire.get('delivery_plan')
+      assert.equal(typeof manifest, 'string')
+      const planHash = createHash('sha256').update(String(manifest)).digest('hex')
+      assert.equal(planHash, archivedPlans.get(wire.get('delivery_revision')))
+      requestedConfig = JSON.parse(String(wire.get('app_config')))
+      return { app_url: url, status: 'building', version: 1, published_version: 0, request_id: wire.get('request_id'),
+        app_tar_sha256: await digest(wire, 'app_tar'), skill_zip_sha256: await digest(wire, 'skill_zip'), delivery_plan_sha256: planHash }
     }
     throw new Error('unexpected fixture route')
   }
@@ -2310,7 +2320,8 @@ test('plaintext input, generated values and final configuration artifacts stay c
     const manifestFile = await delivery.localArtifact(ready.id, 'app-manifest.json', expected)
     const manifest = JSON.parse(Buffer.from(manifestFile.base64, 'base64').toString('utf8'))
     assert.equal(manifest.configs.find((row: AppDocument) => row.key === 'APP_PASSWORD').value, rows[1].value)
-    await delivery.publish(ready.id, { ...input, artifactHash, confirmationToken }, expected)
+    const accepted = await delivery.publish(ready.id, { ...input, artifactHash, confirmationToken }, expected)
+    assert.equal(accepted.status, 'building', accepted.error)
     assert.equal(requestedConfig.find(row => row.key === 'FIELD_KEY')?.value, generated)
     assert.equal(requestedConfig.find(row => row.key === 'FIELD_KEY')?.preserve_on_upgrade, true)
     assert.equal(requestedConfig.find(row => row.key === 'APP_PASSWORD')?.value, rows[1].value)

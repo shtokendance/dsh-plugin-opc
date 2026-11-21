@@ -450,8 +450,10 @@ export function AppsPanel({
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
   const [step3Load, setStep3Load] = useState<{ jobId: string; artifactHash?: string; contextId: string; status: 'loading' | 'ready' | 'failed'; error?: string }>()
   const step3Request = useRef(0)
-  const step3Ready = step3Load?.status === 'ready' && step3Load.contextId === contextId &&
-    step3Load.jobId === wizardJob?.id && step3Load.artifactHash === wizardJob?.artifactHash
+  const currentStep3Load = step3Load?.contextId === contextId && step3Load.jobId === wizardJob?.id &&
+    step3Load.artifactHash === wizardJob?.artifactHash ? step3Load : undefined
+  const step3Ready = currentStep3Load?.status === 'ready'
+  const step3Loading = !step3Ready && currentStep3Load?.status !== 'failed'
   const skillDrivenDelivery = wizardJob?.proposal?.delivery_format === 1
   const configIssues = getConfigPublishIssues(configDrafts, wizardJob?.port ?? opcConfig.defaultPort, skillDrivenDelivery)
   const hasConfigIssues = configIssues.size > 0
@@ -2052,13 +2054,21 @@ export function AppsPanel({
                 </div>
               </div>
 
-              {!step3Ready && (step3Load?.status === 'failed' && step3Load.contextId === contextId &&
-                  step3Load.jobId === wizardJob.id && step3Load.artifactHash === wizardJob.artifactHash ? (
+              {currentStep3Load?.status === 'failed' && (
                 <div className="oa-alert oa-alert-danger" role="alert">
-                  <div>{step3Load.error}</div>
+                  <div>{currentStep3Load.error}</div>
                   <button type="button" className="oa-btn oa-btn-sm" onClick={() => void syncStep3Drafts(wizardJob)}>重新加载</button>
                 </div>
-              ) : <p className="oa-hint" role="status">正在加载本次交付的配置、Dockerfile 和挂载信息…</p>)}
+              )}
+              {step3Loading && (
+                <div className="oa-form-card oa-deploy-loading" role="status">
+                  <div className="oa-deploy-loading-icon" aria-hidden="true">
+                    <AppIcon name="refresh" size={22} className="oa-spin" />
+                  </div>
+                  <strong>正在加载部署核对内容</strong>
+                  <span className="oa-hint">正在读取运行配置、Dockerfile 和挂载信息。</span>
+                </div>
+              )}
 
               {step3Ready && (deliveryFiles.length > 0 || sourceChanges.length > 0) && (
                 <details className="oa-subcard oa-cfg-ref-details">
@@ -2399,7 +2409,7 @@ export function AppsPanel({
                 disabled={wizardBusy || !step3Ready || hasConfigIssues || hasMissingStorage}
                 onClick={() => void handlePublishApp()}
               >
-                {wizardBusy ? '正在提交发布…' : '确认配置并发布上线'}
+                {wizardBusy ? '正在提交发布…' : step3Loading ? '正在加载部署内容…' : '确认配置并发布上线'}
               </button>
             </>
           )}

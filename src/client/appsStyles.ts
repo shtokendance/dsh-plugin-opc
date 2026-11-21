@@ -478,6 +478,26 @@ export const appsCss = `
   max-width: none;
   margin: 0;
 }
+.oa-deploy-loading {
+  align-items: center;
+  justify-content: center;
+  min-height: 148px;
+  gap: 8px;
+  text-align: center;
+}
+.oa-deploy-loading-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  color: var(--oa-accent);
+  background: var(--oa-accent-soft);
+}
+@media (prefers-reduced-motion: reduce) {
+  .oa-deploy-loading .oa-spin { animation: none; }
+}
 .oa-source-label { margin: 0; font-size: 13px; font-weight: 600; }
 .oa-source-label > span { color: var(--oa-danger); }
 .oa-source-icon {

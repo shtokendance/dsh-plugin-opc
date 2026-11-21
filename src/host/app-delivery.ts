@@ -1212,7 +1212,74 @@ export class AppDelivery {
     } }, scope.signal)
   }
 
-  async submit(job: DeliveryJob, root: string, proposal: AppDocument, signal: AbortSignal, options?: { dockerfileOnly: boolean }) {
+  private async validateProposedResources(job: DeliveryJob, contract: AppDocument, expected: string, existingMounts: AppDocument[], signal: AbortSignal) {
+    const bindings: AppDocument[] = (contract.configs ?? []).filter((config: AppDocument) => config.resource_id)
+    const previous = new Map(existingMounts.map(mount => [mount.container_path, mount]))
+    const mounts: AppDocument[] = contract.storage_mounts ?? []
+    const conflicts = mounts.filter(mount => {
+      const old = previous.get(mount.container_path)
+      return old && mount.resource_id && mount.resource_id !== old.resource_id
+    })
+    if (conflicts.length) {
+      throw new Error(`以下目录已有线上挂载，请沿用其资源：${conflicts.map(mount => mount.container_path).join('、')}。`)
+    }
+    const newMounts = mounts.filter(mount => !previous.has(mount.container_path))
+    if (!bindings.length && !newMounts.length) return
+
+    const { resources = [] }: { resources?: AppDocument[] } = await this.platform('/resources', expected, {
+      query: { slug: job.slug }, signal,
+    })
+    if (!Array.isArray(resources)) throw new Error('Platform 未返回有效的资源目录，请重新读取 resources。')
+    const byId = new Map(resources.map(resource => [resource.id, resource]))
+    const errors: string[] = []
+    const readable: AppDocument[] = []
+    for (const row of bindings) {
+      const resource = byId.get(row.resource_id)
+      if (!resource || !resource.env_keys?.includes(row.resource_key)) {
+        errors.push(`配置 ${row.key} 的绑定 ${row.resource_id} / ${row.resource_key} 不在当前资源目录中。请用 resources 返回的 id 和 env_keys。`)
+      } else if (resource.type !== 'minio-app-storage') {
+        readable.push(row)
+      }
+    }
+    for (const mount of newMounts) {
+      const resource = byId.get(mount.resource_id)
+      if (!resource || !['local-directory', 'docker-volume', 'aliyun-oss-volume'].includes(resource.type)) {
+        errors.push(`新增挂载 ${mount.container_path} 需要在 storage_mounts.resource_id 填写已核对的卷资源。请用 resources 查看可用卷并优先核对兼容的默认卷。`)
+      } else if (mount.kind === 'sqlite' && resource.type === 'aliyun-oss-volume') {
+        errors.push(`SQLite 挂载 ${mount.container_path} 需要使用本地磁盘卷。`)
+      }
+    }
+    if (errors.length) throw new Error(errors.join('\n'))
+    const values = await this.resolveResourceValues(job.slug, readable, expected, signal)
+    const missing = readable.filter(row => typeof values[row.key] !== 'string' || !values[row.key])
+    if (missing.length) {
+      throw new Error(`平台资源未提供配置值：${missing.map(row => row.key).join('、')}。请核对 config_values，再提交可用绑定或说明实际阻塞。`)
+    }
+  }
+
+  private keepUnchangedResourceDraft(job: DeliveryJob, contract: AppDocument) {
+    const draft = job.configDraft
+    if (!draft) return
+    const previous = job.proposal?.contract
+    const resource = (row?: AppDocument) => row?.resource_id ? [row.resource_id, row.resource_key || row.key].join('/') : undefined
+    const previousConfigs = new Map<string, AppDocument>((previous?.configs ?? []).map((row: AppDocument) => [row.key, row]))
+    const nextConfigs = new Map<string, AppDocument>((contract.configs ?? []).map((row: AppDocument) => [row.key, row]))
+    draft.rows = draft.rows.filter(row => {
+      const chosen = resource(nextConfigs.get(row.key))
+      return !chosen || chosen === resource(previousConfigs.get(row.key)) || chosen === resource(row)
+    })
+    const previousMounts = new Map<string, string>((previous?.storage_mounts ?? []).map((mount: AppDocument) => [mount.container_path, mount.resource_id]))
+    for (const mount of (contract.storage_mounts ?? []) as AppDocument[]) {
+      if (draft.storageBindings && mount.resource_id && mount.resource_id !== previousMounts.get(mount.container_path)) {
+        delete draft.storageBindings[mount.container_path]
+      }
+    }
+  }
+
+  async submit(job: DeliveryJob, root: string, proposal: AppDocument, signal: AbortSignal, options?: {
+    dockerfileOnly: boolean
+    resourceReview?: { contextId: string; existingMounts: AppDocument[] }
+  }) {
     if (proposal.contract?.slug !== job.slug || proposal.contract?.base_url !== job.url) throw new Error('应用标识或地址与导入时不一致')
     if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
     if (!Array.isArray(proposal.unresolved) || (proposal.contract.unresolved !== undefined && !Array.isArray(proposal.contract.unresolved))) {
@@ -1267,11 +1334,17 @@ export class AppDelivery {
       if (preparedRevision) await rm(join(root, preparedRevision), { recursive: true, force: true }).catch(() => {})
       throw error
     })
+    const accepted = validated?.proposal ?? proposal
+    if (options?.resourceReview && !allowUnresolved) {
+      const { contextId, existingMounts } = options.resourceReview
+      await this.validateProposedResources(job, accepted.contract, contextId, existingMounts, signal)
+    }
     if (preparedRevision) {
       this.preparedProposals.set(job.id, { revision: preparedRevision, proposalHash: fingerprint(validated.proposal), result: validated })
     }
     signal.throwIfAborted(); if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-    job.proposal = validated?.proposal ?? proposal
+    if (options?.resourceReview && !allowUnresolved) this.keepUnchangedResourceDraft(job, accepted.contract)
+    job.proposal = accepted
     const validatedPort = job.proposal?.contract?.runtime?.port
     if (job.portAuto && Number.isInteger(validatedPort) && validatedPort >= 1 && validatedPort <= 65535) {
       job.port = validatedPort
@@ -1368,7 +1441,11 @@ export class AppDelivery {
         job.upgrade = true
         if (!job.configDraft && job.requestId) {
           const priorPublished = await this.credentials.read(`publish-config-${job.requestId}`)
-          const rows: AppDocument[] = priorPublished.rows ? JSON.parse(priorPublished.rows) : []
+          const declaredResources = new Set<string>(job.proposal?.delivery_format === 1
+            ? (job.proposal.contract?.configs ?? []).filter((config: AppDocument) => config.resource_id).map((config: AppDocument) => config.key)
+            : [])
+          const previousRows: AppDocument[] = priorPublished.rows ? JSON.parse(priorPublished.rows) : []
+          const rows = previousRows.filter(row => !declaredResources.has(row.key))
           if (rows.length > 0) {
             await this.credentials.write(`draft-${job.id}`, Object.fromEntries(rows.map(row => [row.key, row.value ?? ''])))
             job.configDraft = {
@@ -1654,7 +1731,9 @@ export class AppDelivery {
         }
         const plan = await readFile(join(folder, 'delivery.json'))
         if (hash(plan) !== job.hashes?.['delivery.json']) throw new Error('交付清单摘要不一致，拒绝发布')
-        form.append('delivery_plan', plan.toString('utf8'))
+        // A Blob preserves LF bytes. An empty filename keeps this part readable
+        // as a form field by Platform, which checks the archived byte digest.
+        form.append('delivery_plan', new Blob([new Uint8Array(plan)], { type: 'application/json' }), '')
         form.append('delivery_revision', job.archivedRevision)
         if (migrationApproved) form.append('migration_approved', 'true')
       }
@@ -1690,7 +1769,9 @@ export class AppDelivery {
       } catch (error) {
         if (error instanceof AppRequestError && [400, 401, 403, 404, 409, 413, 422].includes(error.status)) {
           job.status = 'ready'
-          job.error = error.message
+          job.error = error.status === 409 && error.message === 'deployment artifacts do not match the archived delivery revision'
+            ? '发布制品与平台归档不一致。请返回核对方案重新生成交付包，再确认发布。'
+            : error.message
         } else {
           let reconciled = false
           try {
