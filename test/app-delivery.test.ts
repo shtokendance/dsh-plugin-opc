@@ -1944,6 +1944,13 @@ test('skill delivery bundles authored files, explicit mounts and the submitted s
     assert.deepEqual(saved.contract.storage_mounts, [])
     assert.equal(saved.files.find((entry: AppDocument) => entry.path === 'db/init.sql').sha256,
       createHash('sha256').update(sql).digest('hex'))
+    const archive = join(jobRoot, 'r1', 'bundle', 'app.tar')
+    const { stdout } = await promisify(execFile)('python3', ['-c',
+      'import json, sys, tarfile\nwith tarfile.open(sys.argv[1]) as archive:\n    print(json.dumps([entry.mtime for entry in archive]))', archive])
+    const timestamps = JSON.parse(stdout) as number[]
+    assert.ok(timestamps.length > 0 && timestamps.every(time => time > 0))
+    await worker({ action: 'bundle', root: jobRoot, revision: 'r2', proposal: plan, dockerfile_only: true })
+    assert.deepEqual(await readFile(archive), await readFile(join(jobRoot, 'r2', 'bundle', 'app.tar')))
     await assert.rejects(readFile(join(source, 'db', 'init.sql')), { code: 'ENOENT' })
   } finally {
     await rm(root, { recursive: true, force: true })
