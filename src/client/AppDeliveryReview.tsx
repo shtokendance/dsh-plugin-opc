@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { AppDeliveryJob, OpcApi } from './api.ts'
+import { AppDiscoveryReport } from './AppDiscoveryReport.tsx'
 import { AppIcon, type AppIconName } from './AppIcon.tsx'
 
 type DimensionMeta = {
@@ -298,7 +299,7 @@ export function AppDeliveryReview({
   }
 
   const checkingProposal = job?.status === 'review' && !!plan && !questions.length && !activeError && !running
-  const discovery = (plan?.discovery_report as any) || job?.discoveryReport
+  const hasReport = Boolean(plan?.discovery_report || job?.discoveryReport || plan?.four_step_report || plan?.contract?.apis?.length || plan?.contract?.pages?.length)
   const transformation = (plan?.transformation_report as any) || job?.transformationReport
   const revNum = job?.revision_count ?? job?.revisionCount ?? 1
 
@@ -354,12 +355,20 @@ export function AppDeliveryReview({
 
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const eventsScrollRef = useRef<HTMLDivElement>(null)
+  const reportRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const el = chatScrollRef.current
-    if (!el) return
+    if (!el || (ready && hasReport)) return
     el.scrollTop = el.scrollHeight
-  }, [events.length, summaries.length, running])
+  }, [events.length, summaries.length, running, ready, hasReport])
+
+  useEffect(() => {
+    const stream = chatScrollRef.current
+    const report = reportRef.current
+    if (!ready || !stream || !report) return
+    stream.scrollTop += report.getBoundingClientRect().top - stream.getBoundingClientRect().top - 16
+  }, [jobId, ready, hasReport])
 
   useEffect(() => {
     const el = eventsScrollRef.current
@@ -435,192 +444,10 @@ export function AppDeliveryReview({
           </article>
         )}
 
-        {(discovery || (plan && (plan.four_step_report || plan.contract?.apis?.length || plan.contract?.pages?.length))) && (
-          <section className="oa-bubble" aria-label="第一步：AI 深度分析结果">
-            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingBottom: 8, borderBottom: '1px solid var(--oa-line)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="oa-pill oa-pill-accent">
-                  <AppIcon name="sparkle" size={12} />
-                  第一步 · 应用深度分析报告
-                </span>
-                <span style={{ fontWeight: 600 }}>{job?.name || job?.slug} 全景摸底结果</span>
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <span className="oa-pill oa-mono">页面 {discovery?.pages_overview?.total ?? plan?.contract?.pages?.length ?? 0} 个</span>
-                <span className="oa-pill oa-mono">接口 {discovery?.apis_overview?.total ?? plan?.contract?.apis?.length ?? 0} 个</span>
-              </div>
-            </div>
-
-            <div className="oa-grid-2">
-              <div className="oa-subcard">
-                <div className="oa-subcard-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="oa-pill oa-pill-accent"><AppIcon name="sparkle" size={11} /> 应用定位</span>
-                    <strong style={{ fontSize: 12 }}>业务用途与定位</strong>
-                  </div>
-                </div>
-                <div className="oa-hint" style={{ color: 'var(--oa-ink)' }}>
-                  {discovery?.project_purpose || plan?.summary || '已完成应用源码结构与核心业务分析'}
-                </div>
-              </div>
-
-              <div className="oa-subcard">
-                <div className="oa-subcard-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="oa-pill oa-pill-teal"><AppIcon name="code" size={11} /> 运行环境</span>
-                    <strong style={{ fontSize: 12 }}>开发语言与技术栈</strong>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div>
-                    <span className="oa-hint">运行时：</span>
-                    <code className="oa-code">
-                      {discovery?.tech_stack?.language || plan?.contract?.runtime?.language || '自动识别'}{' '}
-                      {discovery?.tech_stack?.runtime_version || plan?.contract?.runtime?.version || ''}
-                    </code>{' '}
-                    <span className="oa-hint">(容器端口 {discovery?.tech_stack?.container_port || job?.port || 8080})</span>
-                  </div>
-                  {!!discovery?.tech_stack?.frameworks?.length && (
-                    <div>
-                      <span className="oa-hint">核心框架：</span>
-                      <span>{discovery.tech_stack.frameworks.join(' + ')}</span>
-                    </div>
-                  )}
-                  {!!discovery?.tech_stack?.syntax_requirements?.length && (
-                    <div style={{ color: 'var(--oa-warn)' }}>
-                      <span style={{ fontWeight: 600 }}>版本特性要求：</span>
-                      {discovery.tech_stack.syntax_requirements.join('、')}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="oa-subcard">
-                <div className="oa-subcard-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="oa-pill oa-pill-warn"><AppIcon name="table" size={11} /> 页面视图</span>
-                    <strong style={{ fontSize: 12 }}>业务视图（共 {discovery?.pages_overview?.total ?? plan?.contract?.pages?.length ?? 0} 个）</strong>
-                  </div>
-                </div>
-                {(discovery?.pages_overview?.items || plan?.contract?.pages || []).length > 0 ? (
-                  <div className="oa-scroll-list">
-                    {(discovery?.pages_overview?.items || plan?.contract?.pages || []).map((pg: any, idx: number) => (
-                      <div key={`${pg.path}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5 }}>
-                        <code className="oa-code">{pg.path}</code>
-                        <span className="oa-hint" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pg.purpose}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="oa-hint">纯后端 API 服务（无独立前端页面）</div>
-                )}
-              </div>
-
-              <div className="oa-subcard">
-                <div className="oa-subcard-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="oa-pill oa-pill-accent"><AppIcon name="plug" size={11} /> 后端接口</span>
-                    <strong style={{ fontSize: 12 }}>API 接口全景（共 {discovery?.apis_overview?.total ?? plan?.contract?.apis?.length ?? 0} 个）</strong>
-                  </div>
-                  {discovery?.apis_overview && (
-                    <span className="oa-hint oa-mono">
-                      只读 {discovery.apis_overview.read_count ?? 0} · 写 {discovery.apis_overview.write_count ?? 0}
-                    </span>
-                  )}
-                </div>
-                {discovery?.apis_overview?.modules && Object.keys(discovery.apis_overview.modules).length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                    {Object.entries(discovery.apis_overview.modules).map(([mod, cnt]) => (
-                      <code key={mod} className="oa-code">{mod}: {String(cnt)}</code>
-                    ))}
-                  </div>
-                )}
-                {(discovery?.apis_overview?.items || plan?.contract?.apis || []).length > 0 && (
-                  <details style={{ fontSize: 11.5 }}>
-                    <summary style={{ cursor: 'pointer', color: 'var(--oa-accent)', fontWeight: 500 }}>
-                      展开查看全部 {(discovery?.apis_overview?.items || plan?.contract?.apis || []).length} 个接口清单
-                    </summary>
-                    <div className="oa-scroll-list" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--oa-line)' }}>
-                      {(discovery?.apis_overview?.items || plan?.contract?.apis || []).map((apiItem: any, idx: number) => (
-                        <div key={`${apiItem.id}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <code className="oa-code">{apiItem.method || 'GET'}</code>
-                          <code className="oa-mono" style={{ fontSize: 11 }}>{apiItem.path}</code>
-                          <span className="oa-hint" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            · {apiItem.purpose}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
-              </div>
-
-              <div className="oa-subcard">
-                <div className="oa-subcard-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="oa-pill"><AppIcon name="archive" size={11} /> 数据存储</span>
-                    <strong style={{ fontSize: 12 }}>数据存储与持久化</strong>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 5 }}>
-                  <div>
-                    <span className="oa-hint">存储类型：</span>
-                    <code className="oa-code">{discovery?.storage_and_database?.storage_type || '本地/内置存储'}</code>
-                  </div>
-                  {discovery?.storage_and_database?.sqlite_databases?.map((db: any) => (
-                    <div key={db.path} style={{ background: 'var(--oa-paper)', borderRadius: 8, padding: 8, border: '1px solid var(--oa-line)', fontSize: 11 }}>
-                      <div className="oa-mono">{db.path} ({db.size_mb} MB · {db.table_count} 张表 · {db.total_rows} 条记录)</div>
-                    </div>
-                  ))}
-                  {!!(discovery?.storage_and_database?.storage_mounts || plan?.contract?.storage_mounts)?.length && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                      {(discovery?.storage_and_database?.storage_mounts || plan?.contract?.storage_mounts || []).map((m: any) => (
-                        <code key={m.container_path} className="oa-code" style={{ background: 'var(--oa-accent-soft)', borderColor: 'var(--oa-accent-line)' }}>
-                          📁 {m.container_path} → {m.volume_name || m.name}
-                        </code>
-                      ))}
-                    </div>
-                  )}
-                  {discovery?.storage_and_database?.storage_migration_plan && (
-                    <div className="oa-hint">{discovery.storage_and_database.storage_migration_plan}</div>
-                  )}
-                </div>
-              </div>
-
-              <div className="oa-subcard">
-                <div className="oa-subcard-head">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="oa-pill oa-pill-ok"><AppIcon name="shield" size={11} /> 登录鉴权</span>
-                    <strong style={{ fontSize: 12 }}>权限与安全策略</strong>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 5 }}>
-                  <div>
-                    <span className="oa-hint">页面/接口鉴权：</span>
-                    <span>
-                      {discovery?.auth_and_credentials?.page_auth || '待分析页面认证'} ·{' '}
-                      {discovery?.auth_and_credentials?.api_auth || '待分析接口认证'}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="oa-hint">Dockerfile 策略：</span>
-                    <span>{discovery?.foundation_and_container?.dockerfile_action || '自动生成标准容器构建配置'}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {!!discovery?.planned_adaptations?.length && (
-              <div style={{ background: 'var(--oa-paper)', borderRadius: 10, padding: 10, border: '1px solid var(--oa-line)', fontSize: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>第二步拟执行的改造项：</div>
-                <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--oa-muted)' }}>
-                  {discovery.planned_adaptations.map((act: string, idx: number) => (
-                    <li key={idx}>{act}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </section>
+        {job && hasReport && (
+          <div ref={reportRef}>
+            <AppDiscoveryReport key={job.id} job={job} />
+          </div>
         )}
 
         {(running || !!events.length) && (

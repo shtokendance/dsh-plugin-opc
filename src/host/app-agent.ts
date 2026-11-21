@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
 import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, worker } from './app-delivery.ts'
@@ -440,6 +441,11 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     try {
       abort.throwIfAborted()
       setDeadline(ANALYSIS_TIMEOUT_MS)
+      const session = analysis.agent.session
+      const titles = ctx.get('sessionTitle')
+      if (titles && titles.get(session)?.source.kind !== 'user') {
+        titles.rename(session, `部署${job.name}`)
+      }
       const previous = (job.published || job.upgrade)
         ? await delivery.platform('/' + job.slug, appCtxId).catch(() => undefined)
         : undefined
