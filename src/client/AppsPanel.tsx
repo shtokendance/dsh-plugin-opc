@@ -225,11 +225,11 @@ function isVerificationPending(job: AppDeliveryJob) {
     (job.status === 'failed' && job.failureStage === 'verification')
 }
 
-function showTaskBanner(job: AppDeliveryJob, apps: DeployedApp[], loading: boolean) {
+function showTaskBanner(job: AppDeliveryJob, apps: DeployedApp[] | undefined) {
   if (!isResumableJob(job)) return false
   if (!job.published || !isVerificationPending(job)) return true
   // A previous version running must not hide an unfinished upgrade.
-  return !loading && !apps.some(app => app.status === 'running' && app.slug === job.slug &&
+  return apps !== undefined && !apps.some(app => app.status === 'running' && app.slug === job.slug &&
     job.version != null && app.current_version === job.version)
 }
 
@@ -380,8 +380,11 @@ export function AppsPanel({
   const beginAnalysisNavigation = () =>
     prepareAnalysisNavigation?.(sessionId, contextId, () => analysisViewActive.current)
   const [loadingList, setLoadingList] = useState(true)
-  const [apps, setApps] = useState<DeployedApp[]>([])
-  const [jobs, setJobs] = useState<AppDeliveryJob[]>([])
+  const [{ apps, jobs, loaded: appDirectoryLoaded }, setAppDirectory] = useState({
+    apps: [] as DeployedApp[],
+    jobs: [] as AppDeliveryJob[],
+    loaded: false,
+  })
   const [resources, setResources] = useState<ResourceSummary[]>([])
   const [opcConfig, setOpcConfig] = useState<OpcRuntimeConfig>(DEFAULT_OPC_CONFIG)
   const [modelGroups, setModelGroups] = useState<AppModelGroup[]>([])
@@ -510,8 +513,11 @@ export function AppsPanel({
         const cfg = parseJson<Partial<OpcRuntimeConfig>>(configRaw, {})
         const models = parseJson<AppModelGroup[]>(modelsRaw, [])
 
-        setApps(Array.isArray(catalogData.apps) ? catalogData.apps : [])
-        setJobs(Array.isArray(jobList) ? jobList : [])
+        setAppDirectory({
+          apps: Array.isArray(catalogData.apps) ? catalogData.apps : [],
+          jobs: Array.isArray(jobList) ? jobList : [],
+          loaded: true,
+        })
         setResources(Array.isArray(resData.resources) ? resData.resources : [])
         setOpcConfig({
           appDomainRoot: cfg.appDomainRoot || DEFAULT_OPC_CONFIG.appDomainRoot,
@@ -1368,12 +1374,12 @@ export function AppsPanel({
     : jobs.find(job => job.id === linkedJob.id) ?? linkedJob)
 
   const resumableJob = useMemo(() => {
-    const candidate = jobs.find(job => showTaskBanner(job, apps, loadingList))
+    const candidate = jobs.find(job => showTaskBanner(job, apps))
     if (!candidate) return null
     const token = `${candidate.id}:${candidate.status}`
     if (dismissedDraftToken === token) return null
     return candidate
-  }, [apps, dismissedDraftToken, jobs, loadingList])
+  }, [apps, dismissedDraftToken, jobs])
 
   const dismissDraftBanner = (job: AppDeliveryJob) => {
     const token = `${job.id}:${job.status}`
@@ -1431,7 +1437,7 @@ export function AppsPanel({
         </div>
       )}
 
-      {linkedListJob && showTaskBanner(linkedListJob, apps, loadingList) && (
+      {linkedListJob && showTaskBanner(linkedListJob, appDirectoryLoaded ? apps : undefined) && (
         <div className="oa-draft-banner">
           <div><strong>{linkedListJob.name}</strong></div>
           <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void openLinkedJob(linkedListJob)}>
