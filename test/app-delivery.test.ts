@@ -32,6 +32,32 @@ test('host rejects changes to the confirmed container port', async () => {
     status: 'analyzing', events: [] }, tmpdir(), proposal(url), new AbortController().signal), /容器端口/)
 })
 
+test('runtime assessment waits for an AI-selected HTTP status on the application address', async () => {
+  const delivery = new AppDelivery({} as OpcCore, tmpdir(), { async read() { return {} }, async write() {} })
+  delivery.platform = async () => ({ status: 'runtime_ready', version: 1 })
+  const visited: string[] = []
+  const server = createServer((req, res) => {
+    visited.push(req.url!)
+    res.statusCode = visited.length === 1 ? 503 : 302
+    if (res.statusCode === 302) res.setHeader('Location', '/login')
+    res.end()
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    const job = { id: 'assessment', name: 'App', slug: 'test-app', url: `http://127.0.0.1:${address.port}`,
+      session: '', status: 'verifying' as const, events: [] }
+    const result = await delivery.observeDeployment(job, tmpdir(), { kind: 'http', path: '/app', expected_statuses: [302], within_seconds: 3 }, '', new AbortController().signal)
+    assert.equal(result.status, 302)
+    assert.equal(result.redirect_path, '/login')
+    assert.deepEqual(visited, ['/app', '/app'])
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
 test('analysis replies preserve the bound task and only a complete proposal is bundled automatically', async () => {
   const home = await mkdtemp(join(tmpdir(), 'opc-app-chat-'))
   const contexts = new ContextStore()
@@ -1520,7 +1546,7 @@ exec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})
   }
 })
 
-test('attachAppAgent creates fresh live session instead of resuming disposed session and auth errors pinpoint target and unresolved question', async () => {
+test('attachAppAgent retains the live session when continuing preparation and exposes the new skill contract', async () => {
   const workDir = await mkdtemp(join(tmpdir(), 'opc-agent-auth-'))
   try {
     // 1. Python auth validation diagnostics and trimmed auth_blockers match
@@ -1549,7 +1575,7 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
     assert.match(parsed.missing_blocker, /unresolved 条目「是否启用 REIMBURSE_ADMIN_TOKEN 应急令牌？」/)
     assert.match(parsed.unmatched_root_api, /apis 项，需匹配 target='api'.*target='api' 且 path='\/'/)
 
-    // 2. attachAppAgent never calls agents.resume on a disposed sessionId and injects pending questions on waitingForReply
+    // An older job has session history but no session id to reattach.
     const contexts = new ContextStore()
     contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
     const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
@@ -1624,13 +1650,51 @@ test('attachAppAgent creates fresh live session instead of resuming disposed ses
       '## 2. 做部署所需的改造',
       '## 3. 生成技能并提交',
     ])
-    assert.match(deliveryInstructions, /运维.*迁移/)
+    assert.match(deliveryInstructions, /storage_mounts/)
+    assert.match(deliveryInstructions, /credential_sources/)
     assert.doesNotMatch(deliveryInstructions, /python3 scripts\/delivery\.py smoke/)
-    assert.deepEqual(deliveryContext?.available_resource_metadata, [{
-      id: 'redis-main', name: '平台 Redis', type: 'redis', is_default: true, env_keys: ['REDIS_URL'],
-    }])
+    assert.equal(deliveryContext?.available_resource_metadata, undefined)
+    fakeJob.analysisSessionId = createdSessions[0]
+    fakeJob.status = 'analyzing'
+    await assert.rejects(delivery.analyze!(fakeJob, workDir, '', new AbortController().signal, async id => {
+      assert.equal(id, createdSessions[0])
+    }), /尚未提交/)
+    assert.equal(createdSessions.length, 1)
+    assert.equal(resumeCalled, false)
   } finally {
     await rm(workDir, { recursive: true, force: true })
+  }
+})
+
+test('skill delivery bundles authored files, explicit mounts and the submitted skill without legacy enrichment', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'opc-skill-delivery-'))
+  try {
+    const source = join(root, 'app')
+    const jobRoot = join(root, 'job')
+    const url = 'http://test-app.apps.opc.test'
+    await mkdir(source, { recursive: true })
+    await writeFile(join(source, 'main.py'), 'def lookup():\n    return {"ok": True}\n')
+    await worker({ action: 'prepare', root: jobRoot, source, slug: 'test-app', url })
+    const markdown = '---\nname: app-test-app\ndescription: 读取测试记录\n---\n\n使用 lookup 查询测试记录。\n'
+    const sql = 'CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY);\n'
+    const previous = proposal(url)
+    const contract = { ...previous.contract, storage_mounts: [],
+      build_context: [...previous.contract.build_context, 'db/init.sql'] }
+    const plan = { ...previous, delivery_format: 1, skill_markdown: markdown, contract,
+      changes: [...previous.changes, { path: 'db/init.sql', reason: '初始化表结构', content: sql }] }
+    const result = await worker({ action: 'bundle', root: jobRoot, revision: 'r1', proposal: plan, dockerfile_only: true })
+    assert.equal(result.skill_markdown, markdown)
+    assert.deepEqual(result.proposal.contract.storage_mounts, [])
+    assert.deepEqual(result.proposal.contract.apis.map((api: AppDocument) => api.id), ['lookup'])
+    const saved = JSON.parse(await readFile(join(jobRoot, 'r1', 'bundle', 'delivery.json'), 'utf8'))
+    assert.equal(saved.format, 1)
+    assert.equal(saved.base_version, 0)
+    assert.deepEqual(saved.contract.storage_mounts, [])
+    assert.equal(saved.files.find((entry: AppDocument) => entry.path === 'db/init.sql').sha256,
+      createHash('sha256').update(sql).digest('hex'))
+    await assert.rejects(readFile(join(source, 'db', 'init.sql')), { code: 'ENOENT' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })
 

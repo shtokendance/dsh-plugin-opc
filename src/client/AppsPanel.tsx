@@ -243,6 +243,12 @@ function findAppJob(jobs: AppDeliveryJob[], app: Pick<DeployedApp, 'slug' | 'cur
 }
 
 function deploymentProgress(job: AppDeliveryJob) {
+  if (job.archivedRevision) {
+    if (job.status === 'verified') return { label: '部署成功', tone: 'ok' }
+    if (job.assessmentPending) return { label: 'AI 验收已暂停', tone: 'danger' }
+    if (job.status === 'failed') return { label: '部署失败', tone: 'danger' }
+    if (job.status === 'verifying') return { label: 'AI 正在验收', tone: 'warn' }
+  }
   if (job.status === 'verified' || job.status === 'verifying' || isVerificationPending(job)) {
     return { label: '部署成功', tone: 'ok' }
   }
@@ -439,9 +445,11 @@ export function AppsPanel({
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
+  const [jobResources, setJobResources] = useState<ResourceSummary[]>()
+  const deploymentResources = jobResources ?? resources
   const [storageBindings, setStorageBindings] = useState<Record<string, string>>({})
   const [existingStorage, setExistingStorage] = useState<AppStorageMountDetail[]>([])
-  const volumeResources = resources.filter(resource => resource.type === 'local-directory' || resource.type === 'aliyun-oss-volume')
+  const volumeResources = deploymentResources.filter(resource => resource.type === 'local-directory' || resource.type === 'aliyun-oss-volume')
   const volumeMounts = wizardJob?.proposal?.contract?.storage_mounts ?? []
   const volumeOptions = (mount: AppStorageMountDetail) =>
     volumeResources.filter(resource => mount.kind !== 'sqlite' || resource.type === 'local-directory')
@@ -449,7 +457,7 @@ export function AppsPanel({
     .filter(mount => !existingStorage.some(old => old.container_path === mount.container_path))
     .map(mount => {
       const options = volumeOptions(mount)
-      const selected = options.find(resource => resource.id === storageBindings[mount.container_path])
+      const selected = options.find(resource => resource.id === (storageBindings[mount.container_path] ?? mount.resource_id))
       return [mount.container_path, (selected ?? options.find(resource => resource.is_default) ?? options[0])?.id ?? '']
     }))
 
@@ -646,7 +654,15 @@ export function AppsPanel({
       ])
       const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw ?? 'null', null)
       const detail = parseJson<DeployedApp | null>(detailsRaw ?? 'null', null)
-      const { configs, originals } = mergeJobConfigs(job, draft, opcConfig.defaultPort)
+      const declarations = new Map(job.runtime_configs?.map(item => [item.key, item]))
+      const inherited = job.proposal?.delivery_format === 1
+        ? (detail?.app_config ?? []).filter(item => declarations.has(item.key) && !draft?.rows?.some(row => row.key === item.key))
+          .map(item => ({ key: item.key, value: declarations.get(item.key)?.secret ? '' : item.value,
+            has_value: item.has_value || Boolean(item.value), value_source: item.resource_id ? 'resource' : 'configured',
+            resource_id: item.resource_id, resource_key: item.resource_key }))
+        : []
+      const { configs, originals } = mergeJobConfigs(job, { ...draft, rows: [...inherited, ...(draft?.rows ?? [])] }, opcConfig.defaultPort)
+      setJobResources(draft?.resources)
       setSourceConfiguration(draft?.sourceConfiguration ?? null)
       setOriginalConfigs(originals)
       setConfigDrafts(configs)
@@ -1079,6 +1095,10 @@ export function AppsPanel({
       setWizardError('交付包尚未准备完成，请返回方案核对重新生成交付包')
       return
     }
+    const migration = wizardJob.proposal?.contract?.data_plan
+    const migrationApproved = migration?.strategy === 'postgres_copy' &&
+      window.confirm(`确认发布包含数据库迁移。正式复制期间会暂停旧实例写入。\n原库保留，目标库：${migration.target_resource_id ?? ''}\n\n${migration.summary}\n\n恢复方式：${migration.recovery}`)
+    if (migration?.strategy === 'postgres_copy' && !migrationApproved) return
 
     setWizardBusy(true)
     try {
@@ -1094,6 +1114,7 @@ export function AppsPanel({
           config: cleanConfigs,
           storageBindings: storageSelections,
           versionNote: versionNote.trim(),
+          migrationApproved,
         }),
         contextId,
       )
@@ -1108,6 +1129,7 @@ export function AppsPanel({
           config: cleanConfigs,
           storageBindings: storageSelections,
           versionNote: versionNote.trim(),
+          migrationApproved,
         }),
         contextId,
       )
@@ -1137,7 +1159,7 @@ export function AppsPanel({
       const feedback =
         wizardJob.error ||
         wizardJob.verification?.detail ||
-        '本次构建或验证未通过，请结合日志检查 Dockerfile、端口监听、健康检查与鉴权路径并修复'
+        '请根据本次失败阶段和日志定位根因，沿用已确认的部署方案。'
       if (api.appReopenReview) {
         await api.appReopenReview(wizardJob.id, contextId).catch(() => {})
       }
@@ -1159,6 +1181,21 @@ export function AppsPanel({
         })
     } catch (error) {
       setWizardError(readErrorMessage(error, '进入修复流程失败'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleContinueAssessment = async () => {
+    if (!wizardJob) return
+    const navigate = beginAnalysisNavigation()
+    setWizardBusy(true)
+    try {
+      const raw = await api.appVerify(wizardJob.id, contextId)
+      const updated = parseJson<AppDeliveryJob | null>(raw, null)
+      if (updated) { setWizardJob(updated); navigate?.(updated) }
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '无法继续 AI 验收'))
     } finally {
       setWizardBusy(false)
     }
@@ -2012,8 +2049,9 @@ export function AppsPanel({
                 <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="运行时环境变量配置">
                   <AppDeliveryConfig
                     configs={configDrafts}
+                    allowNew={wizardJob.proposal?.delivery_format !== 1}
                     originals={originalConfigs}
-                    resources={resources}
+                    resources={deploymentResources}
                     lockedPort={wizardJob.port ?? opcConfig.defaultPort}
                     onChange={handleStep3ConfigsChange}
                   />
@@ -2128,6 +2166,21 @@ export function AppsPanel({
 
               {configSubTab === 'artifacts' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {wizardJob.proposal?.contract?.data_plan && (() => {
+                    const plan = wizardJob.proposal.contract.data_plan
+                    return <section className="oa-subcard">
+                      <div className="oa-subcard-head">数据变更与恢复</div>
+                      <p style={{ whiteSpace: 'pre-wrap' }}>{plan.summary}</p>
+                      {plan.strategy === 'postgres_copy' && (
+                        <div className="oa-hint">
+                          原库 <code>{plan.source_resource_id}</code> · 演练库 <code>{plan.rehearsal_resource_id}</code> · 目标库 <code>{plan.target_resource_id}</code>
+                          <p>发布包含一次停写窗口。先在演练库验证，正式复制期间暂停旧实例写入。</p>
+                        </div>
+                      )}
+                      {plan.migration_files?.map(path => <div key={path}><code>{path}</code></div>)}
+                      <p style={{ whiteSpace: 'pre-wrap' }}>恢复方式　{plan.recovery}</p>
+                    </section>
+                  })()}
                   {(wizardJob.preparationChecks ?? []).length > 0 && (
                     <div className="oa-subcard">
                       <div className="oa-subcard-head">
@@ -2188,6 +2241,12 @@ export function AppsPanel({
                             <div className="oa-hint" style={{ marginTop: 3 }}>
                               {ch.reason}
                             </div>
+                            {ch.diff && (
+                              <details style={{ marginTop: 6 }}>
+                                <summary>查看文件差异</summary>
+                                <pre className="oa-mono" style={{ whiteSpace: 'pre-wrap', overflow: 'auto' }}>{ch.diff}</pre>
+                              </details>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -2227,6 +2286,12 @@ export function AppsPanel({
                     copied={copiedKey === 'wizard-logs'}
                   />
                 )}
+                {wizardJob.assessment && (
+                  <div className="oa-subcard" style={{ whiteSpace: 'pre-wrap' }}>
+                    <strong>AI 验收结论</strong>
+                    <p>{wizardJob.assessment.report}</p>
+                  </div>
+                )}
                 {failed && (
                   <>
                     <div className="oa-alert oa-alert-danger" role="alert">
@@ -2236,7 +2301,11 @@ export function AppsPanel({
                         : wizardJob.error || '平台未返回具体失败原因。'}</div>
                     </div>
                     <div>
-                      {blockedByPreviousBuild(wizardJob) ? (
+                      {wizardJob.assessmentPending ? (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleContinueAssessment()}>
+                          继续 AI 验收
+                        </button>
+                      ) : blockedByPreviousBuild(wizardJob) ? (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>
                           核对并重新部署
                         </button>
@@ -2815,6 +2884,17 @@ export function AppsPanel({
                             }
                           >
                             manifest.json
+                          </button>
+                        )}
+                        {ver.download_urls?.['delivery.json'] && (
+                          <button
+                            type="button"
+                            className="oa-btn oa-btn-xs"
+                            onClick={() =>
+                              void handleDownloadPlatformArtifact(detailApp.slug, { version: ver.version, artifact: 'delivery.json' }, `v${ver.version} delivery.json`)
+                            }
+                          >
+                            delivery.json
                           </button>
                         )}
                       </div>

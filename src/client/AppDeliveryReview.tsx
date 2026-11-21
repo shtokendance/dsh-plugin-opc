@@ -849,7 +849,7 @@ export function AppDeliveryReview({
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             <button
               type="button"
-              disabled={running || !plan}
+              disabled={running || (!plan && job?.status !== 'failed')}
               className="oa-btn oa-btn-sm"
               onClick={async () => {
                 if (!api.appHandoff) return
@@ -873,7 +873,7 @@ export function AppDeliveryReview({
               </button>
             )}
           </div>
-          {chatActive && job?.analysisSessionId !== sessionId && (
+          {job?.analysisSessionId && job.analysisSessionId !== sessionId && (
             <button type="button" className="oa-btn oa-btn-sm" onClick={() => job && beginAnalysisNavigation?.()?.(job)}>
               打开左侧分析会话
             </button>

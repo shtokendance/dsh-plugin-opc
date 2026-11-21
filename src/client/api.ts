@@ -20,6 +20,7 @@ export interface AppConfigItem {
   value_source?: string
   source_label?: string
   resource_id?: string
+  resource_key?: string
 }
 
 export interface ResourceSummary {
@@ -89,6 +90,7 @@ export interface AppVersionItem {
   skill_zip_size?: number
   dockerfile_key?: string
   manifest_key?: string
+  download_urls?: Record<string, string>
   status: string
   is_active: boolean
   deployed_by?: string
@@ -123,6 +125,9 @@ export interface DeployedApp {
 }
 
 export interface AppDeliveryJob {
+  archivedRevision?: string
+  assessmentPending?: boolean
+  assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
   id: string
   analysisSessionId?: string
   analysisChatActive?: boolean
@@ -166,6 +171,7 @@ export interface AppDeliveryJob {
   transformationReport?: NonNullable<AppDeliveryJob['proposal']>['transformation_report']
   verification?: { status: string; checks: { operation: string; status?: number; passed: boolean }[]; pages_verified: boolean; detail?: string; skill_enabled?: boolean }
   proposal?: {
+    delivery_format?: number
     summary: string
     issues?: { id?: string; evidence?: unknown; impact?: string; recommendation?: string; severity?: string; title?: string; detail?: string; resolution?: string }[]
     unresolved?: unknown[]
@@ -175,6 +181,15 @@ export interface AppDeliveryJob {
     transformation_report?: Record<string, any>
     four_step_report?: Record<string, any>
     contract?: {
+      data_plan?: {
+        strategy: 'initialize' | 'reuse' | 'postgres_copy'
+        summary: string
+        recovery: string
+        source_resource_id?: string
+        rehearsal_resource_id?: string
+        target_resource_id?: string
+        migration_files?: string[]
+      }
       description?: string
       runtime?: { language?: string; version?: string; port?: number }
       health?: { path?: string; status?: number; json_contains?: Record<string, unknown> }

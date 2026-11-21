@@ -1,9 +1,11 @@
-import type { AppConfigItem, AppDeliveryJob } from './api.ts'
+import type { AppConfigItem, AppDeliveryJob, ResourceSummary } from './api.ts'
 
 export interface ConfigDraftRow {
   key: string
   value?: string
   resource_id?: string
+  resource_key?: string
+  has_value?: boolean
   local_connection_confirmed?: boolean
   value_source?: string
   secret?: boolean
@@ -27,6 +29,7 @@ export interface ConfigDraftSnapshot {
   versionNote?: string
   storageBindings?: Record<string, string>
   sourceConfiguration?: SourceConfiguration
+  resources?: ResourceSummary[]
 }
 
 export const CONTAINER_DEFAULT_KEYS = new Set(['PORT', 'HOST', 'BIND_HOST', 'LISTEN_HOST', 'NODE_ENV'])
@@ -119,6 +122,9 @@ export function mergeJobConfigs(
       }
     }
 
+    if (c.resource_id) {
+      return { ...c, value: '', original_value: c.secret ? '' : (origVal ?? ''), app_default: appDefault, value_source: 'resource' }
+    }
     if (c.secret) {
       return {
         ...c,
@@ -186,11 +192,15 @@ export function mergeJobConfigs(
         ...item,
         value: '',
         resource_id: saved.resource_id,
+        resource_key: saved.resource_key,
         value_source: 'resource',
         local_connection_confirmed: saved.local_connection_confirmed === true,
       }
     }
 
+    if (saved.value_source === 'configured' && saved.has_value && !saved.value) {
+      return { ...item, value: '', resource_id: undefined, resource_key: undefined, has_value: true, value_source: 'configured' }
+    }
     if (saved.value_source === 'manual') {
       const nextVal = saved.value ?? ''
       return {
@@ -242,6 +252,7 @@ export function sanitizeConfigRowsForApi(
   key: string
   value: string
   resource_id?: string
+  resource_key?: string
   has_value?: boolean
   value_source?: string
   secret?: boolean
@@ -251,6 +262,7 @@ export function sanitizeConfigRowsForApi(
     key: string
     value: string
     resource_id?: string
+    resource_key?: string
     has_value?: boolean
     value_source?: string
     secret?: boolean
@@ -284,6 +296,7 @@ export function sanitizeConfigRowsForApi(
       key,
       value,
       resource_id: isPort ? undefined : c.resource_id || undefined,
+      ...(!isPort && c.resource_id && c.resource_key ? { resource_key: c.resource_key } : {}),
       has_value: !c.resource_id && !value && c.has_value === true && c.value_source !== 'manual' ? true : undefined,
       value_source: valueSource,
       ...(options?.forPublish || !c.secret ? {} : { secret: true }),
