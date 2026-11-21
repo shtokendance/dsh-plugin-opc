@@ -28,6 +28,8 @@ from .sqlite_snapshot import is_sqlite, snapshot_database, validate_sidecars, no
 VERSION = "0.2.9"
 OWNER = "opc-app-adapter"
 LABEL = "com.opc.app-adapter.run"
+# A stable nonzero timestamp lets build tools distinguish inputs from missing files.
+APP_TAR_MTIME = 946684800  # 2000-01-01 UTC
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SLUG = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 EXCLUDED = {".git", ".svn", ".hg", ".claude", "node_modules", ".venv", "venv", "__pycache__", ".idea", "__MACOSX", ".DS_Store"}
@@ -565,7 +567,7 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
             info = tar.gettarinfo(str(p), arcname=name)
             info.uid = info.gid = 0
             info.uname = info.gname = ""
-            info.mtime = 0
+            info.mtime = APP_TAR_MTIME
             info.pax_headers = {}
             info.mode = 0o755 if p.stat().st_mode & 0o111 else 0o644
             with p.open("rb") as fp:
@@ -574,6 +576,7 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
             data = b'{"schemaVersion":2,"dockerfilePath":"./Dockerfile"}\n'
             info = tarfile.TarInfo("captain-definition")
             info.size, info.mode = len(data), 0o644
+            info.mtime = APP_TAR_MTIME
             tar.addfile(info, io.BytesIO(data))
     manifest = {"slug": contract["slug"], "app_url": contract["base_url"], "container_port": contract["runtime"]["port"], "configs": [{"key": c["key"], "value": "" if c.get("secret") else c.get("default", ""), "required": bool(c.get("required")), "description": c.get("description", "")} for c in contract.get("configs", [])], "detected_resource_types": [r["type"] for r in contract.get("resources", [])], "storage_mounts": contract.get("storage_mounts", []), "apis": contract["apis"], "pages": contract.get("pages", []), "skill_version": VERSION, "verification_status": "not-verified"}
     if delivery_plan is not None and "effective_configs" in delivery_plan:
