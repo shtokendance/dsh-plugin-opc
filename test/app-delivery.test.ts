@@ -225,11 +225,12 @@ test('analysis replies preserve the bound task and only a complete proposal is b
   const allowReply = Promise.withResolvers<void>()
   const question = '保留现在使用的数据源吗？'
   let id: string | undefined
-  const waitFor = async (condition: (job: Record<string, any>) => boolean) => {
+  const waitFor = async (condition: (job: Record<string, any>) => boolean, options?: { requireIdle?: boolean }) => {
     const deadline = Date.now() + 5_000
     for (;;) {
       const job = await delivery.getJob(id!, expected)
-      if (condition(job) || job.status === 'failed') return job
+      const idle = !options?.requireIdle || !(delivery as any).busy?.has(id!)
+      if ((condition(job) && idle) || job.status === 'failed') return job
       if (Date.now() >= deadline) throw new Error(`未等到期望状态，当前状态 ${job.status}`)
       await new Promise(resolve => setTimeout(resolve, 20))
     }
@@ -270,7 +271,7 @@ test('analysis replies preserve the bound task and only a complete proposal is b
     assert.equal((await delivery.getJobByAnalysisSession(analysisSessionId, expected))?.id, created.id)
 
     allowReply.resolve()
-    const ready = await waitFor(job => job.status === 'ready' && !job.analysisChatActive)
+    const ready = await waitFor(job => job.status === 'ready' && !job.analysisChatActive, { requireIdle: true })
     assert.equal(ready.status, 'ready', ready.error)
     assert.equal(ready.analysisSessionId, analysisSessionId)
     assert.equal(ready.revisionCount, 2)
