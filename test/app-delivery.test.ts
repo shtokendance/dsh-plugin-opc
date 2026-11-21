@@ -497,7 +497,7 @@ test('real worker preserves source, rejects traversal and stale proposal, builds
     await delivery.startAnalysis(created.id, '', expected)
     for (let i = 0; i < 100; i++) {
       const state = (await delivery.list(expected))[0]
-      if (state.status !== 'analyzing') break
+      if (state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     const reviewed = (await delivery.list(expected))[0]
@@ -629,7 +629,7 @@ test('idempotent publish reconciliation, pure-page verification, reopenReview, u
     await delivery.startAnalysis(created.id, '', expected)
     for (let i = 0; i < 100; i++) {
       const state = (await delivery.list(expected))[0]
-      if (state.status !== 'analyzing') break
+      if (state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     const reviewed = (await delivery.list(expected))[0]
@@ -780,7 +780,7 @@ test('proposal evidence, staged files and rollback historical skill.zip sync', a
     const analysisDeadline = Date.now() + 8_000
     while (Date.now() < analysisDeadline) {
       const state = (await delivery.list(expected))[0]
-      if (state.status !== 'analyzing') break
+      if (state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     const reviewed = (await delivery.list(expected))[0]
@@ -930,7 +930,7 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     await delivery.startAnalysis(created.id, '', expected)
     for (let i = 0; i < 100; i++) {
       const state = (await delivery.list(expected))[0]
-      if (state.status !== 'analyzing') break
+      if (state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     const reviewed = (await delivery.list(expected))[0]
@@ -1018,7 +1018,7 @@ test('work-opc full parity: original secret preservation, loopback guard, uncond
     await delivery.startAnalysis(createdV2.id, '', expected)
     for (let i = 0; i < 100; i++) {
       const state = (await delivery.list(expected)).find((j: any) => j.id === createdV2.id)
-      if (state?.status !== 'analyzing') break
+      if (state && state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     const reviewedV2 = (await delivery.list(expected)).find((j: any) => j.id === createdV2.id)
@@ -1163,7 +1163,7 @@ test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha2
     await delivery.startAnalysis(created.id, '', expected, 'sess-1')
     for (let i = 0; i < 100; i++) {
       const state = await delivery.getJob(created.id, expected)
-      if (state.status !== 'analyzing') break
+      if (state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     const paused = await delivery.getJob(created.id, expected)
@@ -1196,7 +1196,7 @@ test('parity additions: opcConfig, checkSlug, getJob, skillPreview contract/sha2
     await delivery.startAnalysis(created.id, '', expected, 'sess-1', { mode: 'resume' })
     for (let i = 0; i < 100; i++) {
       const state = await delivery.getJob(created.id, expected)
-      if (state.status !== 'analyzing') break
+      if (state.status !== 'analyzing' && !state.analysisChatStarting && !state.analysisChatActive) break
       await new Promise(r => setTimeout(r, 20))
     }
     assert.equal(draftCountInAnalyze, 1, 'resume mode should preserve existing draft_files.json')
