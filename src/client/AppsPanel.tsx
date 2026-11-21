@@ -217,6 +217,7 @@ function isResumableJob(job: AppDeliveryJob): boolean {
     'awaiting_page_verification',
     'unknown',
     'failed',
+    'cancelled',
     'verification_failed',
   ].includes(job.status)
 }
@@ -427,6 +428,7 @@ export function AppsPanel({
   const [appDescription, setAppDescription] = useState('')
   const [zipFile, setZipFile] = useState<File | null>(null)
   const [sourcePath, setSourcePath] = useState('')
+  const [reuseSourceVersion, setReuseSourceVersion] = useState<number>()
   const [dragActive, setDragActive] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
@@ -446,6 +448,10 @@ export function AppsPanel({
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
+  const [step3Load, setStep3Load] = useState<{ jobId: string; artifactHash?: string; contextId: string; status: 'loading' | 'ready' | 'failed'; error?: string }>()
+  const step3Request = useRef(0)
+  const step3Ready = step3Load?.status === 'ready' && step3Load.contextId === contextId &&
+    step3Load.jobId === wizardJob?.id && step3Load.artifactHash === wizardJob?.artifactHash
   const skillDrivenDelivery = wizardJob?.proposal?.delivery_format === 1
   const configIssues = getConfigPublishIssues(configDrafts, wizardJob?.port ?? opcConfig.defaultPort, skillDrivenDelivery)
   const hasConfigIssues = configIssues.size > 0
@@ -453,10 +459,10 @@ export function AppsPanel({
   const deploymentResources = jobResources ?? resources
   const [storageBindings, setStorageBindings] = useState<Record<string, string>>({})
   const [existingStorage, setExistingStorage] = useState<AppStorageMountDetail[]>([])
-  const volumeResources = deploymentResources.filter(resource => resource.type === 'local-directory' || resource.type === 'aliyun-oss-volume')
+  const volumeResources = deploymentResources.filter(resource => ['local-directory', 'docker-volume', 'aliyun-oss-volume'].includes(resource.type))
   const volumeMounts = wizardJob?.proposal?.contract?.storage_mounts ?? []
   const volumeOptions = (mount: AppStorageMountDetail) =>
-    volumeResources.filter(resource => mount.kind !== 'sqlite' || resource.type === 'local-directory')
+    volumeResources.filter(resource => mount.kind !== 'sqlite' || resource.type !== 'aliyun-oss-volume')
   const storageSelections = Object.fromEntries(volumeMounts
     .filter(mount => !existingStorage.some(old => old.container_path === mount.container_path))
     .map(mount => {
@@ -629,29 +635,43 @@ export function AppsPanel({
 
   const syncStep3Drafts = useCallback(
     async (job: AppDeliveryJob) => {
-      const [draftRaw, detailsRaw] = await Promise.all([
-        api.appConfigDraft?.(job.id, contextId).catch(() => 'null'),
-        job.upgrade || job.published ? api.appDetails(job.slug, contextId).catch(() => 'null') : undefined,
-      ])
-      const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw ?? 'null', null)
-      const detail = parseJson<DeployedApp | null>(detailsRaw ?? 'null', null)
-      const declarations = new Map(job.runtime_configs?.map(item => [item.key, item]))
-      const plans = new Map(job.proposal?.contract?.configs?.map(item => [item.key, item.value_plan?.kind]))
-      const inherited = job.proposal?.delivery_format === 1
-        ? (detail?.app_config ?? []).filter(item => declarations.has(item.key) && (!plans.get(item.key) || plans.get(item.key) === 'inherit') && !draft?.rows?.some(row => row.key === item.key))
-          .map(item => ({ key: item.key, value: item.value, effective_value: item.effective_value,
-            has_value: item.has_value || Boolean(item.value), value_source: item.resource_id ? 'resource' : 'configured',
-            resource_id: item.resource_id, resource_key: item.resource_key }))
-        : []
-      const { configs, originals } = mergeJobConfigs(job, { ...draft, rows: [...inherited, ...(draft?.rows ?? [])] }, opcConfig.defaultPort)
-      setJobResources(draft?.resources)
-      setSourceConfiguration(draft?.sourceConfiguration ?? null)
-      setPreparedDockerfile({ jobId: job.id, artifactHash: job.artifactHash, content: draft?.dockerfile ?? '' })
-      setOriginalConfigs(originals)
-      setConfigDrafts(configs)
-      setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
-      setStorageBindings(draft?.storageBindings ?? {})
-      setExistingStorage(detail?.storage_mounts ?? [])
+      const request = ++step3Request.current
+      const target = { jobId: job.id, artifactHash: job.artifactHash, contextId }
+      setStep3Load({ ...target, status: 'loading' })
+      try {
+        const [draftRaw, detailsRaw] = await Promise.all([
+          api.appConfigDraft?.(job.id, contextId),
+          job.upgrade || job.published ? api.appDetails(job.slug, contextId) : undefined,
+        ])
+        if (request !== step3Request.current) return
+        const draft = draftRaw === undefined ? null : JSON.parse(draftRaw) as ConfigDraftSnapshot | null
+        if (api.appConfigDraft && (!draft || draft.artifactHash && draft.artifactHash !== job.artifactHash)) {
+          throw new Error('交付包已变化，请返回核对方案后重试。')
+        }
+        if (job.proposal?.delivery_format === 1 && !draft) throw new Error('当前插件无法读取本次交付数据。')
+        const detail = detailsRaw === undefined ? null : JSON.parse(detailsRaw) as DeployedApp | null
+        if ((job.upgrade || job.published) && !detail) throw new Error('无法读取当前生效版本的配置和挂载。')
+        const declarations = new Map(job.runtime_configs?.map(item => [item.key, item]))
+        const plans = new Map(job.proposal?.contract?.configs?.map(item => [item.key, item.value_plan?.kind]))
+        const inherited = job.proposal?.delivery_format === 1
+          ? (detail?.app_config ?? []).filter(item => declarations.has(item.key) && (!plans.get(item.key) || plans.get(item.key) === 'inherit') && !draft?.rows?.some(row => row.key === item.key))
+            .map(item => ({ key: item.key, value: item.value, effective_value: item.effective_value,
+              has_value: item.has_value || Boolean(item.value), value_source: item.resource_id ? 'resource' : 'configured',
+              resource_id: item.resource_id, resource_key: item.resource_key }))
+          : []
+        const { configs, originals } = mergeJobConfigs(job, { ...draft, rows: [...inherited, ...(draft?.rows ?? [])] }, opcConfig.defaultPort)
+        setJobResources(draft?.resources)
+        setSourceConfiguration(draft?.sourceConfiguration ?? null)
+        setPreparedDockerfile({ jobId: job.id, artifactHash: job.artifactHash, content: draft?.dockerfile ?? '' })
+        setOriginalConfigs(originals)
+        setConfigDrafts(configs)
+        setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
+        setStorageBindings(draft?.storageBindings ?? {})
+        setExistingStorage(detail?.storage_mounts ?? [])
+        setStep3Load({ ...target, status: 'ready' })
+      } catch (error) {
+        if (request === step3Request.current) setStep3Load({ ...target, status: 'failed', error: readErrorMessage(error, '部署内容加载失败') })
+      }
     },
     [api, contextId, opcConfig.defaultPort],
   )
@@ -700,11 +720,9 @@ export function AppsPanel({
   // Load Step 3 draft data when entering Step 3
   useEffect(() => {
     if (viewMode !== 'wizard' || wizardStep !== 3 || !wizardJob) return
-    void refreshWizardJob(wizardJob.id).then(fresh => {
-      const target = fresh ?? wizardJob
-      void syncStep3Drafts(target)
-    })
-  }, [refreshWizardJob, syncStep3Drafts, viewMode, wizardJob?.id, wizardStep])
+    void syncStep3Drafts(wizardJob)
+    return () => { step3Request.current++ }
+  }, [syncStep3Drafts, viewMode, wizardJob?.id, wizardJob?.artifactHash, wizardStep])
 
   // Open Detail View & load all 5 tabs data
   const openAppDetail = useCallback(
@@ -782,7 +800,7 @@ export function AppsPanel({
 
   // Start New App or Upgrade Wizard
   const startWizardNew = useCallback(
-    (upgradeApp?: DeployedApp, prevJob?: AppDeliveryJob) => {
+    (upgradeApp?: DeployedApp, prevJob?: AppDeliveryJob, reuseSource = false) => {
       setViewMode('wizard')
       setWizardStep(1)
       setWizardJob(null)
@@ -798,6 +816,7 @@ export function AppsPanel({
       setDragActive(false)
       setZipFile(null)
       setSourcePath('')
+      setReuseSourceVersion(reuseSource && upgradeApp ? prevJob?.version : undefined)
       setConfigSubTab('configs')
     },
     [],
@@ -820,11 +839,9 @@ export function AppsPanel({
         setAppSlug(fresh.slug)
         setSlugManual(true)
         setAppDescription(fresh.description ?? '')
-      } else if (targetStep === 3) {
-        await syncStep3Drafts(fresh)
       }
     },
-    [apps, refreshWizardJob, syncStep3Drafts],
+    [apps, refreshWizardJob],
   )
 
   const openLinkedJob = useCallback(async (job: AppDeliveryJob, refresh = true) => {
@@ -885,7 +902,7 @@ export function AppsPanel({
       setWizardError('请选择此次交付的 AI 模型，或沿用当前会话模型')
       return
     }
-    if (!zipFile && !sourcePath.trim()) {
+    if (!reuseSourceVersion && !zipFile && !sourcePath.trim()) {
       setWizardError('请选择源码文件夹或 ZIP，或者填写完整路径')
       return
     }
@@ -908,7 +925,9 @@ export function AppsPanel({
               }
             : undefined,
       }
-      if (zipFile) {
+      if (reuseSourceVersion) {
+        payload.reuseSourceVersion = reuseSourceVersion
+      } else if (zipFile) {
         payload.zip = await readFileAsBase64(zipFile)
       } else {
         payload.source = sourcePath.trim()
@@ -957,6 +976,7 @@ export function AppsPanel({
       return
     }
     setWizardError(null)
+    setReuseSourceVersion(undefined)
     setSourcePath('')
     setZipFile(file)
   }
@@ -964,6 +984,7 @@ export function AppsPanel({
   const selectSourcePath = (path: string) => {
     sourceSelection.current++
     setWizardError(null)
+    setReuseSourceVersion(undefined)
     setZipFile(null)
     setSourcePath(path)
   }
@@ -1019,7 +1040,7 @@ export function AppsPanel({
       window.clearTimeout(draftSaveTimerRef.current)
       draftSaveTimerRef.current = null
     }
-    if (wizardJob?.status === 'ready' && wizardStep === 3) await saveDraft(wizardJob, configDrafts, versionNote, storageBindings)
+    if (wizardJob?.status === 'ready' && wizardStep === 3 && step3Ready) await saveDraft(wizardJob, configDrafts, versionNote, storageBindings)
   }
 
   const leaveWizard = async () => {
@@ -1065,7 +1086,7 @@ export function AppsPanel({
   }
 
   const handlePublishApp = async () => {
-    if (!wizardJob) return
+    if (!wizardJob || !step3Ready) return
     setWizardError(null)
     if (hasConfigIssues) {
       setConfigSubTab('configs')
@@ -1623,7 +1644,7 @@ export function AppsPanel({
       slugValid &&
       (upgradingStep1 || slugCheck.available !== false) &&
       (!selectedProvider || Boolean(selectedModelItem)) &&
-      Boolean(zipFile || sourcePath.trim())
+      Boolean(reuseSourceVersion || zipFile || sourcePath.trim())
 
     const dockerfile = preparedDockerfile?.jobId === wizardJob?.id && preparedDockerfile?.artifactHash === wizardJob?.artifactHash
       ? preparedDockerfile?.content : undefined
@@ -1916,10 +1937,10 @@ export function AppsPanel({
                     }} />
                   </div>
                 </div>
-                {(zipFile || sourcePath.trim()) && (
+                {(reuseSourceVersion || zipFile || sourcePath.trim()) && (
                   <div className="oa-source-choice" role="status">
                     <AppIcon name="check" size={16} />
-                    <span>{zipFile ? `已选择：${zipFile.name}（${formatFileSize(zipFile.size)}）` : '已填写本机源码路径'}</span>
+                    <span>{reuseSourceVersion ? `已选择本机保存的 v${reuseSourceVersion} 源码` : zipFile ? `已选择：${zipFile.name}（${formatFileSize(zipFile.size)}）` : '已填写本机源码路径'}</span>
                     <button type="button" className="oa-btn oa-btn-xs" disabled={wizardBusy} onClick={() => selectSourcePath('')}>清除选择</button>
                   </div>
                 )}
@@ -1944,11 +1965,9 @@ export function AppsPanel({
               beginAnalysisNavigation={beginAnalysisNavigation}
               footerMode="external"
               repairMode={wizardJob.analysis_mode === 'repair' || wizardJob.analysisMode === 'repair'}
-              onReady={updated => {
-                setWizardJob(updated)
-                void syncStep3Drafts(updated)
-              }}
+              onReady={setWizardJob}
               onReplaceSource={() => {
+                setReuseSourceVersion(undefined)
                 setPreviousJobId(wizardJob.id)
                 setAppName(wizardJob.name)
                 setAppSlug(wizardJob.slug)
@@ -2026,13 +2045,22 @@ export function AppsPanel({
                   <input id={`${formId}-version-note`}
                     className="oa-input"
                     value={versionNote}
+                    disabled={!step3Ready}
                     placeholder={wizardJob.upgrade ? '例如：新增审批导出接口、修复环境变量读取' : '例如：首次上线发布'}
                     onChange={e => handleStep3NoteChange(e.target.value)}
                   />
                 </div>
               </div>
 
-              {(deliveryFiles.length > 0 || sourceChanges.length > 0) && (
+              {!step3Ready && (step3Load?.status === 'failed' && step3Load.contextId === contextId &&
+                  step3Load.jobId === wizardJob.id && step3Load.artifactHash === wizardJob.artifactHash ? (
+                <div className="oa-alert oa-alert-danger" role="alert">
+                  <div>{step3Load.error}</div>
+                  <button type="button" className="oa-btn oa-btn-sm" onClick={() => void syncStep3Drafts(wizardJob)}>重新加载</button>
+                </div>
+              ) : <p className="oa-hint" role="status">正在加载本次交付的配置、Dockerfile 和挂载信息…</p>)}
+
+              {step3Ready && (deliveryFiles.length > 0 || sourceChanges.length > 0) && (
                 <details className="oa-subcard oa-cfg-ref-details">
                   <summary>交付文件与源码改动</summary>
                   {deliveryFiles.length > 0 && (
@@ -2060,7 +2088,7 @@ export function AppsPanel({
                 </details>
               )}
 
-              {configSubTab === 'configs' && (
+              {step3Ready && configSubTab === 'configs' && (
                 <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="运行时环境变量配置">
                   <AppDeliveryConfig
                     configs={configDrafts}
@@ -2125,7 +2153,7 @@ export function AppsPanel({
                 </section>
               )}
 
-              {configSubTab === 'mounts' && (
+              {step3Ready && configSubTab === 'mounts' && (
                 <div className="oa-form-card">
                   {volumeMounts.length === 0 ? (
                     <div className="oa-hint">此应用没有目录挂载。</div>
@@ -2210,9 +2238,9 @@ export function AppsPanel({
                 </div>
               )}
 
-              {configSubTab === 'skill' && <AppSkillPreview api={api} contextId={contextId} job={wizardJob} />}
+              {step3Ready && configSubTab === 'skill' && <AppSkillPreview api={api} contextId={contextId} job={wizardJob} />}
 
-              {configSubTab === 'dockerfile' && (
+              {step3Ready && configSubTab === 'dockerfile' && (
                 <section className="oa-subcard oa-dockerfile-panel" aria-label="本次构建的 Dockerfile">
                   <div className="oa-subcard-head">
                     <strong>本次构建的 Dockerfile</strong>
@@ -2227,6 +2255,19 @@ export function AppsPanel({
                     <pre className="oa-dockerfile-source oa-mono" tabIndex={0} aria-label="Dockerfile 正文"><code>{dockerfile}</code></pre>
                   ) : (
                     <p className="oa-hint" role="status">{dockerfile === undefined ? '正在读取 Dockerfile…' : '暂时无法读取本次构建的 Dockerfile。'}</p>
+                  )}
+                  {(wizardJob.proposal?.contract?.build_inputs?.length ?? 0) > 0 && (
+                    <details className="oa-cfg-ref-details">
+                      <summary>构建参数来源</summary>
+                      <dl className="oa-cfg-ref-dl">
+                        {wizardJob.proposal?.contract?.build_inputs?.map(input => (
+                          <div key={input.arg}>
+                            <dt><code>{input.arg}</code></dt>
+                            <dd>取自本次确认的配置 <code>{input.key}</code></dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </details>
                   )}
                 </section>
               )}
@@ -2324,6 +2365,7 @@ export function AppsPanel({
                 type="button"
                 className="oa-btn"
                 onClick={() => {
+                  setReuseSourceVersion(undefined)
                   setPreviousJobId(wizardJob.id)
                   setAppName(wizardJob.name)
                   setAppSlug(wizardJob.slug)
@@ -2354,7 +2396,7 @@ export function AppsPanel({
               <button
                 type="button"
                 className="oa-btn oa-btn-primary"
-                disabled={wizardBusy || hasConfigIssues || hasMissingStorage}
+                disabled={wizardBusy || !step3Ready || hasConfigIssues || hasMissingStorage}
                 onClick={() => void handlePublishApp()}
               >
                 {wizardBusy ? '正在提交发布…' : '确认配置并发布上线'}
@@ -2409,6 +2451,10 @@ export function AppsPanel({
     const lastHealthCheck = detailHealthCheck?.slug === detailApp.slug ? detailHealthCheck : null
     const unhealthy = detailApp.status === 'failed' || detailApp.status === 'unhealthy'
     const matchingJob = jobs.find(j => j.slug === detailApp.slug && j.version === detailApp.current_version) ?? jobs.find(j => j.slug === detailApp.slug)
+    const activeVersion = versions.find(item => item.is_active) ?? versions.find(item => item.version === detailApp.current_version)
+    const requiresAIUpdate = !activeVersion || Boolean(activeVersion.download_urls?.['delivery.json']) ||
+      (matchingJob?.version === detailApp.current_version && matchingJob?.proposal?.delivery_format === 1)
+    const activeLocalJob = matchingJob?.version === detailApp.current_version && matchingJob?.status === 'verified' ? matchingJob : undefined
     const detailTabs = {
       artifacts: '能力与技能',
       configs: '运行配置',
@@ -2619,9 +2665,15 @@ export function AppsPanel({
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                 <div>
                   <strong style={{ fontSize: 14, color: '#0f172a' }}>在线运行配置</strong>
-                  <div className="oa-hint">修改环境变量或平台托管资源绑定后，平台会安全重启应用容器使配置生效。</div>
+                  <div className="oa-hint">{requiresAIUpdate ? '在更新向导中由所选 AI 分析配置变更，并在新配置的候选版本上完成验收。' : '保存后会重启应用容器以应用运行配置。'}</div>
                 </div>
-                {!readOnly && api.appUpdateConfig && (
+                {!readOnly && requiresAIUpdate && (
+                  <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy}
+                    onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>
+                    让 AI 分析配置更新
+                  </button>
+                )}
+                {!readOnly && !requiresAIUpdate && api.appUpdateConfig && (
                   <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy} onClick={() => void handleSaveDetailConfig()}>
                     {detailBusy ? '正在保存并重启…' : '保存配置并重启容器'}
                   </button>
@@ -2635,7 +2687,7 @@ export function AppsPanel({
                   type="number"
                   min={1}
                   max={65535}
-                  disabled={readOnly}
+                  disabled={readOnly || requiresAIUpdate}
                   value={editPort}
                   onChange={e => setEditPort(e.target.value)}
                 />
@@ -2646,8 +2698,9 @@ export function AppsPanel({
                 originals={detailApp.app_config ?? []}
                 resources={resources}
                 onChange={next => {
-                  if (!readOnly) setEditConfigs(next)
+                  if (!readOnly && !requiresAIUpdate) setEditConfigs(next)
                 }}
+                readOnly={readOnly || requiresAIUpdate}
               />
             </div>
           )}
@@ -2751,7 +2804,7 @@ export function AppsPanel({
             <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="oa-subcard-head" style={{ marginBottom: 0 }}>
                 <span>交付版本与制品归档</span>
-                <span className="oa-hint">支持下载任意版本镜像源码包、技能包或执行版本回滚</span>
+                <span className="oa-hint">可下载源码包和技能包，也可以用历史源码发起更新</span>
               </div>
 
               {rollbackTarget && (
@@ -2800,17 +2853,23 @@ export function AppsPanel({
                           {ver.deployed_by && <span className="oa-hint">发布人：{ver.deployed_by}</span>}
                         </div>
 
-                        {!currentVersion(ver) && ver.status === 'running' && api.appRollback && (
+                        {!currentVersion(ver) && ver.status === 'running' && !readOnly && (requiresAIUpdate || ver.download_urls?.['delivery.json'] || api.appRollback) && (
                           <button
                             type="button"
                             className="oa-btn oa-btn-xs oa-btn-accent-soft"
                             disabled={detailBusy}
                             onClick={() => {
-                              setRollbackTarget(ver)
-                              setRollbackReason('')
+                              if (requiresAIUpdate || ver.download_urls?.['delivery.json']) {
+                                const local = jobs.find(job => job.slug === detailApp.slug && job.published && job.version === ver.version)
+                                startWizardNew(detailApp, local, true)
+                                setWizardNotice(`使用 v${ver.version} 的源码发起更新，所选 AI 会以当前线上版本和实际数据为基线分析。${local ? '' : '请导入该历史版本的源码。'}`)
+                              } else if (api.appRollback) {
+                                setRollbackTarget(ver)
+                                setRollbackReason('')
+                              }
                             }}
                           >
-                            回滚到此版本
+                            {requiresAIUpdate || ver.download_urls?.['delivery.json'] ? '用此版本源码发起更新' : '回滚到此版本'}
                           </button>
                         )}
                       </div>

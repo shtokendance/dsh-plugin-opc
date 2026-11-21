@@ -195,6 +195,7 @@ export interface AppDeliveryJob {
       }
       description?: string
       runtime?: { language?: string; version?: string; port?: number }
+      build_inputs?: { arg: string; key: string; evidence: string[] }[]
       health?: { path?: string; status?: number; json_contains?: Record<string, unknown> }
       configs?: { key: string; default?: string; app_default?: string; value_plan?: { kind: string }; description?: string; secret?: boolean; required?: boolean; has_original_value?: boolean; source?: { path: string; keys: (string | number)[] } }[]
       resources?: { id?: string; type?: string; purpose?: string; env?: string[]; current_hint?: string }[]

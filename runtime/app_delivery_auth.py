@@ -5,7 +5,7 @@ import re
 from app_delivery.scripts import delivery
 
 
-def resolve_authentication(contract):
+def resolve_authentication(contract, *, prefer_explicit=False):
     errors = []
     rules = contract.get('auth_rules', [])
     valid_rules = []
@@ -49,10 +49,18 @@ def resolve_authentication(contract):
         for item in items:
             if not isinstance(item, dict):
                 continue
+            path = item.get('path')
+            if not isinstance(path, str):
+                errors.append(f'{key} 缺少路由 path')
+                continue
+            explicit = item.get('auth')
+            if prefer_explicit and isinstance(explicit, dict) and explicit.get('type') in ('none', 'header', 'bearer'):
+                continue  # The selected AI declared an exception to the shared rules.
+            method = item.get('method')
             matches = [r for r in valid_rules if r['target'] == target
-                       and (not r.get('method') or r['method'].upper() == item.get('method', '').upper())
-                       and (r.get('path') == item['path'] or
-                            (r.get('prefix') and item['path'].startswith(r['prefix'])))]
+                       and (not r.get('method') or isinstance(method, str) and r['method'].upper() == method.upper())
+                       and (r.get('path') == path or
+                            (r.get('prefix') and path.startswith(r['prefix'])))]
             if matches:
                 ranked = sorted(matches, key=lambda r: (bool(r.get('path')), len(r.get('prefix', '')), bool(r.get('method'))), reverse=True)
                 best = ranked[0]
@@ -73,8 +81,8 @@ def resolve_authentication(contract):
                     if 'roles' in explicit and 'roles' not in auth:
                         auth['roles'] = explicit['roles']
                 item['auth'] = {**auth, 'evidence': best['evidence']}
-            auth = item.get('auth', {'type': 'unknown'})
-            if auth.get('type') == 'unknown':
+            auth = item.get('auth')
+            if not isinstance(auth, dict) or auth.get('type') == 'unknown':
                 evidence = item.get('evidence')
                 location = evidence[0] if isinstance(evidence, list) and evidence else ''
                 origin = f"。源码位置：{location}" if isinstance(location, str) and location else ""

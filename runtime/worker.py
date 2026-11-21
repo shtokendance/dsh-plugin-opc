@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import sys
@@ -188,7 +189,8 @@ def validate_config_value_plan(proposal, config):
     if kind == "source":
         d.require(bool(config.get("source")), f"配置 {key} 缺少真实源码引用")
     if kind == "default":
-        d.require(bool(config.get("default")), f"配置 {key} 缺少默认值")
+        d.require(bool(config.get("default")) or isinstance(config.get("app_default"), str),
+                  f"配置 {key} 缺少源码默认值，请填写 default 或 app_default")
     if kind == "inherit":
         d.require(type(proposal.get("base_version")) is int and proposal["base_version"] > 0, f"首次部署不能继承配置 {key}")
     if kind == "generate":
@@ -221,6 +223,9 @@ def delivery_declaration_errors(contract, *, complete=True):
         valid_path = (isinstance(path, str) and path.startswith("/") and not path.startswith("//")
                       and path != "/" and path == path.strip() and ".." not in path.split("/")
                       and not any(ch in path for ch in ("\\", "\0", "\r", "\n")))
+        canonical_path = posixpath.normpath(path) if valid_path else None
+        if canonical_path is not None and canonical_path != path:
+            errors.append(f"{field}.container_path 必须使用规范路径：{canonical_path}")
         checks = {
             "name": isinstance(mount.get("name"), str) and bool(mount["name"].strip()),
             "kind": mount.get("kind") in ("state-data", "sqlite", "uploads", "exports", "backups"),
@@ -229,10 +234,10 @@ def delivery_declaration_errors(contract, *, complete=True):
         missing = [key for key, valid in checks.items() if not valid]
         if missing:
             errors.append(f"{field} 缺少或格式无效：{', '.join(missing)}。请使用部署契约字段和容器内的绝对目录")
-        if valid_path:
-            if path in paths:
-                errors.append(f"{field}.container_path 与另一条挂载重复：{path}")
-            paths.add(path)
+        if canonical_path is not None:
+            if canonical_path in paths:
+                errors.append(f"{field}.container_path 与另一条挂载重复：{canonical_path}")
+            paths.add(canonical_path)
 
     if not complete:
         return errors
@@ -240,6 +245,10 @@ def delivery_declaration_errors(contract, *, complete=True):
     config_rows = [item for item in configs if isinstance(item, dict)] if isinstance(configs, list) else []
     bound_resources = {item["resource_id"] for item in [*config_rows, *mounts]
                        if isinstance(item, dict) and isinstance(item.get("resource_id"), str)}
+    data_plan = contract.get("data_plan")
+    if isinstance(data_plan, dict) and data_plan.get("strategy") == "postgres_copy":
+        bound_resources.update(data_plan[key] for key in ("source_resource_id", "rehearsal_resource_id", "target_resource_id")
+                               if isinstance(data_plan.get(key), str))
     resources = contract.get("resources", [])
     if isinstance(resources, list):
         for index, resource in enumerate(resources):
@@ -269,6 +278,118 @@ def delivery_declaration_errors(contract, *, complete=True):
                 auth = entry.get("auth") if isinstance(entry, dict) else None
                 if isinstance(auth, dict) and auth.get("type") in ("header", "bearer") and not auth.get("profile"):
                     check_reference(f"contract.{collection}[{index}].auth.env", auth.get("env"))
+    return errors
+
+
+def delivery_evidence_errors(contract, source, changes, *, requires_verification):
+    errors = []
+    staged = {d.relative(source, item["path"]): item["content"] for item in changes}
+    line_counts = {}
+
+    def nonempty(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def source_evidence(value):
+        if not isinstance(value, list) or not value:
+            return False
+        for item in value:
+            match = re.fullmatch(r"(.+):([1-9]\d{0,8})(?:-([1-9]\d{0,8}))?", item) if isinstance(item, str) else None
+            if match is None:
+                return False
+            name, start, end = match.groups()
+            try:
+                path = d.relative(source, name)
+                if path not in line_counts:
+                    content = staged.get(path)
+                    if content is None and path.is_file():
+                        content = d.text_of(path)
+                    line_counts[path] = len(content.splitlines()) if content is not None else 0
+            except (ValueError, OSError):
+                return False
+            if not 1 <= int(start) <= int(end or start) <= line_counts[path]:
+                return False
+        return True
+
+    build_inputs = contract.get("build_inputs", [])
+    if not isinstance(build_inputs, list) or len(build_inputs) > 64:
+        errors.append("contract.build_inputs 必须是数组，最多 64 项")
+        build_inputs = []
+    if build_inputs:
+        configs = contract.get("configs", [])
+        config_rows = {item["key"]: item for item in configs if isinstance(item, dict)
+                       and isinstance(item.get("key"), str)} if isinstance(configs, list) else {}
+        sources = contract.get("credential_sources")
+        credential_keys = set(sources) if isinstance(sources, dict) else set()
+        auth_profiles = contract.get("auth_profiles")
+        profiles = list(auth_profiles.values()) if isinstance(auth_profiles, dict) else []
+        for profile in [contract.get("auth_profile"), *profiles]:
+            if isinstance(profile, dict):
+                credential_keys.update(profile[key] for key in ("username_env", "password_env", "token_env")
+                                       if isinstance(profile.get(key), str))
+        for collection in ("apis", "pages", "auth_rules"):
+            entries = contract.get(collection)
+            for entry in entries if isinstance(entries, list) else []:
+                auth = entry.get("auth") if isinstance(entry, dict) else None
+                if isinstance(auth, dict) and isinstance(auth.get("env"), str):
+                    credential_keys.add(auth["env"])
+        args = set()
+        for index, item in enumerate(build_inputs):
+            field = f"contract.build_inputs[{index}]"
+            if not isinstance(item, dict):
+                errors.append(f"{field} 必须是对象")
+                continue
+            arg, key, evidence = item.get("arg"), item.get("key"), item.get("evidence")
+            if not isinstance(arg, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", arg) or arg in args:
+                errors.append(f"{field}.arg 必须是唯一的 Dockerfile ARG 名称")
+                continue
+            args.add(arg)
+            config = config_rows.get(key) if isinstance(key, str) else None
+            if config is None:
+                errors.append(f"{field}.key 必须引用交付配置中的值")
+            elif (config.get("secret") is not False or key in credential_keys
+                  or SENSITIVE_KEY_RE.search(key) or SENSITIVE_KEY_RE.search(arg)):
+                errors.append(f"{field} 不能使用密码、令牌或私有构建凭据，当前没有构建秘密注入能力")
+            if not source_evidence(evidence) or not any(citation.startswith("Dockerfile:") for citation in evidence):
+                errors.append(f"{field}.evidence 必须包含本次根 Dockerfile 的真实行号")
+
+    if not requires_verification:
+        return errors
+    review = contract.get("configuration_review")
+    if not isinstance(review, dict) or not nonempty(review.get("summary")) or not source_evidence(review.get("evidence")):
+        errors.append("contract.configuration_review 必须包含配置核对摘要和源码 evidence；没有配置时也要说明核实依据")
+
+    verification = contract.get("verification")
+    if not isinstance(verification, dict) or not isinstance(verification.get("targets"), list) or not verification["targets"]:
+        return [*errors, "contract.verification.targets 必须声明至少一个可执行的只读验收目标；无法取得证据时请提交 blocked 并说明原因"]
+
+    apis = contract.get("apis")
+    read_operations = {item["id"] for item in apis if isinstance(item, dict)
+                       and item.get("effect") == "read" and isinstance(item.get("id"), str)} if isinstance(apis, list) else set()
+    seen = set()
+    for index, target in enumerate(verification["targets"]):
+        field = f"contract.verification.targets[{index}]"
+        if not isinstance(target, dict):
+            errors.append(f"{field} 必须是对象")
+            continue
+        identifier = target.get("id")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", identifier) or identifier in seen:
+            errors.append(f"{field}.id 必须是唯一的小写标识")
+        else:
+            seen.add(identifier)
+        if not nonempty(target.get("expected")):
+            errors.append(f"{field}.expected 必须说明要从真实结果核对什么")
+        if target.get("kind") == "http":
+            path = target.get("path")
+            if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
+                    or any(ord(ch) <= 32 or ch in "\\#" for ch in path)
+                    or target.get("method") not in ("GET", "HEAD") or not source_evidence(target.get("evidence"))):
+                errors.append(f"{field} 必须声明有源码证据的站内只读 path、GET/HEAD 和 evidence")
+        elif target.get("kind") == "operation":
+            operation = target.get("operation")
+            if not isinstance(operation, str) or operation not in read_operations:
+                errors.append(f"{field}.operation 必须引用已有 effect: read 的契约操作")
+        else:
+            errors.append(f"{field}.kind 必须是 http 或 operation")
     return errors
 
 
@@ -366,7 +487,7 @@ def resolve_and_enrich_proposal(
         d.require("\n---" in markdown and re.search(r"^name:\s*app-" + re.escape(contract.get("slug", "")) + r"\s*$", header, re.M)
                   and re.search(r"^description:\s*\S", header, re.M), "应用 SKILL.md 必须声明对应 app-<slug> 和 description")
 
-    if repair and failed_revision and failed_revision.isalnum():
+    if not skill_delivery and repair and failed_revision and failed_revision.isalnum():
         failed_archive = root / failed_revision / "bundle/app.tar"
         if failed_archive.is_file():
             failed_read = set(load_json_if_exists(root / "failed_files_read.json", []))
@@ -390,6 +511,9 @@ def resolve_and_enrich_proposal(
             d.contract_shape_errors(contract) + delivery_declaration_errors(contract, complete=not unresolved_all)
             if skill_delivery else []
         )
+        if skill_delivery and not unresolved_all:
+            errors.extend(delivery_evidence_errors(contract, source, resolved_changes,
+                                                    requires_verification=proposal.get("verification_format") == 1))
         configs = contract.get("configs", [])
         valid_config_dicts = isinstance(configs, list)
         if not valid_config_dicts:
@@ -459,7 +583,7 @@ def resolve_and_enrich_proposal(
                     decision_ids.add(decision["id"])
 
         checks = [
-            lambda: resolve_authentication(contract),
+            lambda: resolve_authentication(contract, prefer_explicit=skill_delivery),
             lambda: d.validate_credential_references(contract),
         ]
         if not skill_delivery:
@@ -1095,16 +1219,20 @@ def main(body):
     if action == "probe":
         contract = body["contract"]
         approve_write = bool(body.get("approved"))
+        candidate_probe = body.get("candidate_probe")
         operation_id = body["operation"]
         credentials = skill_login_credentials(contract, body.get("skill_markdown", ""), operation_id, body.get("credentials", {}))
         api_def = next((a for a in (contract.get("apis") or []) if isinstance(a, dict) and a.get("id") == operation_id), {})
         is_readonly = not approve_write and api_def.get("effect", "read") == "read"
+        d.require(candidate_probe is None or is_readonly, "候选版本验收只允许运行只读业务操作")
         max_attempts = 3 if is_readonly else 1
         result = None
         for attempt in range(max_attempts):
             try:
                 # No ambient host credentials or proxy configuration enters an application call.
-                result = execute(contract, operation_id, body.get("params", {}), body=body.get("body"), approve_write=approve_write, credential_env=credentials)
+                result = execute(contract, operation_id, body.get("params", {}), body=body.get("body"),
+                                 approve_write=approve_write, credential_env=credentials, candidate_probe=candidate_probe,
+                                 strict_auth=body.get("strict_auth") is True)
             except OSError as exc:
                 if attempt == max_attempts - 1:
                     raise ValueError(f"{operation_id} 验证请求失败（{type(exc).__name__}）") from exc
@@ -1113,7 +1241,10 @@ def main(body):
                     break
             time.sleep(0.5 * (attempt + 1))
         d.require(result is not None and len(result[2]) <= 2_000_000, "Response exceeds 2 MB")
-        return {"status": result[0], "content_type": result[1], "content": result[2].decode("utf-8", errors="replace")}
+        response = {"status": result[0], "content_type": result[1], "content": result[2].decode("utf-8", errors="replace")}
+        if candidate_probe and "proof" in candidate_probe:
+            response["proof"] = candidate_probe["proof"]
+        return response
     raise ValueError("Unknown worker action")
 
 

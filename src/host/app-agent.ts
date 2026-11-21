@@ -47,6 +47,7 @@ function formatToolStep(action: string, rawPath?: string, language?: string): st
   if (action === 'inventory') return `🔍 正在扫描源码目录结构${path ? ` (${path})` : ''}`
   if (action === 'scan_routes_and_pages') return '🧭 正在全量扫描应用后端 API 路由与前端页面视图'
   if (action === 'read') return path ? `📖 正在深入分析源码文件: ${path}` : '📖 正在读取源码文件'
+  if (action === 'read_current_proposal') return '📋 正在读取当前已提交方案'
   if (action === 'read_failed') return path ? `🩹 正在读取上次失败部署制品文件: ${path}` : '🩹 正在读取失败部署制品'
   if (action === 'reference') return '🔍 参考标准适配契约与架构模式'
   if (action === 'read_go_dependency') return '📦 分析 Go 模块依赖契约 (go.mod)'
@@ -98,6 +99,28 @@ interface AnalysisSession {
   round?: AnalysisRound
 }
 
+interface DeliveryObservation {
+  kind: string
+  target?: string
+  request_id: string
+  result: AppDocument
+}
+
+function readCurrentProposal(proposal: AppDocument | undefined, path = '', start = 1) {
+  if (!proposal) return { available: false }
+  let value: unknown = proposal
+  for (const section of path ? path.split('.') : []) {
+    if (!section || !value || typeof value !== 'object' || !Object.hasOwn(value, section)) {
+      throw new Error(`当前方案没有字段 ${path}`)
+    }
+    value = (value as AppDocument)[section]
+  }
+  const json = JSON.stringify(value, null, 2) ?? 'null'
+  if (!Number.isSafeInteger(start) || start < 1) throw new Error('start 必须是从 1 开始的字符位置')
+  const end = start + 20_000
+  return { path, start, text: json.slice(start - 1, end - 1), next_start: end <= json.length ? end : undefined }
+}
+
 export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
   const sessions = new Map<string, AnalysisSession>()
   delivery.analyze = async (job, root, feedback, signal, onSessionReady, fromChat, assessment) => {
@@ -114,13 +137,13 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const updating = job.deliveryMode ? job.deliveryMode === 'update' : Boolean(job.upgrade)
     const skill = loadBundledSkillText(updating ? 'UPDATE.md' : 'SKILL.md')
     const inspectActions = [
-      'inventory', 'scan_routes_and_pages', 'read', 'read_failed', 'reference', 'template',
+      'inventory', 'scan_routes_and_pages', 'read', 'read_current_proposal', 'read_failed', 'reference', 'template',
       'inspect_local_storage', 'read_go_dependency', 'resources', 'config_values', 'read_source_connection',
       ...(updating ? ['active_version', 'version_file', 'database_schema'] : []),
     ]
     const observationKinds = ['state', 'http', 'operation', ...(updating ? ['rehearsal'] : [])]
     const repairInstructions = isRepair
-      ? '\n修复失败部署时，先核对失败阶段和日志，用 read_failed 读取实际失败制品并与原源码比对。只修正根因，提交完整替换文件。'
+      ? '\n修复失败部署时，先核对失败阶段和证据，需要时用 read_failed 读取失败制品。用 read_current_proposal 取得已接受的完整字段；由你判断只改配置、重试，还是提交必要的完整替换文件。'
       : ''
     const portInstructions = portLocked
       ? `本任务锁定的容器端口为 ${port}。`
@@ -145,7 +168,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     let replyCount = 0
     const sessionReady = Promise.withResolvers<boolean>()
     const validationErrors: string[] = []
-    const observations = new Map<string, string>()
+    const observations = new Map<string, DeliveryObservation>()
     let activeVersion: Promise<AppDocument> | undefined
     const readActiveVersion = () => activeVersion ??= (async () => {
       if (!updating) throw new Error('首次部署没有可沿用的应用版本')
@@ -158,6 +181,15 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       if (!active) throw new Error('找不到当前生效版本')
       return active
     })().catch(error => { activeVersion = undefined; throw error })
+    const readActiveSnapshot = async (active: AppDocument) => {
+      if (!active.download_urls?.['confirmed-deployment.json']) return undefined
+      const snapshot = await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/confirmed-deployment.json`, appCtxId)
+      if (snapshot.config_revision !== active.config_revision) {
+        activeVersion = undefined
+        throw new Error('生效配置在读取期间已变化，请重新读取基线')
+      }
+      return snapshot
+    }
     const rejectedProposals = new Set<string>()
     let repeatedProposal = false
     let draftFileChanges: { id?: string; path?: string; reason?: string }[] = []
@@ -188,22 +220,29 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const register = (tool: ToolDefinition) => round.tools.set(tool.name, tool)
     const output = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
     register(defineTool({ name: 'opc_delivery_observe',
-      description: '读取候选版本的实际事实。state 读取状态和日志；运行态使用 http 或 operation 进行站内读取。' +
+      description: '读取候选版本实际事实。state 读取状态和日志；运行态 http 或 operation 必须用 target 指定交付契约中的只读验收目标 ID。' +
         (updating ? '已确认 PostgreSQL 迁移时，rehearsal 在隔离库演练。' : ''),
       parameters: {
         kind: { type: 'string', enum: observationKinds, required: true },
-        path: { type: 'string' }, method: { type: 'string', enum: ['GET', 'HEAD'] },
+        target: { type: 'string' },
         expected_statuses: { type: 'array', items: { type: 'number' } }, within_seconds: { type: 'number' },
-        operation: { type: 'string' }, params: { type: 'object', additionalProperties: true },
+        params: { type: 'object', additionalProperties: true },
         body: { type: 'object', additionalProperties: true },
       }, output,
       async execute(args) {
         if (!assessment || assessment.result) throw new Error('当前没有可验收的部署阶段')
         if (!observationKinds.includes(args.kind)) throw new Error('当前部署任务不支持该验收操作')
+        if (!job.requestId) throw new Error('当前没有可核对的部署请求回执')
+        if (args.kind === 'http' || args.kind === 'operation') {
+          const targets: AppDocument[] = job.proposal?.contract?.verification?.targets ?? []
+          if (!args.target || !targets.some(target => target.id === args.target && target.kind === args.kind)) {
+            throw new Error('请使用当前交付契约声明的同类型只读验收目标 ID')
+          }
+        }
         if (observations.size >= 30) throw new Error('本轮事实读取已达到上限，请据此提交结论')
         const result = await delivery.observeDeployment(job, root, args, appCtxId, abort)
         const id = randomUUID()
-        observations.set(id, JSON.stringify(result))
+        observations.set(id, { kind: args.kind, target: args.target, request_id: job.requestId, result })
         return JSON.stringify({ id, result })
       },
     }))
@@ -219,14 +258,24 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         if (!args.report.trim() || args.report.length > 2000 || !ids.length || ids.length > 12 || ids.some(id => !observations.has(id))) {
           throw new Error('请提交简短结论以及本轮工具读取的证据 ID')
         }
+        const evidence = ids.map(id => observations.get(id)!)
+        if (args.outcome === 'passed') {
+          const enough = assessment.phase === 'build'
+            ? evidence.some(item => item.kind === 'state' && item.result.status === 'built')
+            : evidence.some(item => (item.kind === 'http' || item.kind === 'operation') && item.target &&
+              Number.isInteger(item.result.status) && item.result.status >= 100 && item.result.status <= 599)
+          if (!enough) throw new Error(assessment.phase === 'build'
+            ? '构建通过需要本轮实际 built 回执'
+            : '运行验收通过需要已声明验收目标的实际响应；状态、日志和连接失败不能作为业务响应')
+        }
         assessment.result = { phase: assessment.phase, outcome: args.outcome,
           report: await worker({ action: 'redact_feedback', root, text: args.report }, abort),
-          evidence: ids.map(id => observations.get(id)!) }
+          evidence: evidence.map(item => JSON.stringify(item)) }
         return '验收结论与证据已记录。'
       },
     }))
     register(defineTool({ name: 'opc_delivery_inspect',
-      description: '只读检查应用。inventory 查看导入源码清单；read 或 read_failed 传 path；resources 读取平台资源；config_values 读取配置生效值；reference 传 name；template 传 language 和 version。也可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency 和 read_source_connection。' +
+      description: '只读检查应用。inventory 查看导入源码清单；read 或 read_failed 传 path；read_current_proposal 读取已接受的全量方案，可传 contract.configs 等字段作为 path，用返回的 next_start 作为续读 start；resources 读取平台资源；config_values 读取配置生效值；reference 传 name；template 传 language 和 version。也可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency 和 read_source_connection。' +
         (updating ? 'active_version 读取线上基线；version_file 传 path 读取该版本文件；database_schema 读取应用专属 PostgreSQL 的结构。' : ''),
       parameters: {
         action: { type: 'string', enum: inspectActions, required: true },
@@ -252,6 +301,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         }
         job.events.push(formatToolStep(args.action, args.path, args.language))
         delivery.core.emit('change')
+        if (args.action === 'read_current_proposal') return JSON.stringify(readCurrentProposal(job.proposal, args.path, args.start))
         if (args.action === 'resources') {
           const response = await delivery.platform('/resources', appCtxId, { query: { slug: job.slug } })
           return JSON.stringify((response.resources ?? []).map(({ id, name, type, env_keys, is_default, supports_auto_migration, host, port, database_name }: AppDocument) =>
@@ -266,18 +316,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           const plan = active.download_urls?.['delivery.json']
             ? await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/delivery.json`, appCtxId)
             : undefined
-          const snapshot = active.download_urls?.['confirmed-deployment.json']
-            ? await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/confirmed-deployment.json`, appCtxId)
-            : undefined
-          if (snapshot && snapshot.config_revision !== active.config_revision) {
-            activeVersion = undefined
-            throw new Error('生效配置在读取期间已变化，请重新读取基线')
-          }
+          const snapshot = await readActiveSnapshot(active)
           return JSON.stringify({ version: active.version, config_revision: active.config_revision, container_port: active.container_port,
             configs: (active.app_config ?? snapshot?.app_config ?? []).map(({ key, value, effective_value, secret, resource_id, resource_key, has_value, preserve_on_upgrade }: AppDocument) =>
               ({ key, value: effective_value ?? value, secret, resource_id, resource_key, has_value, preserve_on_upgrade })),
-            mounts: (snapshot?.storage_mounts ?? active.storage_mounts ?? []).map(({ container_path, resource_id, volume_name, storage_backend, kind, purpose }: AppDocument) =>
-              ({ container_path, resource_id, volume_name, storage_backend, kind, purpose })),
+            mounts: (snapshot?.storage_mounts ?? active.storage_mounts ?? []).map(({ name, container_path, resource_id, volume_name, storage_backend, kind, purpose }: AppDocument) =>
+              ({ name, container_path, resource_id, volume_name, storage_backend, kind, purpose })),
             delivery: plan }, null, 2)
         }
         if (args.action === 'version_file') {
@@ -338,6 +382,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           }
           candidate.delivery_format = 1
           candidate.config_format = 1
+          candidate.verification_format = 1
           const strategy = candidate.contract?.data_plan?.strategy
           const strategies = deliveryDataStrategies(updating)
           const waitingForDecision = candidate.unresolved?.length || candidate.contract?.unresolved?.length
@@ -356,8 +401,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             const active = await readActiveVersion()
             candidate.base_version = active.version
             candidate.base_config_revision = active.config_revision ?? ''
-            const previous = new Map((active.app_config ?? []).map((c: AppDocument) => [c.key, c]))
+            const activeConfig = active.app_config ?? (await readActiveSnapshot(active))?.app_config ?? []
+            const previous = new Map(activeConfig.map((c: AppDocument) => [c.key, c]))
             for (const config of candidate.contract?.configs ?? []) {
+              if (!previous.has(config.key) && config.value_plan?.kind === 'inherit') {
+                throw new Error(`线上生效版本不存在配置 ${config.key}，请声明此项实际取值来源`)
+              }
               if ((previous.get(config.key) as AppDocument | undefined)?.has_value && config.value_plan?.kind === 'generate') {
                 throw new Error(`现有配置 ${config.key} 已有值，升级请继承线上配置，不能自动重新生成`)
               }
@@ -427,10 +476,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
                 delivery.startAnalysis(job.id, '', appCtxId, undefined, {
                   mode: 'resume', fromChat: true, onChatReady: resolve,
                 }).catch(reject)
-              }).catch(() => {})
+              })
             }
             const current = live.round
-            if (!current || !await current.ready) continue
+            if (!current || !await current.ready) throw new Error('当前应用会话未恢复，请核对任务状态后重试')
             const safeText = await current.reply(text, turnSignal)
             if (safeText) messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
           }
@@ -553,6 +602,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         analysis_mode: isRepair ? 'repair' : 'analysis',
         existing_deployment: Boolean(job.upgrade || job.published),
         previous_plan: prevPlan,
+        previous_plan_available: Boolean(job.proposal),
         failed_snapshot: job.failedSnapshot,
         failure_log: job.failureContext ?? '',
         assessment_phase: assessment?.phase,
@@ -640,7 +690,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           : networkError ? `🔄 AI 服务暂时中断，正在继续准备（${attempt + 1}/2）`
           : `🔄 正在修正应用准备检查（${attempt + 1}/2）`)
         delivery.core.emit('change')
-        prompt = `复用已确认的信息，只修正以下反馈涉及的字段后提交。需要补证据时只重读对应位置：${reason}`
+        prompt = `先用 read_current_proposal 读取已接受的相关字段并保留完整方案，按以下反馈只修正需要改动的字段。需要补证据时只重读对应位置：${reason}`
       }
     } finally {
       sessionReady.resolve(false)

@@ -122,7 +122,7 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
             session: { id: sessionId },
             tools: { restrict() {}, register: (tool: any) => tools.set(tool.name, tool) },
             systemPrompt: { section: ({ text }: { text: string }) => { prompt = text } },
-            on() {}, inject() {}, cancel() {},
+            on() {}, inject() {}, cancel() {}, followup() {}, async whenIdle() {},
           }
           setup(agent)
           return { agent }
@@ -164,7 +164,10 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
         assert.equal(resource.resources.REDIS_URL, 'fixture-resource-value')
         const candidate = (strategy: string) => ({ ...proposal(url),
           readiness: { outcome: 'ready', reason: '已核对样例源码和资源' },
-          contract: { ...proposal(url).contract, storage_mounts: [], data_plan: { strategy, summary: '测试', recovery: '测试恢复' } },
+          contract: { ...proposal(url).contract, storage_mounts: [], data_plan: { strategy, summary: '测试', recovery: '测试恢复' },
+            configuration_review: { summary: '核对样例配置', evidence: ['main.py:1'] },
+            verification: { targets: [{ id: 'record', kind: 'operation', operation: 'lookup', expected: '返回记录' }] },
+          },
         })
         await assert.rejects(submit.execute({ proposal: JSON.stringify(candidate(updating ? 'initialize' : 'postgres_copy')) }), /data_plan\.strategy/)
         const { readiness, ...withoutDecision } = candidate(options[0])
@@ -172,8 +175,35 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
         await submit.execute({ ...candidate(options[0]), changes: [] })
         assert.deepEqual(job.proposal?.readiness, readiness)
         assert.equal(job.proposal?.base_version, updating ? 3 : 0)
+        const current = JSON.parse(await inspect.execute({ action: 'read_current_proposal', path: 'contract.apis' }))
+        assert.deepEqual(JSON.parse(current.text), candidate(options[0]).contract.apis)
       })
     }
+    const assessment: NonNullable<Parameters<NonNullable<AppDelivery['analyze']>>[6]> = { phase: 'runtime' }
+    const requestId = '5dca25e0-de32-4cf1-8ad0-687529b95c9c'
+    const assessedJob: import('../src/host/app-delivery.ts').DeliveryJob = {
+      id: 'runtime-fixture', requestId, slug: 'test-app', name: '测试应用', url, session: '', status: 'verifying', events: [],
+      modelSelection: { provider: 'fixture-provider', model: 'fixture-model' },
+      proposal: { ...proposal(url), contract: { ...proposal(url).contract,
+        verification: { targets: [{ id: 'record', kind: 'operation', operation: 'lookup', expected: '返回测试记录' }] },
+      } },
+    }
+    delivery.observeDeployment = async (_job, _root, args) => args.kind === 'state'
+      ? { status: 'runtime_ready' }
+      : { status: 200, content: '{"id":7}' }
+    await delivery.analyze!(assessedJob, home, '', new AbortController().signal, async () => {
+      const observe = tools.get('opc_delivery_observe')
+      const assess = tools.get('opc_delivery_assess')
+      assert.ok(observe && assess)
+      await assert.rejects(observe.execute({ kind: 'http', target: 'undeclared' }), /只读验收目标/)
+      const state = JSON.parse(await observe.execute({ kind: 'state' }))
+      await assert.rejects(assess.execute({ outcome: 'passed', report: '只看到了运行状态', evidence: [state.id] }), /实际响应/)
+      const response = JSON.parse(await observe.execute({ kind: 'operation', target: 'record' }))
+      await assess.execute({ outcome: 'passed', report: '取到了预期测试记录', evidence: [response.id] })
+    }, false, assessment)
+    assert.deepEqual(JSON.parse(assessment.result!.evidence[0]), {
+      kind: 'operation', target: 'record', request_id: requestId, result: { status: 200, content: '{"id":7}' },
+    })
     assert.ok(requests.includes(appPath + '/versions/3/artifacts/confirmed-deployment.json'))
     assert.equal(requests.filter(path => path === appPath + '/config-values').length, 2)
   } finally {
@@ -1276,7 +1306,7 @@ test('skill delivery waits for the selected AI at build and runtime before enabl
       if (path.endsWith('/assessment')) {
         const report = options?.body as AppDocument
         reports[report.phase] = report
-        status = report.phase === 'build' ? 'runtime_ready' : 'running'
+        status = report.phase === 'build' ? 'runtime_ready' : 'promoting'
         return receipt()
       }
       if (path.endsWith('/requests/fixture-request')) return receipt()
@@ -1317,6 +1347,10 @@ test('skill delivery waits for the selected AI at build and runtime before enabl
     assert.equal((await delivery.verify(id, expected, { automatic: true })).status, 'verifying')
     assert.deepEqual(Object.keys(reports), ['build'])
     second.resolve()
+    await waitFor('building')
+    assert.equal((await delivery.verify(id, expected, { automatic: true })).status, 'building')
+    status = 'running'
+    await delivery.verify(id, expected, { automatic: true })
     const verified = await waitFor('verified')
     assert.deepEqual(phases, ['build', 'runtime'])
     assert.equal(reports.runtime.outcome, 'passed')
@@ -2168,7 +2202,7 @@ test('plaintext input, generated values and final configuration artifacts stay c
   delivery.platform = async (path, _context, options) => {
     const form = options?.form
     if (path === '/check-slug') return { available: true, app_url: url }
-    if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, resources: [] }
+    if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, isolated_candidate: true, resources: [] }
     if (path === '/deliveries' && form) {
       if (failArchive) throw new Error('fixture archive unavailable')
       return {
@@ -2200,7 +2234,9 @@ test('plaintext input, generated values and final configuration artifacts stay c
       ...base, delivery_format: 1, config_format: 1,
       readiness: { outcome: 'ready', reason: '已有源码和配置证据' },
       skill_markdown: '---\nname: app-test-app\ndescription: 查询示例\n---\n查询记录。\n',
-      contract: { ...base.contract, configs: declarations, storage_mounts: [] },
+      contract: { ...base.contract, configs: declarations, storage_mounts: [], verification: {
+        ...base.contract.verification, targets: [{ id: 'fixture-records', kind: 'operation', operation: 'lookup', expected: '返回示例查询记录' }],
+      } },
     }
     const run = async (candidate: AppDocument) => {
       const job = JSON.parse(await readFile(join(root, 'job.json'), 'utf8'))
