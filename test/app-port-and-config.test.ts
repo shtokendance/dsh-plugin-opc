@@ -251,11 +251,11 @@ test('Host portAuto follows app default port, preserves explicit locked port, an
     assert.equal(ready.port, 4173)
     assert.equal(ready.runtime_configs.find((c: AppDocument) => c.key === 'HOST')?.app_default, '127.0.0.1')
 
-    // configDraft exposes non-secret originalValues and never exposes secret values
+    // The operator can review all original configuration values in the draft.
     const initialDraft = await delivery.configDraft(job.id, expected)
     assert.equal(initialDraft?.originalValues?.HOST, '127.0.0.1')
     assert.equal(initialDraft?.originalValues?.PUBLIC_ORIGIN, 'https://old.example.test')
-    assert.equal('API_SECRET' in (initialDraft?.originalValues ?? {}), false)
+    assert.equal(initialDraft?.originalValues?.API_SECRET, 'top-secret-val')
 
     // Save edited draft: override HOST & PUBLIC_ORIGIN, clear OPTIONAL_FLAG, add custom key
     await delivery.saveConfigDraft(

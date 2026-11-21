@@ -12,6 +12,7 @@ import type {
 } from './api.ts'
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
 import {
+  getConfigPublishIssues,
   mergeJobConfigs,
   sanitizeConfigRowsForApi,
   validateConfigsForPublish,
@@ -28,7 +29,7 @@ import { appsCss } from './appsStyles.ts'
 
 type ViewMode = 'list' | 'wizard' | 'detail'
 type WizardStep = 1 | 2 | 3 | 4
-type ConfigSubTab = 'configs' | 'skill' | 'artifacts' | 'mounts'
+type ConfigSubTab = 'configs' | 'skill' | 'dockerfile' | 'mounts'
 type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
 
@@ -445,6 +446,8 @@ export function AppsPanel({
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
+  const configIssues = getConfigPublishIssues(configDrafts, wizardJob?.port ?? opcConfig.defaultPort)
+  const hasConfigIssues = configIssues.size > 0
   const [jobResources, setJobResources] = useState<ResourceSummary[]>()
   const deploymentResources = jobResources ?? resources
   const [storageBindings, setStorageBindings] = useState<Record<string, string>>({})
@@ -460,9 +463,11 @@ export function AppsPanel({
       const selected = options.find(resource => resource.id === (storageBindings[mount.container_path] ?? mount.resource_id))
       return [mount.container_path, (selected ?? options.find(resource => resource.is_default) ?? options[0])?.id ?? '']
     }))
+  const hasMissingStorage = Object.values(storageSelections).some(id => !id)
 
   const [originalConfigs, setOriginalConfigs] = useState<AppConfigItem[]>([])
   const [sourceConfiguration, setSourceConfiguration] = useState<SourceConfiguration | null>(null)
+  const [preparedDockerfile, setPreparedDockerfile] = useState<{ jobId: string; artifactHash?: string; content: string }>()
   const [versionNote, setVersionNote] = useState('')
   const draftSaveTimerRef = useRef<number | null>(null)
   const draftSaveRequest = useRef<Promise<void>>(Promise.resolve())
@@ -655,15 +660,17 @@ export function AppsPanel({
       const draft = parseJson<ConfigDraftSnapshot | null>(draftRaw ?? 'null', null)
       const detail = parseJson<DeployedApp | null>(detailsRaw ?? 'null', null)
       const declarations = new Map(job.runtime_configs?.map(item => [item.key, item]))
+      const plans = new Map(job.proposal?.contract?.configs?.map(item => [item.key, item.value_plan?.kind]))
       const inherited = job.proposal?.delivery_format === 1
-        ? (detail?.app_config ?? []).filter(item => declarations.has(item.key) && !draft?.rows?.some(row => row.key === item.key))
-          .map(item => ({ key: item.key, value: declarations.get(item.key)?.secret ? '' : item.value,
+        ? (detail?.app_config ?? []).filter(item => declarations.has(item.key) && (!plans.get(item.key) || plans.get(item.key) === 'inherit') && !draft?.rows?.some(row => row.key === item.key))
+          .map(item => ({ key: item.key, value: item.value, effective_value: item.effective_value,
             has_value: item.has_value || Boolean(item.value), value_source: item.resource_id ? 'resource' : 'configured',
             resource_id: item.resource_id, resource_key: item.resource_key }))
         : []
       const { configs, originals } = mergeJobConfigs(job, { ...draft, rows: [...inherited, ...(draft?.rows ?? [])] }, opcConfig.defaultPort)
       setJobResources(draft?.resources)
       setSourceConfiguration(draft?.sourceConfiguration ?? null)
+      setPreparedDockerfile({ jobId: job.id, artifactHash: job.artifactHash, content: draft?.dockerfile ?? '' })
       setOriginalConfigs(originals)
       setConfigDrafts(configs)
       setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
@@ -1080,15 +1087,12 @@ export function AppsPanel({
   const handlePublishApp = async () => {
     if (!wizardJob) return
     setWizardError(null)
-    const validationErr = validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort)
-    if (validationErr) {
-      setWizardError(validationErr)
+    if (hasConfigIssues) {
       setConfigSubTab('configs')
       return
     }
-    if (Object.values(storageSelections).some(id => !id)) {
-      setWizardError('请为新增持久化目录选择已启用的 Platform 卷资源')
-      setConfigSubTab('configs')
+    if (hasMissingStorage) {
+      setConfigSubTab('mounts')
       return
     }
     if (!wizardJob.artifactHash) {
@@ -1118,13 +1122,13 @@ export function AppsPanel({
         }),
         contextId,
       )
-      const { confirmationToken } = parseJson<{ confirmationToken: string }>(confirmRaw, { confirmationToken: '' })
+      const { confirmationToken, artifactHash } = parseJson<{ confirmationToken: string; artifactHash?: string }>(confirmRaw, { confirmationToken: '' })
       if (!confirmationToken) throw new Error('未能获取发布确认凭证')
 
       const publishRaw = await api.appPublish(
         wizardJob.id,
         JSON.stringify({
-          artifactHash: wizardJob.artifactHash,
+          artifactHash: artifactHash ?? wizardJob.artifactHash,
           confirmationToken,
           config: cleanConfigs,
           storageBindings: storageSelections,
@@ -1640,11 +1644,11 @@ export function AppsPanel({
       (upgradingStep1 || slugCheck.available !== false) &&
       Boolean(zipFile || sourcePath.trim())
 
-    const missingConfigAlert = wizardJob
-      ? validateConfigsForPublish(configDrafts, wizardJob.port ?? opcConfig.defaultPort) ||
-        (Object.values(storageSelections).some(id => !id)
-          ? '新增持久化目录需要已启用的 Platform 卷资源' : null)
-      : null
+    const dockerfile = preparedDockerfile?.jobId === wizardJob?.id && preparedDockerfile?.artifactHash === wizardJob?.artifactHash
+      ? preparedDockerfile?.content : undefined
+    const deliveryFiles = Object.keys(wizardJob?.artifacts ?? {})
+    const sourceChanges = wizardJob?.proposal?.changes ?? []
+    const dataPlan = wizardJob?.proposal?.contract?.data_plan
 
     return (
       <div className="oa-overlay-view">
@@ -2002,6 +2006,7 @@ export function AppsPanel({
                       onClick={() => setConfigSubTab('configs')}
                     >
                       运行配置
+                      {hasConfigIssues && <span className="oa-dot oa-config-tab-warning" role="img" aria-label="有配置待处理" />}
                     </button>
                     <button
                       type="button"
@@ -2012,10 +2017,10 @@ export function AppsPanel({
                     </button>
                     <button
                       type="button"
-                      className={`oa-segmented-btn ${configSubTab === 'artifacts' ? 'active' : ''}`}
-                      onClick={() => setConfigSubTab('artifacts')}
+                      className={`oa-segmented-btn ${configSubTab === 'dockerfile' ? 'active' : ''}`}
+                      onClick={() => setConfigSubTab('dockerfile')}
                     >
-                      改造与检查
+                      Dockerfile
                     </button>
                     <button
                       type="button"
@@ -2023,6 +2028,7 @@ export function AppsPanel({
                       onClick={() => setConfigSubTab('mounts')}
                     >
                       挂载信息
+                      {hasMissingStorage && <span className="oa-dot oa-config-tab-warning" role="img" aria-label="有挂载待处理" />}
                     </button>
                   </div>
                 </div>
@@ -2038,11 +2044,32 @@ export function AppsPanel({
                 </div>
               </div>
 
-              {missingConfigAlert && (
-                <div role="alert" className="oa-alert oa-alert-warn">
-                  <AppIcon name="warning" size={16} />
-                  <div>{missingConfigAlert}</div>
-                </div>
+              {(deliveryFiles.length > 0 || sourceChanges.length > 0) && (
+                <details className="oa-subcard oa-cfg-ref-details">
+                  <summary>交付文件与源码改动</summary>
+                  {deliveryFiles.length > 0 && (
+                    <div className="oa-delivery-file-actions">
+                      {deliveryFiles.map(filename => (
+                        <button key={filename} type="button" className="oa-btn oa-btn-sm"
+                          onClick={() => void handleSaveLocalArtifact(wizardJob.id, filename)}>
+                          <AppIcon name="fileCode" size={13} />
+                          <span className="oa-mono">{filename}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {sourceChanges.map((change, index) => (
+                    <div key={change.id || index} className="oa-cfg-ref-file">
+                      <code className="oa-code">{change.path}</code> {change.reason}
+                      {change.diff && (
+                        <details>
+                          <summary>查看文件差异</summary>
+                          <pre className="oa-dockerfile-source oa-mono">{change.diff}</pre>
+                        </details>
+                      )}
+                    </div>
+                  ))}
+                </details>
               )}
 
               {configSubTab === 'configs' && (
@@ -2053,6 +2080,7 @@ export function AppsPanel({
                     originals={originalConfigs}
                     resources={deploymentResources}
                     lockedPort={wizardJob.port ?? opcConfig.defaultPort}
+                    publishIssues={configIssues}
                     onChange={handleStep3ConfigsChange}
                   />
 
@@ -2082,7 +2110,7 @@ export function AppsPanel({
                                 {file.fields.map(({ key, value }, index) => (
                                   <React.Fragment key={`${key}-${index}`}>
                                     <dt><code>{key}</code></dt>
-                                    <dd><code>{value === '[REDACTED]' ? '敏感值已隐藏' : value || '（空）'}</code></dd>
+                                    <dd><code>{value || '（空）'}</code></dd>
                                   </React.Fragment>
                                 ))}
                               </dl>
@@ -2119,9 +2147,11 @@ export function AppsPanel({
                         <span className="oa-pill oa-pill-ok">{volumeMounts.length} 项</span>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {volumeMounts.map(mount => {
+                        {volumeMounts.map((mount, index) => {
                           const existing = existingStorage.find(old => old.container_path === mount.container_path)
                           const options = volumeOptions(mount)
+                          const missingResource = !existing && !storageSelections[mount.container_path]
+                          const issueId = `${formId}-mount-issue-${index}`
                           return (
                             <div key={mount.container_path} className="oa-hint">
                               <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
@@ -2133,6 +2163,8 @@ export function AppsPanel({
                                 ) : (
                                   <select
                                     aria-label={`存储资源 ${mount.container_path}`}
+                                    aria-invalid={missingResource ? true : undefined}
+                                    aria-describedby={missingResource ? issueId : undefined}
                                     value={storageSelections[mount.container_path]}
                                     disabled={wizardBusy || options.length === 0}
                                     onChange={event => {
@@ -2153,106 +2185,53 @@ export function AppsPanel({
                                   </select>
                                 )}
                               </label>
+                              {missingResource && (
+                                <p id={issueId} className="oa-config-field-warning">
+                                  {options.length ? '请为此目录选择存储资源。' : '请联系管理员启用适用于此目录的存储资源。'}
+                                </p>
+                              )}
                             </div>
                           )
                         })}
                       </div>
                     </div>
                   )}
+                  {dataPlan && (
+                    <details className="oa-subcard oa-cfg-ref-details" open={dataPlan.strategy === 'postgres_copy'}>
+                      <summary>数据变更与恢复</summary>
+                      <p style={{ whiteSpace: 'pre-wrap' }}>{dataPlan.summary}</p>
+                      {dataPlan.strategy === 'postgres_copy' && (
+                        <div className="oa-hint">
+                          原库 <code>{dataPlan.source_resource_id}</code> · 演练库 <code>{dataPlan.rehearsal_resource_id}</code> · 目标库 <code>{dataPlan.target_resource_id}</code>
+                          <p>发布包含一次停写窗口。先在演练库验证，正式复制期间暂停旧实例写入。</p>
+                        </div>
+                      )}
+                      {dataPlan.migration_files?.map(path => <div key={path}><code>{path}</code></div>)}
+                      <p style={{ whiteSpace: 'pre-wrap' }}>恢复方式　{dataPlan.recovery}</p>
+                    </details>
+                  )}
                 </div>
               )}
 
               {configSubTab === 'skill' && <AppSkillPreview api={api} contextId={contextId} job={wizardJob} />}
 
-              {configSubTab === 'artifacts' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {wizardJob.proposal?.contract?.data_plan && (() => {
-                    const plan = wizardJob.proposal.contract.data_plan
-                    return <section className="oa-subcard">
-                      <div className="oa-subcard-head">数据变更与恢复</div>
-                      <p style={{ whiteSpace: 'pre-wrap' }}>{plan.summary}</p>
-                      {plan.strategy === 'postgres_copy' && (
-                        <div className="oa-hint">
-                          原库 <code>{plan.source_resource_id}</code> · 演练库 <code>{plan.rehearsal_resource_id}</code> · 目标库 <code>{plan.target_resource_id}</code>
-                          <p>发布包含一次停写窗口。先在演练库验证，正式复制期间暂停旧实例写入。</p>
-                        </div>
-                      )}
-                      {plan.migration_files?.map(path => <div key={path}><code>{path}</code></div>)}
-                      <p style={{ whiteSpace: 'pre-wrap' }}>恢复方式　{plan.recovery}</p>
-                    </section>
-                  })()}
-                  {(wizardJob.preparationChecks ?? []).length > 0 && (
-                    <div className="oa-subcard">
-                      <div className="oa-subcard-head">
-                        <span>交付包生成与自检结果</span>
-                        <span className="oa-pill oa-pill-ok">{wizardJob.preparationChecks!.length} 项</span>
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        {wizardJob.preparationChecks!.map((chk, idx) => (
-                          <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12.5 }}>
-                            <span className={`oa-pill ${chk.status === 'passed' ? 'oa-pill-ok' : 'oa-pill-warn'}`}>
-                              {chk.status === 'passed' ? '通过' : chk.status}
-                            </span>
-                            <div>
-                              <strong style={{ color: '#0f172a' }}>{chk.label}</strong>
-                              <div className="oa-hint">{chk.detail}</div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+              {configSubTab === 'dockerfile' && (
+                <section className="oa-subcard oa-dockerfile-panel" aria-label="本次构建的 Dockerfile">
+                  <div className="oa-subcard-head">
+                    <strong>本次构建的 Dockerfile</strong>
+                    {dockerfile && (
+                      <button type="button" className="oa-btn oa-btn-sm" onClick={() => void copyText(`dockerfile-${wizardJob.id}`, dockerfile)}>
+                        <AppIcon name={copiedKey === `dockerfile-${wizardJob.id}` ? 'check' : 'copy'} size={13} />
+                        {copiedKey === `dockerfile-${wizardJob.id}` ? '已复制' : '复制 Dockerfile'}
+                      </button>
+                    )}
+                  </div>
+                  {dockerfile ? (
+                    <pre className="oa-dockerfile-source oa-mono" tabIndex={0} aria-label="Dockerfile 正文"><code>{dockerfile}</code></pre>
+                  ) : (
+                    <p className="oa-hint" role="status">{dockerfile === undefined ? '正在读取 Dockerfile…' : '暂时无法读取本次构建的 Dockerfile。'}</p>
                   )}
-
-                  {wizardJob.artifacts && Object.keys(wizardJob.artifacts).length > 0 && (
-                    <div className="oa-subcard">
-                      <div className="oa-subcard-head">
-                        <span>本地待交付文件</span>
-                        <span className="oa-hint">点击可导出到本地检查</span>
-                      </div>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                        {Object.keys(wizardJob.artifacts).map(filename => (
-                          <button
-                            key={filename}
-                            type="button"
-                            className="oa-btn oa-btn-sm"
-                            onClick={() => void handleSaveLocalArtifact(wizardJob.id, filename)}
-                          >
-                            <AppIcon name="fileCode" size={13} />
-                            <span className="oa-mono">{filename}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {(wizardJob.proposal?.changes ?? []).length > 0 && (
-                    <div className="oa-subcard">
-                      <div className="oa-subcard-head">
-                        <span>源码改造清单</span>
-                        <span className="oa-pill oa-pill-accent">{wizardJob.proposal!.changes!.length} 项</span>
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        {wizardJob.proposal!.changes!.map((ch, idx) => (
-                          <div key={ch.id || idx} style={{ borderTop: idx > 0 ? '1px solid #f1f5f9' : 'none', paddingTop: idx > 0 ? 8 : 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <span className="oa-code">{ch.path}</span>
-                              {ch.group && <span className="oa-pill">{ch.group}</span>}
-                            </div>
-                            <div className="oa-hint" style={{ marginTop: 3 }}>
-                              {ch.reason}
-                            </div>
-                            {ch.diff && (
-                              <details style={{ marginTop: 6 }}>
-                                <summary>查看文件差异</summary>
-                                <pre className="oa-mono" style={{ whiteSpace: 'pre-wrap', overflow: 'auto' }}>{ch.diff}</pre>
-                              </details>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
+                </section>
               )}
             </div>
           )}
@@ -2378,7 +2357,7 @@ export function AppsPanel({
               <button
                 type="button"
                 className="oa-btn oa-btn-primary"
-                disabled={wizardBusy || Boolean(missingConfigAlert)}
+                disabled={wizardBusy || hasConfigIssues || hasMissingStorage}
                 onClick={() => void handlePublishApp()}
               >
                 {wizardBusy ? '正在提交发布…' : '确认配置并发布上线'}
@@ -2895,6 +2874,13 @@ export function AppsPanel({
                             }
                           >
                             delivery.json
+                          </button>
+                        )}
+                        {ver.download_urls?.['confirmed-deployment.json'] && (
+                          <button type="button" className="oa-btn oa-btn-xs"
+                            onClick={() => void handleDownloadPlatformArtifact(detailApp.slug,
+                              { version: ver.version, artifact: 'confirmed-deployment.json' }, `v${ver.version} 已确认部署配置`)}>
+                            已确认部署配置
                           </button>
                         )}
                       </div>

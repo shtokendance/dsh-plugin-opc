@@ -1,6 +1,6 @@
 import { createWriteStream, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { copyFile, link, lstat, mkdir, readFile, readdir, stat, writeFile, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -48,7 +48,8 @@ export interface DeliveryJob {
   modelSelection?: { provider: string; model: string; reasoningEffort?: string }
   confirmationToken?: string
   checks?: AppDocument[]; published?: boolean; failureContext?: string; configFingerprint?: string
-  configDraft?: { artifactHash: string; rows: { key: string; resource_id?: string; resource_key?: string; local_connection_confirmed?: boolean; has_value?: boolean; value_source?: string; secret?: boolean }[]; versionNote: string; storageBindings?: Record<string, string> }
+  generatedConfigKeys?: string[]
+  configDraft?: { artifactHash: string; protectedOnly?: boolean; rows: { key: string; resource_id?: string; resource_key?: string; local_connection_confirmed?: boolean; has_value?: boolean; value_source?: string; secret?: boolean }[]; versionNote: string; storageBindings?: Record<string, string> }
   configKeys?: string[]; resourceIds?: string[]; failedSnapshot?: AppDocument; pagesVerified?: boolean; superseded?: boolean; createdAt?: number
 }
 
@@ -145,7 +146,7 @@ function isExampleConfigPath(relPath: string): boolean {
   return suffixRe.test(base) || suffixRe.test(stem)
 }
 
-function isSensitiveConfigKey(key: string): boolean {
+export function isSensitiveConfigKey(key: string): boolean {
   return /password|passwd|secret|token|credential|api.?key|private.?key|dsn|connection.?string/i.test(key)
 }
 
@@ -575,22 +576,29 @@ export class AppDelivery {
   public(job: DeliveryJob, root?: string): AppDocument {
     const { proposal, skillMarkdown: _sm, dockerfileContent: _df, configDraft, confirmationToken: _token, analysisSessions: _analysisSessions, autoPrepared, ...rest } = job
     const hasOrigSet = new Set(job.hasOriginalKeys ?? [])
+    const generated = new Set(job.generatedConfigKeys ?? [])
+    const supplied = new Map(configDraft?.rows.map(row => [row.key, row]))
+    const effective = new Map<string, AppDocument>(proposal?.effective_configs?.map((row: AppDocument) => [row.key, row]))
     const runtimeConfigs = (proposal?.contract?.configs ?? []).map((c: AppDocument) => {
       const hasOrig = hasOrigSet.has(c.key) && Boolean(c.source)
+      const resolved = effective.get(c.key)
       const isExample = typeof c.source?.path === 'string' && isExampleConfigPath(c.source.path)
       return {
         key: c.key,
-        value: c.secret || c.resource_id ? '' : (c.default ?? ''),
-        resource_id: c.resource_id,
-        resource_key: c.resource_key,
-        app_default: c.secret ? '' : (typeof c.app_default === 'string' ? c.app_default : ''),
+        value: resolved && !resolved.resource_id ? resolved.value : c.resource_id ? '' : (c.value ?? c.default ?? ''),
+        effective_value: resolved?.resource_id ? resolved.value : undefined,
+        resource_id: resolved ? resolved.resource_id : c.resource_id,
+        resource_key: resolved ? resolved.resource_key : c.resource_key,
+        app_default: typeof c.app_default === 'string' ? c.app_default : '',
         description: c.description ?? '',
         required: Boolean(c.required),
         secret: Boolean(c.secret),
-        has_value: hasOrig || Boolean(c.default || c.resource_id),
+        has_value: hasOrig || generated.has(c.key) || Boolean(resolved?.value || c.value || c.default || c.resource_id) ||
+          Boolean(c.value_plan?.kind === 'input' && supplied.get(c.key)?.has_value),
+        ...(c.value_plan?.kind === 'input' ? { needs_user_input: true } : {}),
         has_original_value: hasOrig,
         ...(isExample ? { is_example_source: true } : {}),
-        value_source: c.resource_id ? 'resource' : hasOrig ? 'original' : 'manual',
+        value_source: resolved?.value_source ?? (c.resource_id ? 'resource' : generated.has(c.key) ? 'generated' : hasOrig ? 'original' : 'manual'),
         source_label: c.source?.path ? `${isExample ? '示例模板参考' : '来自原项目'} ${c.source.path}` : undefined,
       }
     })
@@ -611,7 +619,7 @@ export class AppDelivery {
       analysis_failure: job.analysisFailure,
       pages_verified: job.pagesVerified,
       artifactHash,
-      deploymentReviewPending: Boolean(job.status === 'ready' && autoPrepared && artifactHash && configDraft?.artifactHash !== artifactHash),
+      deploymentReviewPending: Boolean(job.status === 'ready' && autoPrepared && artifactHash && (configDraft?.protectedOnly || configDraft?.artifactHash !== artifactHash)),
       proposalHash: proposal ? fingerprint(proposal) : undefined,
       artifacts: artifactFiles,
       runtime_configs: runtimeConfigs,
@@ -644,7 +652,7 @@ export class AppDelivery {
           health: proposal.contract.health,
           configs: (proposal.contract.configs ?? []).map((c: AppDocument) => ({
             ...c,
-            default: c.secret ? '' : c.default,
+            default: c.default,
             has_original_value: hasOrigSet.has(c.key) || Boolean(c.has_original_value),
           })),
           resources: proposal.contract.resources ?? [],
@@ -864,7 +872,7 @@ export class AppDelivery {
     if (session && !job.analysisSessions?.includes(session)) job.session = session
     let trimmedFeedback: string
     try {
-      trimmedFeedback = await worker({ action: 'redact_feedback', root, text: feedback.slice(0, 20_000) }, scope.signal)
+      trimmedFeedback = feedback.slice(0, 20_000)
     } catch (error) {
       this.busy.delete(id)
       throw error
@@ -981,7 +989,7 @@ export class AppDelivery {
     }
     const reply: string = adminReply
       ? '用户已经在当前对话提供管理员账号和密码。保留上一版 admin_account 认证方案与实际存储位置并重新提交，OPC 会把账密写入应用和技能。'
-      : await worker({ action: 'redact_feedback', root, text: text.slice(0, 20_000) }, signal)
+      : text.slice(0, 20_000)
     signal.throwIfAborted()
     const next: DeliveryJob = {
       ...job,
@@ -1009,24 +1017,41 @@ export class AppDelivery {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
     if (job.status !== 'ready') return null
-    const sourceConfiguration = await worker({ action: 'source_configuration', root }, scope.signal)
+    const sourceConfiguration = await worker({ action: 'source_configuration', root, values_visible: true }, scope.signal)
+    const dockerfile = job.dockerfileContent ?? ''
     const authored = job.proposal?.delivery_format === 1
-    const resources = authored
-      ? (await this.platform('/resources', expected, { query: { slug: job.slug } }).catch(() => undefined))?.resources
+    const catalog = authored
+      ? await this.platform('/resources', expected, { query: { slug: job.slug } }).catch(() => undefined)
       : undefined
+    const resources = catalog?.resources
     const values = job.configDraft ? await this.credentials.read(`draft-${id}`) : {}
     const origAll = await this.credentials.read(`orig-${id}`)
     scope.assertCurrent()
-    const secretKeys = new Set(((job.proposal?.contract?.configs ?? []) as AppDocument[]).filter(c => c.secret).map(c => c.key))
-    const originalValues = Object.fromEntries(
-      Object.entries(origAll).filter(([k, v]) => !secretKeys.has(k) && !isSensitiveConfigKey(k) && typeof v === 'string'),
-    )
+    const originalValues = origAll
+    if (catalog?.visible_config_values === true && Array.isArray(resources)) {
+      const declarations: AppDocument[] = job.proposal?.contract?.configs ?? []
+      const expectedKeys = new Set<string>(declarations.flatMap(c => [c.key, c.resource_key].filter(Boolean)))
+      const requested = resources.flatMap((resource: AppDocument, index: number) =>
+        (resource.env_keys ?? []).filter((key: string) => expectedKeys.has(key)).map((key: string) => ({
+          key: `R${index}_${key}`, resource_id: resource.id, resource_key: key, index,
+        })))
+      for (let start = 0; start < requested.length; start += 256) {
+        const batch = requested.slice(start, start + 256)
+        const actual = await this.resolveResourceValues(job.slug, batch, expected)
+        for (const entry of batch) {
+          if (typeof actual[entry.key] !== 'string') continue
+          const resource = resources[entry.index]
+          resource.env_preview = { ...resource.env_preview, [entry.resource_key]: actual[entry.key] }
+        }
+      }
+    }
     return {
       ...job.configDraft,
       rows: (job.configDraft?.rows ?? []).filter(row => !authored || job.proposal?.contract.configs?.some((config: AppDocument) => config.key === row.key))
         .map(row => ({ ...row, value: values[row.key] ?? '' })),
       originalValues,
       sourceConfiguration,
+      dockerfile,
       resources,
     }
   }
@@ -1040,6 +1065,27 @@ export class AppDelivery {
       if (!Array.isArray(rows) || rows.some(row => !row || typeof row.key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(row.key) ||
           typeof row.value !== 'string' || (row.resource_id !== undefined && typeof row.resource_id !== 'string')) ||
           new Set(rows.map(row => row.key)).size !== rows.length) throw new Error('配置草稿格式无效')
+      if (input.protectedInputs === true) {
+        const declarations: AppDocument[] = job.proposal?.contract?.configs ?? []
+        const allowed = new Map(declarations.filter(c => c.value_plan?.kind === 'input').map(c => [c.key, c]))
+        if (!rows.length || rows.some(row => !allowed.has(row.key) || !row.value || row.value.includes('\0') || row.value.length > 16384)) {
+          throw new Error('表单只接收当前提案声明的待填写配置')
+        }
+        const priorValues = job.configDraft ? await this.credentials.read(`draft-${id}`) : {}
+        await this.credentials.write(`draft-${id}`, { ...priorValues, ...Object.fromEntries(rows.map(row => [row.key, row.value])) })
+        scope.assertCurrent()
+        const priorRows = (job.configDraft?.rows ?? []).filter(row => !rows.some(inputRow => inputRow.key === row.key))
+        job.configDraft = {
+          artifactHash: input.artifactHash,
+          protectedOnly: job.configDraft?.protectedOnly || job.configDraft?.artifactHash !== input.artifactHash,
+          rows: [...priorRows, ...rows.map(row => ({ key: row.key, has_value: true, value_source: 'manual', secret: Boolean(allowed.get(row.key)?.secret) }))],
+          versionNote: job.configDraft?.versionNote ?? job.versionNote ?? '',
+          storageBindings: job.configDraft?.storageBindings,
+        }
+        job.confirmationToken = undefined
+        await this.save(root, job)
+        return
+      }
       await this.credentials.write(`draft-${id}`, Object.fromEntries(rows.map(row => [row.key, row.value])))
       scope.assertCurrent()
       job.configDraft = {
@@ -1049,8 +1095,8 @@ export class AppDelivery {
           resource_id: row.resource_id,
           resource_key: row.resource_key,
           local_connection_confirmed: row.local_connection_confirmed === true,
-          has_value: row.has_value === true,
-          ...(row.value_source === 'original' || row.value_source === 'manual' || row.value_source === 'resource' || row.value_source === 'configured'
+          has_value: row.has_value === true || Boolean(row.value),
+          ...(row.value_source === 'original' || row.value_source === 'manual' || row.value_source === 'resource' || row.value_source === 'configured' || row.value_source === 'generated'
             ? { value_source: row.value_source } : {}),
           ...(row.secret === true ? { secret: true } : {}),
         })),
@@ -1165,7 +1211,7 @@ export class AppDelivery {
     const allowUnresolved = hasQuestions || adminAccountPending
     // A complete AI proposal can keep its validated artifacts for the review
     // step. Blocked proposals need only validation until the user can continue.
-    const preparedRevision = options?.dockerfileOnly && !allowUnresolved ? randomUUID().replaceAll('-', '') : undefined
+    const preparedRevision = options?.dockerfileOnly && !allowUnresolved && proposal.config_format !== 1 ? randomUUID().replaceAll('-', '') : undefined
     const validated = await worker({
       action: preparedRevision ? 'bundle' : 'validate',
       revision: preparedRevision,
@@ -1221,13 +1267,16 @@ export class AppDelivery {
     })
   }
 
-  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, expected: string, autoPrepared = false) {
+  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, expected: string, autoPrepared = false, confirmedConfigs?: AppDocument[]) {
     job.status = 'preparing'
     job.failureStage = undefined
     job.error = undefined
     job.events.push('正在生成并检查交付包')
     await this.save(root, job)
     try {
+      if (job.proposal?.config_format === 1) {
+        job.proposal = { ...job.proposal, effective_configs: confirmedConfigs ?? await this.previewDeliveryConfig(job, root, expected, signal, true) }
+      }
       const prepared = this.preparedProposals.get(job.id)
       const reusable = prepared && prepared.proposalHash === fingerprint(job.proposal) ? prepared : undefined
       const revision = reusable?.revision ?? randomUUID().replaceAll('-', '')
@@ -1269,6 +1318,8 @@ export class AppDelivery {
         await this.credentials.write(`skill-credentials-${job.id}-${revision}`, result.skill_credentials)
       }
       if (job.proposal?.delivery_format === 1) {
+        const generated = await this.generatedConfigValues(job, true)
+        job.generatedConfigKeys = Object.keys(generated)
         job.archivedRevision = await this.archivePreparedRevision(root, job, revision, expected)
         job.events.push('本轮改造制品已归档')
       }
@@ -1328,6 +1379,60 @@ export class AppDelivery {
     }
     return String(receipt.revision)
   }
+  async resolveResourceValues(slug: string, bindings: AppDocument[], expected: string): Promise<Record<string, string>> {
+    if (!bindings.length) return {}
+    const result = await this.platform(`/${slug}/config-values`, expected, {
+      body: { bindings: bindings.map(({ key, resource_id, resource_key }) => ({ key, resource_id, resource_key })) },
+    })
+    return result.values ?? {}
+  }
+
+  async previewDeliveryConfig(job: DeliveryJob, root: string, expected: string, signal: AbortSignal, allocate = false) {
+    const declarations: AppDocument[] = job.proposal?.contract?.configs ?? []
+    if (!declarations.length) return []
+    const [original, generated, manual, active] = await Promise.all([
+      worker({ action: 'original_config_values', root, configs: declarations }, signal),
+      this.generatedConfigValues(job, allocate),
+      job.configDraft ? this.credentials.read(`draft-${job.id}`) : {} as Record<string, string>,
+      job.upgrade || job.published ? this.platform(`/${job.slug}`, expected) : undefined,
+    ])
+    const inputs = new Map(job.configDraft?.rows.map(row => [row.key, row]))
+    const prior = new Map<string, AppDocument>((active?.app_config ?? []).map((row: AppDocument) => [row.key, row]))
+    const rows = declarations.map(c => {
+      const draft = inputs.get(c.key)
+      const old = c.value_plan?.kind === 'inherit' ? prior.get(c.key) : undefined
+      const resource_id = draft ? draft.resource_id : old?.resource_id ?? c.resource_id
+      const resource_key = draft ? draft.resource_key : old?.resource_key ?? c.resource_key
+      const kind = c.value_plan?.kind
+      const value = resource_id ? '' : draft?.value_source === 'manual' ? manual[c.key] ?? ''
+        : old ? old.value ?? '' : kind === 'generate' ? generated[c.key] ?? ''
+        : c.value ?? (kind === 'input' ? '' : original[c.key] ?? c.default ?? c.app_default ?? '')
+      return { key: c.key, description: c.description ?? '', required: Boolean(c.required), secret: Boolean(c.secret),
+        value, resource_id, resource_key, value_source: resource_id ? 'resource' : draft?.value_source ??
+          (old ? 'configured' : kind === 'generate' ? 'generated' : original[c.key] !== undefined ? 'original' : 'manual') }
+    })
+    const resolved = await this.resolveResourceValues(job.slug, rows.filter(row => row.resource_id), expected)
+    return rows.map(row => row.resource_id ? { ...row, value: resolved[row.key] ?? '' } : row)
+  }
+
+  private async generatedConfigValues(job: DeliveryJob, allocate = false): Promise<Record<string, string>> {
+    const plans = ((job.proposal?.contract?.configs ?? []) as AppDocument[]).filter(c => c.value_plan?.kind === 'generate')
+    if (!plans.length) return {}
+    const namespace = `generated-config-${job.id}`
+    const prior = await this.credentials.read(namespace)
+    const stored = { ...prior }
+    const values: Record<string, string> = Object.create(null)
+    for (const { key, value_plan: { bytes, encoding } } of plans) {
+      if (!Number.isInteger(bytes) || bytes < 16 || bytes > 128 || !['base64', 'base64url', 'hex'].includes(encoding)) {
+        throw new Error(`配置 ${key} 的生成规格无效`)
+      }
+      const id = fingerprint({ key, bytes, encoding })
+      if (allocate && !stored[id]) stored[id] = randomBytes(bytes).toString(encoding as BufferEncoding)
+      if (stored[id]) values[key] = stored[id]
+    }
+    if (Object.keys(stored).length !== Object.keys(prior).length) await this.credentials.write(namespace, stored)
+    return values
+  }
   private async deploymentConfiguration(job: DeliveryJob, input: AppDocument, expected: string) {
     const migrationApproved = job.proposal?.contract?.data_plan?.strategy === 'postgres_copy' && input.migrationApproved === true
     if (job.proposal?.contract?.data_plan?.strategy === 'postgres_copy' && !migrationApproved) throw new Error('请确认本轮数据库迁移和停写窗口')
@@ -1338,7 +1443,12 @@ export class AppDelivery {
       throw new Error('部署配置必须来自当前交付清单。如需新增配置，请返回改造会话更新方案。')
     }
     const origValues = await this.credentials.read(`orig-${job.id}`)
+    const generated = await this.generatedConfigValues(job)
     const configs = rawConfigs.map(c => {
+      if (!c.resource_id && !c.value && c.value_source === 'generated') {
+        if (!generated[c.key]) throw new Error(`配置 ${c.key} 的生成值不可用，请重新生成交付包`)
+        return { ...c, value: generated[c.key], value_source: 'generated' }
+      }
       if (!c.resource_id && !c.value && (c.value_source === 'original' || (!c.has_value && c.value_source !== 'manual')) && origValues[c.key]) return { ...c, value: origValues[c.key], value_source: 'original' }
       return { ...c, value_source: c.resource_id ? 'resource' : 'manual' }
     })
@@ -1398,14 +1508,17 @@ export class AppDelivery {
         throw new Error('PORT 必须与已确认的容器端口一致；如需更换端口，请重新分析生成交付包')
       }
     }
-    for (const c of declarations) {
+    const missing = declarations.filter(c => {
       const selected = configs.find(i => i.key === c.key)
       const preservedOnlineSecret = Boolean((job.upgrade || job.published) && selected?.has_value)
-      if (c.required && c.key !== 'PORT' && !selected?.value && !selected?.resource_id && !preservedOnlineSecret) throw new Error(`请填写必填配置 ${c.key}，或选择匹配的平台托管资源。`)
-    }
+      return c.required && c.key !== 'PORT' && !selected?.value && !selected?.resource_id && !preservedOnlineSecret
+    })
+    if (missing.length) throw new Error(`请填写必填配置：${missing.map(c => c.key).join('、')}，或选择匹配的平台托管资源。`)
     const bindings = configs.map(c => ({
       key: c.key,
       value: c.value,
+      ...(declarations.some(item => item.key === c.key && item.secret) ? { secret: true } : {}),
+      ...(declarations.some(item => item.key === c.key && item.preserve_on_upgrade) ? { preserve_on_upgrade: true } : {}),
       value_source: c.value_source,
       ...(c.has_value === true && !c.value && !c.resource_id ? { has_value: true } : {}),
       resource_id: c.resource_id,
@@ -1423,7 +1536,25 @@ export class AppDelivery {
       const { root, job } = await this.open(scope.directory, id)
       if (job.status !== 'ready' || !job.proposal || input.artifactHash !== fingerprint(job.hashes)) throw new Error('交付包已变化，请重新核对')
       await worker({ action: 'validate_deployment_scope', root, proposal: job.proposal }, scope.signal)
-      const { digest } = await this.deploymentConfiguration(job, input, expected)
+      let config = await this.deploymentConfiguration(job, input, expected)
+      if (job.proposal.config_format === 1) {
+        const resources = await this.resolveResourceValues(job.slug, config.bindings.filter(row => row.resource_id), expected)
+        const byKey = new Map(config.bindings.map(row => [row.key, row]))
+        const finalValues = (job.proposal.contract.configs as AppDocument[] ?? []).map(c => {
+          const row = byKey.get(c.key)
+          return { key: c.key, description: c.description ?? '', required: Boolean(c.required), secret: Boolean(c.secret),
+            value: row?.resource_id ? resources[c.key] ?? '' : row?.value ?? '',
+            resource_id: row?.resource_id, resource_key: row?.resource_key,
+            value_source: row?.value_source ?? 'manual' }
+        })
+        const existing = job.proposal.effective_configs ?? []
+        if (fingerprint(finalValues) !== fingerprint(existing)) {
+          await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected, false, finalValues)
+          if (job.status !== 'ready' || job.error) throw new Error(job.error || '无法按确认值重新生成交付包')
+          config = await this.deploymentConfiguration(job, input, expected)
+        }
+      }
+      const digest = config.digest
       const prior = await this.credentials.read(`confirm-${id}`)
       scope.assertCurrent()
       if (!job.confirmationToken || prior.digest !== digest) {
@@ -1432,7 +1563,7 @@ export class AppDelivery {
         await this.credentials.write(`confirm-${id}`, { digest })
         await this.save(root, job)
       }
-      return { confirmationToken: job.confirmationToken, requestId: job.requestId }
+      return { confirmationToken: job.confirmationToken, requestId: job.requestId, artifactHash: fingerprint(job.hashes) }
     })
   }
   async publish(id: string, input: AppDocument, expected: string) {
@@ -1464,6 +1595,9 @@ export class AppDelivery {
         if (job.archivedRevision?.replaceAll('-', '') !== job.revision) throw new Error('本轮交付尚未归档，请重新准备')
         const capabilities = await this.platform('/resources', expected, { query: { slug: job.slug } })
         if (capabilities.delivery_format !== 1) throw new Error('当前 Platform 版本不支持技能驱动交付，请升级平台后重新发布')
+        if (job.proposal.config_format === 1 && (capabilities.config_format !== 1 || capabilities.visible_config_values !== true)) {
+          throw new Error('当前 Platform 版本不支持明文配置确认和版本归档，请先升级平台')
+        }
         const plan = await readFile(join(folder, 'delivery.json'))
         if (hash(plan) !== job.hashes?.['delivery.json']) throw new Error('交付清单摘要不一致，拒绝发布')
         form.append('delivery_plan', plan.toString('utf8'))
@@ -1827,7 +1961,7 @@ export class AppDelivery {
         query: selection.mount ? { mount: String(selection.mount) } : undefined }
     }
     const { version, artifact } = selection
-    if (!Number.isSafeInteger(version) || version < 1 || !['app.tar', 'skill.zip', 'Dockerfile', 'manifest.json', 'delivery.json'].includes(artifact)) {
+    if (!Number.isSafeInteger(version) || version < 1 || !['app.tar', 'skill.zip', 'Dockerfile', 'manifest.json', 'delivery.json', 'confirmed-deployment.json'].includes(artifact)) {
       throw new Error('无效版本文件')
     }
     return { path: `/${slug}/versions/${version}/artifacts/${artifact}`, filename: `${slug}-v${version}-${artifact}` }

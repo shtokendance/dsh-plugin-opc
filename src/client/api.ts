@@ -7,6 +7,7 @@ export interface AppModelGroup {
 export interface AppConfigItem {
   key: string
   value: string
+  effective_value?: string
   app_default?: string
   original_value?: string
   description?: string
@@ -14,6 +15,7 @@ export interface AppConfigItem {
   secret?: boolean
   has_value?: boolean
   has_original_value?: boolean
+  needs_user_input?: boolean
   is_example_source?: boolean
   is_custom?: boolean
   local_connection_confirmed?: boolean
@@ -193,7 +195,7 @@ export interface AppDeliveryJob {
       description?: string
       runtime?: { language?: string; version?: string; port?: number }
       health?: { path?: string; status?: number; json_contains?: Record<string, unknown> }
-      configs?: { key: string; default?: string; app_default?: string; description?: string; secret?: boolean; required?: boolean; has_original_value?: boolean; source?: { path: string; keys: (string | number)[] } }[]
+      configs?: { key: string; default?: string; app_default?: string; value_plan?: { kind: string }; description?: string; secret?: boolean; required?: boolean; has_original_value?: boolean; source?: { path: string; keys: (string | number)[] } }[]
       resources?: { id?: string; type?: string; purpose?: string; env?: string[]; current_hint?: string }[]
       storage_mounts?: AppStorageMountDetail[]
       verification_credential_fields?: { key: string; kind: 'username' | 'password' | 'session' }[]

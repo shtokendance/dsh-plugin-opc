@@ -3,6 +3,7 @@ import type { AppConfigItem, AppDeliveryJob, ResourceSummary } from './api.ts'
 export interface ConfigDraftRow {
   key: string
   value?: string
+  effective_value?: string
   resource_id?: string
   resource_key?: string
   has_value?: boolean
@@ -26,6 +27,7 @@ export interface ConfigDraftSnapshot {
   artifactHash?: string
   rows?: ConfigDraftRow[]
   originalValues?: Record<string, string>
+  dockerfile?: string
   versionNote?: string
   storageBindings?: Record<string, string>
   sourceConfiguration?: SourceConfiguration
@@ -92,8 +94,8 @@ export function mergeJobConfigs(
     ? job.runtime_configs.map(c => ({ ...c }))
     : (job.proposal?.contract?.configs ?? []).map(c => ({
         key: c.key,
-        value: c.secret ? '' : c.default ?? '',
-        app_default: c.secret ? '' : c.app_default ?? '',
+        value: c.default ?? '',
+        app_default: c.app_default ?? '',
         description: c.description ?? '',
         required: Boolean(c.required),
         secret: Boolean(c.secret),
@@ -106,7 +108,7 @@ export function mergeJobConfigs(
   const baseList: AppConfigItem[] = rawList.map(c => {
     const contractItem = contractConfigs.get(c.key)
     const origVal = originalValues[c.key]
-    const appDefault = c.secret ? '' : c.app_default ?? contractItem?.app_default ?? ''
+    const appDefault = c.app_default ?? contractItem?.app_default ?? ''
     const hasOrig = Boolean(c.has_original_value || c.value_source === 'original' || (origVal !== undefined && origVal !== ''))
 
     if (c.key === 'PORT') {
@@ -123,19 +125,10 @@ export function mergeJobConfigs(
     }
 
     if (c.resource_id) {
-      return { ...c, value: '', original_value: c.secret ? '' : (origVal ?? ''), app_default: appDefault, value_source: 'resource' }
+      return { ...c, value: '', original_value: origVal ?? '', app_default: appDefault, value_source: 'resource' }
     }
-    if (c.secret) {
-      return {
-        ...c,
-        value: '',
-        original_value: '',
-        app_default: '',
-        has_value: Boolean(c.has_value || hasOrig),
-        has_original_value: hasOrig,
-        value_source: hasOrig ? 'original' : 'manual',
-      }
-    }
+    if (c.value) return { ...c, original_value: origVal ?? '', app_default: appDefault }
+    if (c.value_source === 'generated') return { ...c, value: '' }
 
     if (origVal !== undefined && origVal !== '') {
       return {
@@ -193,11 +186,13 @@ export function mergeJobConfigs(
         value: '',
         resource_id: saved.resource_id,
         resource_key: saved.resource_key,
+        effective_value: saved.effective_value ?? (item.resource_id === saved.resource_id ? item.effective_value : undefined),
         value_source: 'resource',
         local_connection_confirmed: saved.local_connection_confirmed === true,
       }
     }
 
+    if (saved.value_source === 'generated' && item.value_source === 'generated' && !saved.value) return item
     if (saved.value_source === 'configured' && saved.has_value && !saved.value) {
       return { ...item, value: '', resource_id: undefined, resource_key: undefined, has_value: true, value_source: 'configured' }
     }
@@ -217,7 +212,7 @@ export function mergeJobConfigs(
         ...item,
         value: saved.value,
         resource_id: undefined,
-        value_source: saved.value === item.original_value && item.has_original_value ? 'original' : 'manual',
+        value_source: saved.value_source === 'configured' ? 'configured' : saved.value === item.original_value && item.has_original_value ? 'original' : 'manual',
         local_connection_confirmed: saved.local_connection_confirmed === true,
       }
     }
@@ -307,27 +302,53 @@ export function sanitizeConfigRowsForApi(
   return rows
 }
 
-export function validateConfigsForPublish(configs: AppConfigItem[], expectedPort?: number): string | null {
+export type ConfigPublishIssue = {
+  kind: 'key' | 'port' | 'loopback' | 'required'
+  message: string
+}
+
+export function getConfigPublishIssues(configs: AppConfigItem[], expectedPort?: number): Map<number, ConfigPublishIssue> {
   const seen = new Set<string>()
-  for (const item of configs) {
+  const issues = new Map<number, ConfigPublishIssue>()
+  configs.forEach((item, index) => {
     const key = (item.key || '').trim()
-    if (!key) return '存在未填写变量名的配置项，请填写或删除空白行'
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return `配置变量名格式无效：${key}`
-    if (seen.has(key)) return `存在重复的配置变量名：${key}`
+    if (!key) {
+      issues.set(index, { kind: 'key', message: '存在未填写变量名的配置项，请填写或删除空白行' })
+      return
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      issues.set(index, { kind: 'key', message: `配置变量名格式无效：${key}` })
+      return
+    }
+    if (seen.has(key)) {
+      issues.set(index, { kind: 'key', message: `存在重复的配置变量名：${key}` })
+      return
+    }
     seen.add(key)
 
     if (key === 'PORT' && (item.resource_id || (item.value && expectedPort && item.value !== String(expectedPort)))) {
-      return `PORT 必须与已确认的容器端口（${expectedPort}）一致，如需修改请返回上一步调整`
+      issues.set(index, { kind: 'port', message: `PORT 必须与已确认的容器端口（${expectedPort}）一致，如需修改请返回上一步调整` })
+      return
     }
     if (!item.resource_id && needsConnectionDecision(item)) {
-      return `配置项 ${key} 当前指向本地回环地址（localhost / 127.0.0.1），请选用平台托管资源、填写可达主机地址，或明确勾选确认同容器运行`
+      issues.set(index, { kind: 'loopback', message: `配置项 ${key} 当前指向本地回环地址（localhost / 127.0.0.1），请选用平台托管资源、填写可达主机地址，或明确勾选确认同容器运行` })
+      return
     }
     const preservesOriginal =
       item.value_source === 'original' && Boolean(item.has_original_value || item.has_value)
     const preservesOnline = item.value_source !== 'manual' && Boolean(item.has_value)
     if (item.required && key !== 'PORT' && !item.resource_id && !item.value && !preservesOriginal && !preservesOnline) {
-      return `请填写必填配置项：${key}，或选择匹配的平台托管资源`
+      issues.set(index, { kind: 'required', message: '请填写部署生效值' })
     }
+  })
+  return issues
+}
+
+export function validateConfigsForPublish(configs: AppConfigItem[], expectedPort?: number): string | null {
+  const missing: string[] = []
+  for (const [index, issue] of getConfigPublishIssues(configs, expectedPort)) {
+    if (issue.kind !== 'required') return issue.message
+    missing.push(configs[index]!.key.trim())
   }
-  return null
+  return missing.length ? `请填写必填配置项：${missing.join('、')}，或选择匹配的平台托管资源` : null
 }

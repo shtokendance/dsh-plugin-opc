@@ -125,7 +125,7 @@ test('analysis replies preserve the bound task and only a complete proposal is b
     assert.equal(ready.analysisSessionId, analysisSessionId)
     assert.equal(ready.revisionCount, 2)
     assert.match(ready.feedbackHistory, /保留现在使用的数据源/)
-    assert.doesNotMatch(ready.feedbackHistory, /chat-test-secret/)
+    assert.match(ready.feedbackHistory, /chat-test-secret/)
     assert.ok(ready.artifactHash)
     assert.equal(ready.deploymentReviewPending, true)
     await delivery.saveConfigDraft(created.id, { artifactHash: ready.artifactHash, rows: [] }, expected)
@@ -1878,5 +1878,112 @@ test('inventory exposes source_configuration metadata without secret values', as
     assert.doesNotMatch(JSON.stringify(inv), /super-secret-value/)
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('plaintext input, generated values and final configuration artifacts stay consistent', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-config-contract-'))
+  const values = new Map<string, Record<string, string>>()
+  const contexts = new ContextStore()
+  contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+  const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+  const delivery = new AppDelivery(core, home, {
+    async read(id) { return values.get(id) ?? {} },
+    async write(id, value) { values.set(id, value) },
+  })
+  const expected = contexts.applicationContextId!
+  const url = 'http://test-app.apps.example.test'
+  const digest = async (form: FormData, key: string) => createHash('sha256')
+    .update(Buffer.from(await (form.get(key) as Blob).arrayBuffer())).digest('hex')
+  let requestedConfig: AppDocument[] = []
+  delivery.platform = async (path, _context, options) => {
+    const form = options?.form
+    if (path === '/check-slug') return { available: true, app_url: url }
+    if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, resources: [] }
+    if (path === '/deliveries' && form) return {
+      revision: form.get('revision'), slug: form.get('slug'),
+      app_tar_sha256: await digest(form, 'app_tar'), skill_zip_sha256: await digest(form, 'skill_zip'),
+      delivery_plan_sha256: await digest(form, 'delivery_plan'),
+    }
+    if (path === '/publish' && form) {
+      requestedConfig = JSON.parse(String(form.get('app_config')))
+      return { app_url: url, status: 'building', version: 1 }
+    }
+    throw new Error('unexpected fixture route')
+  }
+  try {
+    const source = join(home, 'source')
+    await mkdir(source)
+    await writeFile(join(source, 'main.py'), 'import os\nos.environ["FIELD_KEY"]\nos.environ["APP_PASSWORD"]\n')
+    const created = await delivery.create({ name: '配置示例', slug: 'test-app', source }, 'parent', expected)
+    const root = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context), created.id)
+    const base = proposal(url)
+    const declarations = [
+      { key: 'FIELD_KEY', description: '读取已有数据的加密密钥', secret: true, required: true, default: '',
+        preserve_on_upgrade: true, value_plan: { kind: 'generate', bytes: 32, encoding: 'base64' } },
+      { key: 'APP_PASSWORD', description: '首次初始化所需口令', secret: true, required: true, default: '',
+        value_plan: { kind: 'input' } },
+    ]
+    const plan = {
+      ...base, delivery_format: 1, config_format: 1,
+      skill_markdown: '---\nname: app-test-app\ndescription: 查询示例\n---\n查询记录。\n',
+      contract: { ...base.contract, configs: declarations, storage_mounts: [] },
+    }
+    const run = async (candidate: AppDocument) => {
+      const job = JSON.parse(await readFile(join(root, 'job.json'), 'utf8'))
+      job.status = 'analyzing'
+      await writeFile(join(root, 'job.json'), JSON.stringify(job))
+      await delivery.submit(job, root, candidate, new AbortController().signal, { dockerfileOnly: true })
+      return delivery.prepare(job.id, fingerprint(job.proposal), expected)
+    }
+    await assert.rejects(run({ ...plan, contract: { ...plan.contract,
+      configs: [{ ...declarations[0], value_plan: undefined }, declarations[1]] } }), /必须声明 value_plan/)
+    const ready = await run({ ...plan, summary: '用户已确认初值 FixturePrivate8833' })
+    const generatedStore = values.get(`generated-config-${ready.id}`)!
+    assert.equal(Object.keys(generatedStore).length, 1)
+    const [generated] = Object.values(generatedStore)
+    assert.equal(Buffer.from(generated, 'base64').length, 32)
+    const status = ready.runtime_configs.find((item: AppDocument) => item.key === 'FIELD_KEY')
+    assert.equal(status.has_value, true)
+    assert.equal(status.value, generated)
+    assert.equal(status.value_source, 'generated')
+    assert.equal(JSON.stringify(ready).includes(generated), true)
+    const rows = [
+      { key: 'FIELD_KEY', value: '', has_value: true, value_source: 'generated', secret: true },
+      { key: 'APP_PASSWORD', value: 'FixtureUserPassword8821', value_source: 'manual', secret: true },
+    ]
+    await assert.rejects(delivery.saveConfigDraft(ready.id, {
+      artifactHash: ready.artifactHash, protectedInputs: true, rows: [{ key: 'FIELD_KEY', value: 'unexpected direct value' }],
+    }, expected), /表单只接收/)
+    await delivery.saveConfigDraft(ready.id, { artifactHash: ready.artifactHash, protectedInputs: true, rows: [rows[1]] }, expected)
+    const afterInput = await delivery.getJob(ready.id, expected)
+    assert.equal(afterInput.runtime_configs.find((item: AppDocument) => item.key === 'APP_PASSWORD').has_value, true)
+    assert.equal(JSON.stringify(afterInput).includes(rows[1].value), false)
+    await delivery.reopenReview(ready.id, expected)
+    const rebuilt = await run({ ...plan, summary: '重新核对应用配置' })
+    assert.equal(Object.values(values.get(`generated-config-${ready.id}`)!)[0], generated)
+    const draft = await delivery.configDraft(ready.id, expected)
+    assert.equal(draft?.rows.find((item: AppDocument) => item.key === 'APP_PASSWORD')?.value, rows[1].value)
+    assert.match(draft?.dockerfile ?? '', /^FROM python/)
+    const local = await delivery.localArtifact(ready.id, 'delivery.json', expected)
+    const prepared = JSON.parse(Buffer.from(local.base64, 'base64').toString('utf8'))
+    assert.equal(prepared.effective_configs.find((row: AppDocument) => row.key === 'FIELD_KEY').value, generated)
+    assert.equal(prepared.effective_configs.find((row: AppDocument) => row.key === 'APP_PASSWORD').value, rows[1].value)
+    rows[1].value = 'FixtureUpdatedBeforeConfirmation192'
+    const input = { artifactHash: rebuilt.artifactHash, config: rows, storageBindings: {} }
+    const { confirmationToken, artifactHash } = await delivery.confirmDeployment(ready.id, input, expected)
+    assert.notEqual(artifactHash, rebuilt.artifactHash)
+    const finalFile = await delivery.localArtifact(ready.id, 'delivery.json', expected)
+    const final = JSON.parse(Buffer.from(finalFile.base64, 'base64').toString('utf8'))
+    assert.equal(final.effective_configs.find((row: AppDocument) => row.key === 'APP_PASSWORD').value, rows[1].value)
+    const manifestFile = await delivery.localArtifact(ready.id, 'app-manifest.json', expected)
+    const manifest = JSON.parse(Buffer.from(manifestFile.base64, 'base64').toString('utf8'))
+    assert.equal(manifest.configs.find((row: AppDocument) => row.key === 'APP_PASSWORD').value, rows[1].value)
+    await delivery.publish(ready.id, { ...input, artifactHash, confirmationToken }, expected)
+    assert.equal(requestedConfig.find(row => row.key === 'FIELD_KEY')?.value, generated)
+    assert.equal(requestedConfig.find(row => row.key === 'FIELD_KEY')?.preserve_on_upgrade, true)
+    assert.equal(requestedConfig.find(row => row.key === 'APP_PASSWORD')?.value, rows[1].value)
+  } finally {
+    await rm(home, { recursive: true, force: true })
   }
 })

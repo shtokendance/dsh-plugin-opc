@@ -14,7 +14,7 @@ export function proposalParameters(port: number, portLocked = true) {
   // Keep fields optional at the top level for the legacy proposal string.
   return {
     summary: { ...str, description: '中文改造摘要；使用结构化参数时必填' },
-    skill_markdown: { ...str, description: '按当前改造技能要求生成可用的应用 SKILL.md，含 YAML 名称与说明，记录真实业务操作与调用方式，只写凭据引用' },
+    skill_markdown: { ...str, description: '按当前改造技能要求生成可用的应用 SKILL.md，含 YAML 名称与说明，记录真实业务操作与调用方式，通过配置键引用部署值' },
     issues: { ...objects, items: { ...object, properties: {
       id: text, evidence: text, impact: text, recommendation: text,
     } } },
@@ -45,12 +45,18 @@ export function proposalParameters(port: number, portLocked = true) {
         migration_files: strings,
       } },
       health: { ...object, description: '可选。仅用于标识源码已有的健康入口，业务验证不得使用该入口。没有则省略。', properties: { path: text, status: { type: 'integer' }, json_contains: object } },
-      configs: { ...objects, description: '填写应用实际使用的配置键。非敏感默认值必须能从源码确认；凭据和示例占位符不能写成默认值。由平台注入时写资源 ID 和资源字段名。', items: { ...object, properties: {
-        key: text, default: text, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
-        app_default: { ...str, description: '仅非敏感配置可填写源码中的兜底默认值（只读展示参考，不会自动注入）' },
-        source: { ...object, description: '使用 path 和 keys 引用源配置，禁止写入真实秘密值' },
+      configs: { ...objects, description: '填写应用实际使用的配置键。默认值必须能从源码确认，不能使用示例占位符。用户给定的实际值写 value。由平台注入时写资源 ID 和资源字段名。', items: { ...object, properties: {
+        key: text, default: text, value: { ...str, description: '本次部署已确定的实际值，包括用户给出的口令或连接串。未确定时省略。' }, secret: { ...bool, required: true }, required: { ...bool, required: true }, description: str,
+        app_default: { ...str, description: '填写源码中的兜底默认值（只读展示参考，不会自动注入）' },
+        source: { ...object, description: '使用 path 和 keys 定位源配置' },
         resource_id: str,
         resource_key: str,
+        preserve_on_upgrade: { ...bool, description: '该值用于读取历史数据时设为 true，例如字段加密密钥或查询盐。' },
+        value_plan: { ...object, description: '每个必填项声明取值方式。generate 只提交生成规格，由系统生成；input 由用户在受保护配置表单填写。', properties: {
+          kind: { ...text, enum: ['default', 'source', 'resource', 'input', 'inherit', 'generate'] },
+          bytes: { type: 'integer', description: 'generate 时必填，随机字节数（16–128）' },
+          encoding: { ...str, enum: ['base64', 'base64url', 'hex'] },
+        } },
       } } },
       resources: objects,
       storage_mounts: { ...objects, required: true, description: '完整挂载清单，没有挂载时为 []。' },

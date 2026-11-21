@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import type { AppConfigItem, ResourceSummary } from './api.ts'
 import {
   isContainerDefaultConfig,
   needsConnectionDecision,
   needsContainerBindWarning,
+  type ConfigPublishIssue,
 } from './app-config-helpers.ts'
 
 export { isContainerDefaultConfig, needsConnectionDecision, needsContainerBindWarning }
@@ -43,9 +44,21 @@ const names: Record<string, string> = {
 export const configName = (item: AppConfigItem) =>
   names[item.key] || item.description?.split(/[。；\n]/)[0] || item.key || '新增配置'
 
+function resourceField(item: AppConfigItem, resource: ResourceSummary) {
+  if (item.resource_key && resource.env_keys?.includes(item.resource_key)) return item.resource_key
+  return resource.env_keys?.includes(item.key) ? item.key : undefined
+}
+
+function connectionType(resource?: ResourceSummary) {
+  return (resource?.type || '').toLowerCase().replace('postgresql', 'postgres')
+}
+
+function groupedConnection(resource?: ResourceSummary) {
+  return /^(?:postgres(?:ql)?|mysql|mariadb|sqlserver|redis)$/i.test(resource?.type || '')
+}
+
 function matches(item: AppConfigItem, resource: ResourceSummary) {
-  if (resource.id === item.resource_id && item.resource_key && resource.env_keys?.includes(item.resource_key)) return true
-  if (!resource.env_keys?.includes(item.key)) return false
+  if (!resourceField(item, resource)) return false
   if (/DATABASE|DB_DSN|CONNECTION_STRING/i.test(item.key)) {
     const type =
       `${item.value} ${item.original_value || ''} ${item.description || ''}`
@@ -82,17 +95,13 @@ function defaultDisplayValue(item: AppConfigItem, original?: AppConfigItem, lock
     return `与容器端口 ${lockedPort} 一致`
   }
   if (!original) return '用户新增（无原应用默认值）'
+  if (original.resource_id) return '由所选资源提供'
+  if (original.value_source === 'generated') return '由系统生成'
   const hasOrigFile = Boolean(original.has_original_value || original.value_source === 'original')
-  if (original.secret) {
-    if (hasOrigFile) return '••••••••（原应用敏感值已隐藏）'
-    if (original.is_example_source) return '示例模板占位值（不自动注入）'
-    if (original.has_value) return '••••••••（沿用线上已配置值）'
-    return '无默认值'
-  }
   const origText = original.original_value ?? original.value ?? ''
   if (origText) return origText
   if (original.app_default) return `源码默认：${original.app_default}`
-  if (original.has_value) return '（线上已配置值）'
+  if (original.value_source === 'configured' && original.has_value) return '（沿用当前版本）'
   return '无默认值'
 }
 
@@ -105,6 +114,7 @@ export function AppDeliveryConfig({
   compact = false,
   lockedPort,
   readOnly = false,
+  publishIssues,
 }: {
   configs: AppConfigItem[]
   allowNew?: boolean
@@ -113,9 +123,10 @@ export function AppDeliveryConfig({
   compact?: boolean
   lockedPort?: number
   readOnly?: boolean
+  publishIssues?: ReadonlyMap<number, ConfigPublishIssue>
   onChange: (items: AppConfigItem[]) => void
 }) {
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({})
+  const configId = useId()
 
   const update = (index: number, value: AppConfigItem) =>
     onChange(configs.map((item, i) => (i === index ? value : item)))
@@ -137,6 +148,8 @@ export function AppDeliveryConfig({
         : { label: '待填写', tone: 'oa-pill-warn', changed: true }
     }
     if (item.secret) {
+      if (item.value_source === 'generated' && item.has_value) return { label: '已生成', tone: 'oa-pill-ok', changed: false }
+      if (item.value_source === 'configured' && item.has_value) return { label: '沿用当前版本', tone: 'oa-pill-ok', changed: false }
       const preserved =
         !item.value &&
         ((item.value_source === 'original' && Boolean(original.has_original_value || original.has_value)) ||
@@ -176,27 +189,43 @@ export function AppDeliveryConfig({
   const renderConfigCard = (item: AppConfigItem, index: number) => {
     const original = item.is_custom ? undefined : originals.find(o => o.key === item.key)
     const isPortLocked = lockedPort !== undefined && item.key === 'PORT'
+    const selected = resources.find(r => r.id === item.resource_id)
+    const originalResource = resources.find(r => r.id === original?.resource_id)
+    const connection = selected ?? originalResource
+    const group = groupedConnection(connection)
+      ? configs.filter(config => config.resource_id === connection?.id ||
+          originals.some(row => row.key === config.key && row.resource_id === originalResource?.id && row.resource_id))
+      : [item]
     const candidates = isPortLocked
       ? []
       : resources.filter(
           r =>
+            (!groupedConnection(connection) || connectionType(connection) === connectionType(r)) &&
             matches(original || item, r) &&
+            group.every(config => resourceField(config, r)) &&
             (r.type !== 'minio-app-storage' || configs.some(config => config.resource_id === r.id)),
         )
-    const selected = resources.find(r => r.id === item.resource_id)
     const status = getStatus(item, original, selected)
     const bindWarning = needsContainerBindWarning(item, original)
     const loopbackWarning = needsConnectionDecision(item)
-    const showWarning = bindWarning || loopbackWarning || status.tone === 'oa-pill-warn'
-    const revealKey = item.key ? `key:${item.key}` : `idx:${index}`
-    const isRevealed = Boolean(revealed[revealKey])
+    const issue = publishIssues?.get(index)
+    const keyIssue = issue?.kind === 'key' ? issue : undefined
+    const valueIssue = issue?.kind === 'key' ? undefined : issue
+    const issueId = `${configId}-issue-${index}`
+    const valueIssueProps = valueIssue ? { 'aria-invalid': true, 'aria-describedby': issueId } : {}
+    const showWarning = issue || bindWarning || loopbackWarning || status.tone === 'oa-pill-warn'
     const friendly = configName(item)
     const leftValue = defaultDisplayValue(item, original, lockedPort)
-    const hasOriginalSecret = Boolean(
-      original?.secret &&
-        ((original.has_original_value || original.value_source === 'original') || original.has_value),
-    )
+    const hasOriginalSecret = Boolean(item.secret && (
+      (item.value_source === 'configured' && item.has_value) ||
+      (item.value_source === 'original' && original?.has_original_value)
+    ))
     const portValue = isPortLocked ? String(lockedPort) : item.value
+    const boundValue = (config: AppConfigItem) => {
+      const resource = resources.find(r => r.id === config.resource_id)
+      const preview = resource?.env_preview?.[config.resource_key || config.key]
+      return preview && preview !== '[REDACTED]' ? preview : config.effective_value ?? ''
+    }
 
     return (
       <article
@@ -211,6 +240,8 @@ export function AppDeliveryConfig({
             ) : (
               <input
                 aria-label="新增配置名称"
+                aria-invalid={keyIssue ? true : undefined}
+                aria-describedby={keyIssue ? issueId : undefined}
                 value={item.key}
                 disabled={readOnly}
                 placeholder="环境变量名，如 WEBHOOK_URL"
@@ -227,7 +258,6 @@ export function AppDeliveryConfig({
             )}
             {friendly !== item.key && <span className="oa-cfg-friendly">{friendly}</span>}
             {item.required && <span className="oa-pill oa-pill-warn">必填</span>}
-            {item.secret && <span className="oa-pill">敏感</span>}
             {isPortLocked && <span className="oa-pill oa-pill-accent">与容器端口联动</span>}
             {original?.is_example_source && <span className="oa-pill">示例模板</span>}
           </div>
@@ -238,12 +268,10 @@ export function AppDeliveryConfig({
               <button
                 type="button"
                 className="oa-btn-link"
-                onClick={() =>
-                  update(index, {
-                    ...original,
-                    local_connection_confirmed: false,
-                  })
-                }
+                onClick={() => onChange(configs.map(config => {
+                  const prior = group.includes(config) && originals.find(row => row.key === config.key)
+                  return prior ? { ...prior, local_connection_confirmed: false } : config
+                }))}
               >
                 恢复默认
               </button>
@@ -258,6 +286,7 @@ export function AppDeliveryConfig({
               </button>
             )}
           </div>
+          {keyIssue && <p id={issueId} className="oa-config-field-warning oa-config-key-warning">{keyIssue.message}</p>}
         </header>
 
         <div className="oa-grid-2" style={{ gap: 10, fontSize: 12 }}>
@@ -278,30 +307,18 @@ export function AppDeliveryConfig({
           <div className="oa-field">
             <div className="oa-cfg-col-label">
               <span style={{ fontWeight: 600, color: 'var(--oa-ink)' }}>部署生效值</span>
-              {!original && !readOnly && (
-                <label className="oa-cfg-secret-toggle">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(item.secret)}
-                    onChange={e => update(index, { ...item, secret: e.target.checked })}
-                  />
-                  <span>敏感</span>
-                </label>
-              )}
               {selected && !readOnly && (
                 <button
                   type="button"
                   className="oa-btn-link"
                   onClick={() =>
-                    update(index, {
-                      ...item,
-                      value: '',
-                      resource_id: undefined,
-                      value_source: original?.has_original_value ? 'original' : 'manual',
-                    })
+                    onChange(configs.map(config => group.includes(config) ? {
+                      ...config, value: boundValue(config), resource_id: undefined, resource_key: undefined, effective_value: undefined,
+                      value_source: 'manual',
+                    } : config))
                   }
                 >
-                  取消绑定
+                  {group.length > 1 ? '整组改为手填' : '改为手填'}
                 </button>
               )}
             </div>
@@ -310,6 +327,7 @@ export function AppDeliveryConfig({
               <div className="oa-cfg-input-wrap">
                 <input
                   aria-label={`${item.key} 配置值`}
+                  {...valueIssueProps}
                   readOnly
                   value={portValue}
                   className="oa-input oa-mono oa-cfg-readonly"
@@ -318,8 +336,10 @@ export function AppDeliveryConfig({
             ) : selected ? (
               <input
                 aria-label={`${item.key} 配置值`}
+                {...valueIssueProps}
                 readOnly
-                value={`由「${selected.name}」自动注入`}
+                value={boundValue(item)}
+                placeholder={`由「${selected.name}」注入 · ${item.resource_key || item.key}`}
                 className="oa-input oa-cfg-readonly"
                 style={{ color: 'var(--oa-accent)' }}
               />
@@ -327,16 +347,19 @@ export function AppDeliveryConfig({
               <div className="oa-cfg-input-wrap">
                 <input
                   aria-label={`${item.key || '新增项'} 配置值`}
-                  type={item.secret && !isRevealed ? 'password' : 'text'}
+                  {...valueIssueProps}
+                  type="text"
                   disabled={readOnly}
                   value={item.value}
                   placeholder={
-                    hasOriginalSecret
+                    item.value_source === 'generated'
+                      ? '已生成，输入新值可替换'
+                      : hasOriginalSecret
                       ? '留空沿用原值，输入新值则覆盖'
                       : original?.app_default
                         ? `留空沿用源码默认 (${original.app_default})，或输入覆盖`
                         : item.required
-                          ? '请输入必填配置值，或选用下方平台资源'
+                          ? '请输入配置值'
                           : '选填，留空则不注入该环境变量'
                   }
                   className="oa-input oa-mono"
@@ -351,22 +374,20 @@ export function AppDeliveryConfig({
                     })
                   }
                 />
-                {item.secret && (
-                  <button
-                    type="button"
-                    className="oa-btn oa-btn-xs"
-                    onClick={() => setRevealed(prev => ({ ...prev, [revealKey]: !isRevealed }))}
-                  >
-                    {isRevealed ? '隐藏' : '显示'}
-                  </button>
-                )}
               </div>
+            )}
+            {valueIssue && (
+              <p id={issueId} className="oa-config-field-warning">
+                {valueIssue.kind === 'required' && candidates.length > 0
+                  ? `${valueIssue.message}，或选择下方可用的资源。`
+                  : valueIssue.message}
+              </p>
             )}
           </div>
         </div>
 
         {bindWarning && (
-          <div role="note" className="oa-alert oa-alert-warn oa-cfg-inline-warn">
+          <div role="note" className="oa-config-field-warning">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
               <span>容器内监听 <code>127.0.0.1 / localhost</code> 将导致外部访问与健康检查失败，建议改为 <code>0.0.0.0</code>。</span>
               {!readOnly && (
@@ -391,8 +412,10 @@ export function AppDeliveryConfig({
         )}
 
         {(loopbackWarning || item.local_connection_confirmed) && (
-          <div role="note" className="oa-alert oa-alert-warn oa-cfg-inline-warn">
-            <div>这个连接指向容器自己，部署后不能连接你电脑上的服务。请选择下方平台资源，或填写服务器可访问地址。</div>
+          <div role="note" className="oa-config-field-warning">
+            {valueIssue?.kind !== 'loopback' && (
+              <div>这个连接指向容器自己，部署后不能连接你电脑上的服务。请选择下方平台资源，或填写服务器可访问地址。</div>
+            )}
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
               <input
                 type="checkbox"
@@ -427,21 +450,25 @@ export function AppDeliveryConfig({
                       )
                       return
                     }
-                    update(index, { ...item, value: '', value_source: 'resource', resource_id: resource.id,
-                      resource_key: resource.id === item.resource_id ? item.resource_key : undefined })
+                    onChange(configs.map(config => group.includes(config) ? {
+                      ...config, value: '', effective_value: undefined, value_source: 'resource', resource_id: resource.id,
+                      resource_key: resourceField(config, resource),
+                    } : config))
                   }}
                 >
-                  {item.resource_id === resource.id ? '✓ ' : '改用 '}
+                  {item.resource_id === resource.id ? '✓ ' : group.length > 1 ? '整组改用 ' : '改用 '}
                   {resource.name}
                 </button>
               ))}
             </div>
             {selected && (
               <div style={{ background: 'var(--oa-paper)', borderRadius: 6, padding: '6px 8px', fontSize: 11.5, color: 'var(--oa-muted)', width: '100%' }}>
+                <div>资源 <code className="oa-mono">{selected.id}</code></div>
                 <div>
-                  {selected.env_preview?.[item.key] && selected.env_preview[item.key] !== '[REDACTED]'
-                    ? selected.env_preview[item.key]
-                    : '连接凭据由服务器安全提供'}
+                  {selected.env_preview?.[item.resource_key || item.key] &&
+                    selected.env_preview[item.resource_key || item.key] !== '[REDACTED]'
+                    ? selected.env_preview[item.resource_key || item.key]
+                    : '由服务器提供配置值'}
                 </div>
                 {resourceMigrationNote(selected) && <div style={{ marginTop: 3 }}>{resourceMigrationNote(selected)}</div>}
               </div>
@@ -466,8 +493,9 @@ export function AppDeliveryConfig({
   const primaryConfigs = compact ? indexedConfigs : indexedConfigs.filter(({ item }) => !isContainerDefaultConfig(item))
   const containerDefaultConfigs = compact ? [] : indexedConfigs.filter(({ item }) => isContainerDefaultConfig(item))
 
-  const hasContainerIssue = containerDefaultConfigs.some(({ item }) => {
+  const hasContainerIssue = containerDefaultConfigs.some(({ item, index }) => {
     const orig = originals.find(o => o.key === item.key)
+    if (publishIssues) return publishIssues.has(index) || needsContainerBindWarning(item, orig)
     const preserves =
       (item.value_source === 'original' && Boolean(orig?.has_original_value || orig?.has_value)) ||
       (item.value_source !== 'manual' && Boolean(orig?.has_value))
@@ -507,7 +535,7 @@ export function AppDeliveryConfig({
               )}
             </div>
             <p className="oa-hint" style={{ margin: '3px 0 0' }}>
-              留空或保持不变将沿用应用默认值；修改仅在本次容器运行时生效，不改本地源码。密码与密钥不会发送给 AI。
+              留空或保持不变将沿用应用默认值；修改仅在本次容器运行时生效，不改本地源码。应用配置值可在部署会话中核对。
             </p>
           </div>
           {!readOnly && allowNew && (
@@ -534,7 +562,7 @@ export function AppDeliveryConfig({
         </div>
       )}
 
-      {configs.length > 0 && primaryConfigs.length === 0 && (
+      {configs.length > 0 && primaryConfigs.length === 0 && !hasContainerIssue && (
         <div className="oa-alert oa-alert-ok">
           ✓ 当前应用无需额外配置外部数据库或密钥；容器基础参数已就绪。
         </div>
@@ -552,7 +580,7 @@ export function AppDeliveryConfig({
           <summary style={{ cursor: 'pointer', fontWeight: 600, color: hasContainerIssue ? '#92400e' : 'var(--oa-ink)' }}>
             容器基础参数（{containerDefaultConfigs.length} 项：
             {containerDefaultConfigs.map(({ item }) => formatContainerSummary(item)).join(' · ')}
-            {hasContainerIssue ? ' · 请注意检查监听地址' : ''}）
+            {hasContainerIssue ? ' · 有配置待处理' : ''}）
           </summary>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--oa-line)' }}>
             {containerDefaultConfigs.map(({ item, index }) => renderConfigCard(item, index))}
@@ -573,9 +601,7 @@ export function AppDeliveryConfig({
           {modifiedItems.map((item, idx) => {
             const target = item.resource_id
               ? `平台资源「${resources.find(r => r.id === item.resource_id)?.name || item.resource_id}」`
-              : item.secret
-                ? '自定义敏感值（已隐藏）'
-                : item.value || '（已清空）'
+              : item.value || '（已清空）'
             return (
               <div key={`${item.key}-${idx}`} style={{ marginTop: 4, fontWeight: 500 }}>
                 • {configName(item)} (<code>{item.key || '未命名'}</code>) → {target}
