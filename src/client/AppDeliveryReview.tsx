@@ -204,6 +204,13 @@ export function AppDeliveryReview({
   const [loadError, setLoadError] = useState('')
   const [handoff, setHandoff] = useState<{ prompt: string; source_path?: string } | null>(null)
   const [copied, setCopied] = useState(false)
+  const [protectedValues, setProtectedValues] = useState<Record<string, string>>({})
+  const [savingInputs, setSavingInputs] = useState(false)
+  const [inputResult, setInputResult] = useState('')
+  useEffect(() => {
+    setProtectedValues({})
+    setInputResult('')
+  }, [jobId])
   const inFlight = useRef(false)
   const currentRef = useRef(job)
   currentRef.current = job
@@ -248,7 +255,39 @@ export function AppDeliveryReview({
   const questions = !running && job?.status === 'review' ? plan?.unresolved || [] : []
   const text = (q: unknown) => (typeof q === 'string' ? q : JSON.stringify(q))
   const activeError = error || loadError || job?.error || ''
-  const canContinue = ready && !running && !activeError
+  const canContinue = ready && !running && !activeError && !savingInputs
+  const requestedInputs = job?.runtime_configs?.filter(item => item.needs_user_input) ?? []
+  const preparedHash = job?.artifactHash
+  useEffect(() => {
+    if (!ready || !preparedHash || !api.appConfigDraft) return
+    let active = true
+    api.appConfigDraft(jobId, contextId).then(raw => {
+      const draft = JSON.parse(raw ?? 'null')
+      const rows = draft?.rows ?? []
+      if (active) setProtectedValues(current => ({
+        ...Object.fromEntries(rows.filter((row: { value?: string }) => typeof row.value === 'string')
+          .map((row: { key: string; value: string }) => [row.key, row.value])),
+        ...current,
+      }))
+    }).catch(() => {})
+    return () => { active = false }
+  }, [ready, preparedHash, jobId, contextId, api])
+  const saveProtectedInputs = async () => {
+    if (!job?.artifactHash || !api.appSaveConfigDraft || savingInputs) return
+    const rows = requestedInputs.filter(item => protectedValues[item.key]).map(item => ({ key: item.key, value: protectedValues[item.key] }))
+    if (!rows.length) return
+    setSavingInputs(true)
+    setInputResult('')
+    try {
+      await api.appSaveConfigDraft(job.id, JSON.stringify({ artifactHash: job.artifactHash, protectedInputs: true, rows }), contextId)
+      accept(await loadJob())
+      setInputResult('已保存，第三步可核对或替换。')
+    } catch (error) {
+      setInputResult(String(error))
+    } finally {
+      setSavingInputs(false)
+    }
+  }
   const chatActive = Boolean(job?.analysisChatActive && job.analysisSessionId)
 
   const resumeAnalysis = async () => {
@@ -448,6 +487,43 @@ export function AppDeliveryReview({
           <div ref={reportRef}>
             <AppDiscoveryReport key={job.id} job={job} />
           </div>
+        )}
+
+        {ready && job?.runtime_configs?.some(item => !item.needs_user_input) && (
+          <details className="oa-subcard">
+            <summary>查看已解析的部署配置</summary>
+            <dl className="oa-cfg-ref-dl">
+              {job.runtime_configs.filter(item => !item.needs_user_input).map(item => (
+                <React.Fragment key={item.key}>
+                  <dt><code>{item.key}</code></dt>
+                  <dd><code>{item.effective_value || item.value || (item.resource_id ? '由所选资源在部署时提供' : '未设置')}</code></dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          </details>
+        )}
+
+        {ready && requestedInputs.length > 0 && api.appSaveConfigDraft && (
+          <form className="oa-subcard" aria-label="填写部署配置" onSubmit={event => { event.preventDefault(); void saveProtectedInputs() }}>
+            <strong>填写部署配置</strong>
+            <span className="oa-hint">在这里填写，第三步会带入这些值。部署会话可读取已填写的值。</span>
+            {requestedInputs.map(item => (
+              <label key={item.key} className="oa-field">
+                <span className="oa-label"><code>{item.key}</code> {item.has_value ? '· 已填写' : item.required ? '· 必填' : '· 选填'}</span>
+                {item.description && <span className="oa-hint">{item.description}</span>}
+                <input className="oa-input" type="text"
+                  value={protectedValues[item.key] ?? item.value} disabled={savingInputs} autoComplete="off"
+                  placeholder={item.has_value ? '保留已填写值，或在这里替换' : '也可在第三步填写'}
+                  onChange={event => { const value = event.target.value; setProtectedValues(current => ({ ...current, [item.key]: value })) }} />
+              </label>
+            ))}
+            <div>
+              <button type="submit" className="oa-btn oa-btn-sm" disabled={savingInputs || !requestedInputs.some(item => protectedValues[item.key])}>
+                保存配置
+              </button>
+              {inputResult && <p className="oa-hint" role="status">{inputResult}</p>}
+            </div>
+          </form>
         )}
 
         {(running || !!events.length) && (

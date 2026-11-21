@@ -124,18 +124,19 @@ def validate_skill_file(source, change):
               "不能修改版本库、依赖缓存或 Agent 配置")
     d.require(isinstance(text, str) and 0 < len(text.encode("utf-8")) <= 2_000_000
               and "[REDACTED" not in text, "交付文件为空、超限或含脱敏占位符")
-    d.require(not d.secret_lines(text, path), "交付文件不得内嵌凭据，请使用应用可用的配置引用")
 
 
-def compute_change_diffs(source: Path, changes: list[dict]) -> dict[str, str]:
+def compute_change_diffs(source: Path, changes: list[dict], *, values_visible=False) -> dict[str, str]:
     diffs: dict[str, str] = {}
     for ch in changes:
         cpath = ch.get("path", "")
         if not cpath or not isinstance(ch.get("content"), str):
             continue
         p = d.relative(source, cpath)
-        old = redact(p.read_text(encoding="utf-8", errors="replace"), cpath) if p.is_file() else ""
-        new = redact(ch["content"], cpath)
+        old = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+        new = ch["content"]
+        if not values_visible:
+            old, new = redact(old, cpath), redact(new, cpath)
         diffs[cpath] = "\n".join(
             difflib.unified_diff(
                 old.splitlines(),
@@ -169,6 +170,35 @@ def retain_proposal_changes(root: Path, proposal: dict) -> None:
         if change.get("id") and change.get("path") and isinstance(change.get("content"), str):
             drafts[change["id"]] = dict(change)
     save_draft_files(draft_path, drafts)
+
+
+def validate_config_value_plan(proposal, config):
+    key = config["key"]
+    plan = config.get("value_plan")
+    if plan is None and not (proposal.get("config_format") == 1 and config.get("required")):
+        return
+    d.require(isinstance(plan, dict), f"必填配置 {key} 必须声明 value_plan.kind")
+    kind = plan.get("kind")
+    d.require(kind in ("default", "source", "resource", "input", "inherit", "generate"),
+              f"配置 {key} 的 value_plan.kind 无效")
+    if config.get("resource_id"):
+        d.require(kind == "resource", f"配置 {key} 的资源绑定必须使用 resource")
+    if kind == "resource":
+        d.require(bool(config.get("resource_id") and config.get("resource_key")), f"配置 {key} 缺少资源或字段映射")
+    if kind == "source":
+        d.require(bool(config.get("source")), f"配置 {key} 缺少真实源码引用")
+    if kind == "default":
+        d.require(bool(config.get("default")), f"配置 {key} 缺少默认值")
+    if kind == "inherit":
+        d.require(type(proposal.get("base_version")) is int and proposal["base_version"] > 0, f"首次部署不能继承配置 {key}")
+    if kind == "generate":
+        size = plan.get("bytes")
+        d.require(config.get("secret") is True and type(size) is int and 16 <= size <= 128
+                  and plan.get("encoding") in ("base64", "base64url", "hex"),
+                  f"配置 {key} 的生成规格无效")
+        d.require(not config.get("source") and not config.get("default"), f"配置 {key} 的生成规格与现有值冲突")
+    allowed = {"kind", "bytes", "encoding"} if kind == "generate" else {"kind"}
+    d.require(set(plan) <= allowed, f"配置 {key} 的 value_plan 只能包含取值方式和生成规格")
 
 
 def resolve_and_enrich_proposal(
@@ -260,7 +290,7 @@ def resolve_and_enrich_proposal(
         d.require(isinstance(contract.get("storage_mounts"), list), "请声明 storage_mounts，没有挂载时填写 []")
         markdown = proposal.get("skill_markdown")
         d.require(isinstance(markdown, str) and markdown.startswith("---\n") and len(markdown.encode("utf-8")) <= 128_000
-                  and "<!-- opc-admin-login -->" not in markdown and not d.secret_lines(markdown, "SKILL.md"),
+                  and "<!-- opc-admin-login -->" not in markdown,
                   "请提供技能要求的 SKILL.md，使用凭据引用")
         header = markdown.split("\n---", 1)[0]
         d.require("\n---" in markdown and re.search(r"^name:\s*app-" + re.escape(contract.get("slug", "")) + r"\s*$", header, re.M)
@@ -302,17 +332,24 @@ def resolve_and_enrich_proposal(
                     continue
                 if type(config.get("secret")) is not bool or type(config.get("required")) is not bool or not isinstance(config.get("default", ""), str):
                     errors.append("配置必须声明 secret、required 和字符串默认值")
-                elif config["secret"] and config.get("default"):
+                elif not skill_delivery and config["secret"] and config.get("default"):
                     errors.append(f"秘密配置 {config['key']} 不能包含默认值。原值仅通过 source 引用。")
+                if "value" in config and not isinstance(config["value"], str):
+                    errors.append(f"配置 {config['key']} 的值必须是字符串")
                 if "app_default" in config and config["app_default"] is not None:
                     if not isinstance(config["app_default"], str):
                         errors.append("配置项 app_default 必须是字符串")
-                    elif config["app_default"] and (
+                    elif not skill_delivery and config["app_default"] and (
                         config.get("secret") is True
                         or SENSITIVE_KEY_RE.search(config["key"])
                         or d.secret_lines(f"{config['key']}={config['app_default']}", ".env")
                     ):
                         errors.append(f"敏感配置 {config['key']} 不能填写 app_default")
+                try:
+                    if skill_delivery:
+                        validate_config_value_plan(proposal, config)
+                except ValueError as exc:
+                    errors.append(str(exc))
                 if config.get("source") is not None:
                     try:
                         original_value(source, config["source"])
@@ -561,7 +598,7 @@ def word_pattern(keys: set[str]) -> re.Pattern | None:
     return re.compile(r"(?<![A-Za-z0-9_])(?:" + alternatives + r")(?![A-Za-z0-9_])")
 
 
-def source_configuration(root: Path, origins=None) -> dict:
+def source_configuration(root: Path, origins=None, *, values_visible=False) -> dict:
     source = root / "review/source"
     generated_keys, original_sources = origins if origins is not None else historical_config_origins(root, source)
     files = []
@@ -593,7 +630,7 @@ def source_configuration(root: Path, origins=None) -> dict:
                     except ValueError:
                         continue
                 sensitive = SENSITIVE_KEY_RE.search(key)
-                if value and (sensitive or d.secret_lines(json.dumps(key) + ": " + json.dumps(value), name)):
+                if not values_visible and value and (sensitive or d.secret_lines(json.dumps(key) + ": " + json.dumps(value), name)):
                     value = "[REDACTED]"
                 fields.append({"key": key, "value": value})
             entry = {"path": name, "fields": fields}
@@ -643,6 +680,9 @@ def validate_config_origins(root: Path, contract: dict):
 def main(body):
     root = Path(body["root"]).resolve()
     action = body["action"]
+    if action == "original_config_values":
+        values, _ = extract_original_config_values(root / "review/source", body.get("configs", []))
+        return values
     if action == "redact_feedback":
         return redact(str(body.get("text", "")), body.get("path", ""))
     if action == "handoff":
@@ -706,7 +746,7 @@ def main(body):
             d.prepare(argparse.Namespace(archive=body["source"], work_dir=str(root / "review"), slug=body["slug"], url=body["url"]))
         return {"imported": True}
     if action == "source_configuration":
-        return source_configuration(root)
+        return source_configuration(root, values_visible=body.get("values_visible") is True)
     if action == "inventory":
         files = d.load(root / "review/inventory.json")["files"]
         start = max(0, int(body.get("start", 1)) - 1)
@@ -746,7 +786,7 @@ def main(body):
         if content is None:
             return {"path": path, "view": "proposed" if proposed else "original", "text": "Binary file"}
         start = max(0, int(body.get("start", 1)) - 1)
-        lines = redact(content, path).splitlines()
+        lines = (content if body.get("values_visible") else redact(content, path)).splitlines()
         excerpt = "\n".join(f"{i + start + 1}: {s[:400]}" for i, s in enumerate(lines[start:start+200]))
         returned = len(lines[start:start+200])
         range_info = f"返回第 {start + 1}–{start + returned} 行" if returned else "所请求范围无内容"
@@ -757,7 +797,7 @@ def main(body):
         if not proposed:
             fields = original_fields(source_dir, path)
             if fields:
-                excerpt += "\nOriginal configuration references (metadata only; values stay local):\n" + json.dumps(fields, ensure_ascii=False)
+                excerpt += "\nOriginal configuration references:\n" + json.dumps(fields, ensure_ascii=False)
         return {"path": path, "view": "proposed" if proposed else "original", "text": excerpt, "total_lines": len(lines)}
     if action == "read_failed":
         revision = body.get("revision", "")
@@ -774,7 +814,7 @@ def main(body):
         failed_read.add(name)
         d.save(failed_read_path, sorted(failed_read))
         start = max(0, int(body.get("start", 1)) - 1)
-        lines = redact(content, name).splitlines()
+        lines = (content if body.get("values_visible") else redact(content, name)).splitlines()
         return {"text": "\n".join(f"{i + start + 1}: {line[:400]}" for i, line in enumerate(lines[start:start+200])), "total_lines": len(lines)}
     if action == "reference":
         d.require(body["name"] in {"contract.md", "delivery-files.md", "framework-checks.md", "preparation-checks.md", "integration.md"}, "Unknown reference")
@@ -847,7 +887,7 @@ def main(body):
                 reuse_source_admin=body.get("reuse_source_admin") is True,
                 dockerfile_only=body.get("dockerfile_only") is True,
             )
-            diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
+            diffs = compute_change_diffs(source_dir, proposal.get("changes", []), values_visible=proposal.get("delivery_format") == 1)
             _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
             retain_proposal_changes(root, proposal)
             return {
@@ -879,7 +919,7 @@ def main(body):
                           delivery_plan=proposal if proposal.get("delivery_format") == 1 else None)
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")
         retain_proposal_changes(root, proposal)
-        diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
+        diffs = compute_change_diffs(source_dir, proposal.get("changes", []), values_visible=proposal.get("delivery_format") == 1)
         _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
         return {
             "valid": True,
@@ -928,7 +968,7 @@ def main(body):
         source_dir = root / "review/source"
         orig_values, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
         skill_credentials = read_skill_credentials(source_dir, proposal["contract"]) if proposal.get("delivery_format") == 1 else {}
-        diffs = compute_change_diffs(source_dir, proposal.get("changes", []))
+        diffs = compute_change_diffs(source_dir, proposal.get("changes", []), values_visible=proposal.get("delivery_format") == 1)
         preparation_checks = [
             syntax_check,
             {"label": "原源码完整性", "status": "passed", "detail": "已核对分析时的源码摘要，改造在独立副本完成"},

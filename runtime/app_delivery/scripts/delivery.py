@@ -372,12 +372,12 @@ def check_work(work, *, require_legacy_probe=True):
     require(isinstance(contract.get("build_context"), list) and contract["build_context"], "explicit build_context is required")
     for config in contract.get("configs", []):
         require(ENV_NAME.fullmatch(config["key"]), "invalid environment variable name")
-        require(not config.get("secret") or not config.get("default"), "secret defaults must be empty")
+        require(not require_legacy_probe or not config.get("secret") or not config.get("default"), "secret defaults must be empty")
         require(type(config.get("secret")) is bool and type(config.get("required")) is bool, "config secret/required must be explicit booleans")
         require(isinstance(config.get("default", ""), str), "config default must be a string")
         require(config["secret"] or not SENSITIVE_ENV.search(config["key"]), "credential configuration must be marked secret: " + config["key"])
         default = config.get("default", "")
-        require(not secret_lines(default) and not ASSIGNMENT.search(default), "possible credential in configuration default: " + config["key"])
+        require(not require_legacy_probe or not secret_lines(default) and not ASSIGNMENT.search(default), "possible credential in configuration default: " + config["key"])
     keys = [c["key"] for c in contract.get("configs", [])]
     require(len(set(keys)) == len(keys), "duplicate configuration key")
     require(isinstance(contract.get("apis"), list) and isinstance(contract.get("pages"), list), "declare APIs and pages as explicit lists")
@@ -520,13 +520,18 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
             info.size, info.mode = len(data), 0o644
             tar.addfile(info, io.BytesIO(data))
     manifest = {"slug": contract["slug"], "app_url": contract["base_url"], "container_port": contract["runtime"]["port"], "configs": [{"key": c["key"], "value": "" if c.get("secret") else c.get("default", ""), "required": bool(c.get("required")), "description": c.get("description", "")} for c in contract.get("configs", [])], "detected_resource_types": [r["type"] for r in contract.get("resources", [])], "storage_mounts": contract.get("storage_mounts", []), "apis": contract["apis"], "pages": contract.get("pages", []), "skill_version": VERSION, "verification_status": "not-verified"}
+    if delivery_plan is not None and "effective_configs" in delivery_plan:
+        manifest["configs"] = delivery_plan["effective_configs"]
     save(out / "app-manifest.json", manifest)
     md = render_skill_markdown(contract, admin_login) if delivery_plan is None else delivery_plan["skill_markdown"]
     if delivery_plan is not None:
         save(out / "delivery.json", {
             "format": 1, "slug": contract["slug"], "contract": contract,
+            **({"config_format": 1, "base_config_revision": delivery_plan.get("base_config_revision", "")}
+               if delivery_plan.get("config_format") == 1 else {}),
             "base_version": delivery_plan.get("base_version", 0),
             "summary": delivery_plan["summary"],
+            **({"effective_configs": delivery_plan["effective_configs"]} if "effective_configs" in delivery_plan else {}),
             "files": [
                 {"path": f["path"], "reason": f["reason"], "sha256": sha(files[f["path"]].read_bytes())}
                 for f in delivery_plan["changes"]
@@ -539,7 +544,11 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
             info.external_attr = 0o100644 << 16
             z.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED)
         member("SKILL.md", md)
-        member("references/operations.json", json.dumps(contract, ensure_ascii=False, indent=2))
+        skill_contract = {**contract, "configs": [
+            {k: v for k, v in c.items() if k != "value" and (k not in ("default", "app_default") or not c.get("secret"))}
+            for c in contract.get("configs", [])
+        ]} if delivery_plan is not None else contract
+        member("references/operations.json", json.dumps(skill_contract, ensure_ascii=False, indent=2))
         if contract["apis"]:
             member("scripts/invoke_api.py", (Path(__file__).parents[1] / "assets/invoke_api.py.txt").read_bytes())
     result = {"skill_version": VERSION, "base_url": contract["base_url"], "status": "packaged-not-deployed", "files": {p.name: sha(p.read_bytes()) for p in sorted(out.iterdir())}}

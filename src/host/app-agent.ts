@@ -214,7 +214,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         return '验收结论与证据已记录。'
       },
     }))
-    register(defineTool({ name: 'opc_delivery_inspect', description: '只读检查应用。inventory 查看导入源码清单；read、read_failed 或 version_file 传 path（version_file 读取线上生效版本）；resources 读取平台资源；active_version 读取生效版本和交付清单；database_schema 读取应用专属 PostgreSQL 的表和列；reference 传 name；template 传 language 和 version。另可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency。',
+    register(defineTool({ name: 'opc_delivery_inspect', description: '只读检查应用。inventory 查看导入源码清单；read、read_failed 或 version_file 传 path（version_file 读取线上生效版本）；resources 读取平台资源；config_values 读取当前应用配置及所选资源字段的实际值；active_version 读取生效版本和交付清单；database_schema 读取应用专属 PostgreSQL 的表和列；reference 传 name；template 传 language 和 version。另可用 scan_routes_and_pages、inspect_local_storage、read_go_dependency。',
       parameters: {
         action: { type: 'string', required: true },
         path: { type: 'string' },
@@ -226,6 +226,9 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         table: { type: 'string' },
         key: { type: 'string' },
         source: { type: 'object', additionalProperties: true },
+        bindings: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+          key: { type: 'string', required: true }, resource_id: { type: 'string', required: true }, resource_key: { type: 'string', required: true },
+        } } },
         module: { type: 'string' },
         start: { type: 'number' },
       }, output,
@@ -240,6 +243,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           'inspect_local_storage',
           'read_go_dependency',
           'resources',
+          'config_values',
           'active_version',
           'version_file',
           'database_schema',
@@ -256,22 +260,35 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           return JSON.stringify((response.resources ?? []).map(({ id, name, type, env_keys, is_default, supports_auto_migration, host, port, database_name }: AppDocument) =>
             ({ id, name, type, env_keys, is_default, supports_auto_migration, host, port, database_name })))
         }
+        if (args.action === 'config_values') {
+          const values = await delivery.previewDeliveryConfig(job, root, appCtxId, abort)
+          return JSON.stringify({ configs: values, resources: await delivery.resolveResourceValues(job.slug, args.bindings ?? [], appCtxId) })
+        }
         if (args.action === 'active_version') {
           const active = await readActiveVersion()
           const plan = active.download_urls?.['delivery.json']
             ? await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/delivery.json`, appCtxId)
             : undefined
-          return worker({ action: 'redact_feedback', root, text: JSON.stringify({ version: active.version, container_port: active.container_port,
-            configs: (active.app_config ?? []).map(({ key, resource_id, resource_key, has_value }: AppDocument) => ({ key, resource_id, resource_key, has_value })),
-            mounts: (active.storage_mounts ?? []).map(({ container_path, resource_id, kind, purpose }: AppDocument) => ({ container_path, resource_id, kind, purpose })),
-            delivery: plan }, null, 2) }, abort)
+          const snapshot = active.download_urls?.['confirmed-deployment.json']
+            ? await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/confirmed-deployment.json`, appCtxId)
+            : undefined
+          if (snapshot && snapshot.config_revision !== active.config_revision) {
+            activeVersion = undefined
+            throw new Error('生效配置在读取期间已变化，请重新读取基线')
+          }
+          return JSON.stringify({ version: active.version, config_revision: active.config_revision, container_port: active.container_port,
+            configs: (active.app_config ?? snapshot?.app_config ?? []).map(({ key, value, effective_value, secret, resource_id, resource_key, has_value, preserve_on_upgrade }: AppDocument) =>
+              ({ key, value: effective_value ?? value, secret, resource_id, resource_key, has_value, preserve_on_upgrade })),
+            mounts: (snapshot?.storage_mounts ?? active.storage_mounts ?? []).map(({ container_path, resource_id, volume_name, storage_backend, kind, purpose }: AppDocument) =>
+              ({ container_path, resource_id, volume_name, storage_backend, kind, purpose })),
+            delivery: plan }, null, 2)
         }
         if (args.action === 'version_file') {
           const active = await readActiveVersion()
           if (!args.path) throw new Error('请提供上一版交付文件路径')
           const file = await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/app.tar`, appCtxId, { query: { file: args.path } })
           if (typeof file?.text !== 'string') throw new Error('平台尚未提供上一版交付文件读取接口')
-          const text = await worker({ action: 'redact_feedback', root, text: file.text, path: args.path }, abort)
+          const text = file.text
           const start = Math.max(0, (args.start ?? 1) - 1)
           return JSON.stringify({ path: args.path, text: text.split('\n').slice(start, start + 200).join('\n') })
         }
@@ -288,7 +305,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           abort.throwIfAborted()
           return JSON.stringify(result.matched_template ?? null)
         }
-        return JSON.stringify(await worker({ ...args, root, revision: job.failedRevision || job.revision }, abort))
+        return JSON.stringify(await worker({ ...args, root, values_visible: true, revision: job.failedRevision || job.revision }, abort))
       } }))
     register(defineTool({ name: 'opc_delivery_propose_file', description: '暂存技能规定的 Dockerfile、配置或 SQL 文件。在 opc_delivery_submit 的 changes 中引用 ID 和实际部署路径。',
       parameters: {
@@ -323,7 +340,18 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
           }
           candidate.delivery_format = 1
-        if (updating) candidate.base_version = (await readActiveVersion()).version
+          candidate.config_format = 1
+          if (updating) {
+            const active = await readActiveVersion()
+            candidate.base_version = active.version
+            candidate.base_config_revision = active.config_revision ?? ''
+            const previous = new Map((active.app_config ?? []).map((c: AppDocument) => [c.key, c]))
+            for (const config of candidate.contract?.configs ?? []) {
+              if ((previous.get(config.key) as AppDocument | undefined)?.has_value && config.value_plan?.kind === 'generate') {
+                throw new Error(`现有配置 ${config.key} 已有值，升级请继承线上配置，不能自动重新生成`)
+              }
+            }
+          } else candidate.base_version = 0
           await delivery.submit(job, root, candidate, abort, { dockerfileOnly: true })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
@@ -354,7 +382,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         const questions = analysisQuestions(job.proposal)
         return questions.length
           ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
-          : '方案通过。只用几句话说明端口、必要改造和技能范围，然后结束本轮。OPC 将自动生成交付包。'
+          : JSON.stringify({ message: '方案通过。用几句话说明必要改造和待填项。OPC 将自动生成交付包。',
+              configs: await delivery.previewDeliveryConfig(job, root, appCtxId, abort, true) })
       } }))
     const options: Omit<CreateAgentOptions, 'sessionId' | 'meta'> = {
       agentOptions,

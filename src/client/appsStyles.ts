@@ -665,6 +665,28 @@ export const appsCss = `
   font-weight: 600;
 }
 
+.oa-config-tab-warning { background: var(--oa-warn); }
+.oa-delivery-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.oa-dockerfile-panel { min-width: 0; }
+.oa-dockerfile-panel p { margin: 0; }
+.oa-dockerfile-source {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--oa-line);
+  border-radius: 8px;
+  background: var(--oa-paper);
+  color: var(--oa-ink);
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+.oa-dockerfile-source:focus-visible { outline: 2px solid var(--oa-accent); outline-offset: 2px; }
+
 /* Alerts & Banners */
 .oa-alert {
   padding: 12px 14px;
@@ -1054,10 +1076,18 @@ export const appsCss = `
   background: var(--oa-paper);
   color: var(--oa-muted);
 }
-.oa-cfg-inline-warn {
-  padding: 8px 10px;
-  font-size: 12px;
-  border-radius: 8px;
+.oa-config-field-warning {
+  margin: 0;
+  color: #92400e;
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.oa-config-key-warning {
+  width: 100%;
+}
+.oa-input[aria-invalid='true'], select[aria-invalid='true'] {
+  border-color: var(--oa-warn);
 }
 .oa-cfg-resources {
   display: flex;
