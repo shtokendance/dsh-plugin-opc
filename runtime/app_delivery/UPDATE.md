@@ -18,4 +18,4 @@ description: 根据当前线上生效版本和新上传源码准备 OPC 应用�
 
 ## 3. 生成新版技能并提交
 
-按 [交付文件格式](references/delivery-files.md) 提交新版应用的完整契约和业务 SKILL.md。逐项对照生效版本，声明配置来源、数据、权限和密钥的沿用或变更依据。执行 [候选版本验收](references/assessment.md) 时，先读实际构建状态。计划为 `postgres_copy` 时，在构建通过后用 `opc_delivery_observe` 的 `rehearsal` 执行隔离演练，再用 `database_schema` 核对演练库结构和关键行数。声明能覆盖本次变更和历史数据可读性的只读验收目标。无法用现有工具取得这类证据时，在 `unresolved` 写明实际阻塞。
+按 [交付文件格式](references/delivery-files.md) 提交新版应用的完整契约和业务 SKILL.md。逐项对照生效版本，声明配置来源、数据、权限和密钥的沿用或变更依据。用户确认后由平台执行构建、已声明的迁移演练和正式切换，并检查应用域名。收到失败修复请求时，先核对本次部署日志和迁移回执，再依照第 2 节决定需要的改造。

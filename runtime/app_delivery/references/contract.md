@@ -38,7 +38,7 @@ DSH 向导的部署字段与文件格式以 [交付文件格式](delivery-files.
 - URL 由部署任务绑定。使用任务提供的应用地址。
 - `build_context` 是应用文件和目录的白名单。包含实际构建与运行依赖，排除版本库、无关归档和分析报告。业务凭据按应用的配置机制在运行时提供。
 - `configs` 只声明应用实际读取的键。用 `source: {"path":"config.yaml","keys":["service","url"]}` 引用原有配置值。经源码证实的兜底值写入 `app_default` 供核对。
-- `apis` 和 `pages` 完整列出应用技能使用的真实接口、页面及业务视图。某类不存在时填 `[]`。桌面向导的实际验收以 `verification.targets` 为准，独立 CLI 的验证计划使用 `verification.cases` 或 `verification.browser_cases`。
+- `apis` 和 `pages` 完整列出应用技能使用的真实接口、页面及业务视图。某类不存在时填 `[]`。可在 `verification.targets` 中声明部署后的只读业务检查。独立 CLI 的验证计划使用 `verification.cases` 或 `verification.browser_cases`。
 - 每个 API 必须含 purpose、源码 evidence、实际 parameters/request_body/responses、auth、effect。request_body 为 null 或包含 required、description、schema 的对象；完整 schema 与错误说明应保留，工具不声称完整实现 JSON Schema 验证。API 错误可能包含 HTTP 200 下的业务错误码，业务流程必须明确成功判断，不把 HTTP 成功等同业务成功。
 - auth.type 为 none、bearer 或 header；非 none 必须声明 env 引用名或引用 auth_profiles 中的 profile，header 还要提供 header。账号密码和其他秘密仅用凭据引用。
 - 直接在 API 或页面上声明认证时，用 `auth.evidence` 引用登录、会话或权限代码。共用中间件的证据写在 `auth_rules[].evidence`。每条证据使用读取工具返回的相对路径与实际行号，修改过的文件以拟交付版本为准。

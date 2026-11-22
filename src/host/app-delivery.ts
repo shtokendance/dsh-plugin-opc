@@ -30,6 +30,7 @@ export interface DeliveryJob {
   analysisSessionId?: string
   deliveryMode?: 'initial' | 'update'
   archivedRevision?: string
+  deploymentCheck?: 'domain'
   assessment?: DeliveryAssessment
   assessmentPending?: boolean
   analysisSessions?: string[]
@@ -39,6 +40,7 @@ export interface DeliveryJob {
   events: string[]; error?: string; proposal?: AppDocument; revision?: string; failedRevision?: string
   revisionCount?: number; feedbackHistory?: string; analysisMode?: 'analysis' | 'repair'
   analysisFailure?: string
+  deploymentLogRevision?: string
   failureStage?: 'import' | 'analysis' | 'preparation' | 'deployment' | 'verification'
   restoredVersion?: boolean
   conversation?: { role: 'user' | 'assistant'; text: string; revision?: number }[]
@@ -404,9 +406,19 @@ export class AppDelivery {
     job.published = true
     job.version = Object.hasOwn(receipt, 'published_version') ? receipt.published_version || undefined : receipt.version
     if (receipt.status === 'failed') {
-      const facts = [receipt.build_log?.slice(-8000), receipt.delivery_step && `发布阶段：${receipt.delivery_step}`,
-        receipt.migration_execution && `数据库迁移回执：${receipt.migration_execution}`].filter(Boolean).join('\n')
-      this.recordFailureState(job, receipt.error_message || '部署失败', facts, job.version)
+      const facts = [receipt.delivery_step && `发布阶段：${receipt.delivery_step}`,
+        receipt.migration_execution && `数据库迁移回执：${receipt.migration_execution}`,
+        receipt.build_log, receipt.runtime_logs].filter(Boolean).join('\n')
+      job.deploymentLogRevision = undefined
+      if (job.revision && /^[a-f0-9]{32}$/.test(job.revision)) {
+        try {
+          await writeFile(join(root, job.revision, 'failed-deployment.log'), [receipt.error_message, facts].filter(Boolean).join('\n'), { mode: 0o600 })
+          job.deploymentLogRevision = job.revision
+        } catch {
+          job.events.push('本地未能保存完整部署日志，已保留失败摘要')
+        }
+      }
+      this.recordFailureState(job, receipt.error_message || '部署失败', facts.slice(-8000), job.version)
     } else {
       job.status = 'building'
       job.error = undefined
@@ -455,7 +467,10 @@ export class AppDelivery {
           await this.recoverInterrupted(root, job)
         })
       }
-      if (!this.busy.has(id) && ['unknown', 'building'].includes(job.status)) {
+      if (!this.busy.has(id) && job.deploymentCheck === 'domain' && ['unknown', 'building'].includes(job.status)) {
+        await this.verify(id, expected, { automatic: true }).catch(() => undefined)
+        job = (await this.open(scope.directory, id)).job
+      } else if (!this.busy.has(id) && ['unknown', 'building'].includes(job.status)) {
         const latestJob = await this.open(scope.directory, id)
         if (!this.busy.has(id) && latestJob.job.status === job.status && latestJob.job.requestId === job.requestId) {
           job = latestJob.job
@@ -629,7 +644,8 @@ export class AppDelivery {
       runtime_configs: runtimeConfigs,
       verification: {
         status: job.status === 'verified'
-          ? (job.pagesVerified ? 'verified-deployed-page' : 'verified-deployed-api')
+          ? (job.checks?.some(check => check.operation === 'deployment_domain') ? 'deployment-domain-confirmed'
+            : job.pagesVerified ? 'verified-deployed-page' : 'verified-deployed-api')
           : job.status === 'awaiting_page_verification'
           ? 'awaiting_page_verification'
           : job.status === 'failed' ? 'failed' : '',
@@ -1469,7 +1485,7 @@ export class AppDelivery {
       job.assessment = undefined
       job.assessmentPending = undefined
       job.configFingerprint = undefined
-      job.events.push('部署包已生成，服务器构建和业务验证尚未执行')
+      job.events.push('部署包已生成，等待用户确认后提交服务器构建')
     } catch (error) {
       signal.throwIfAborted()
       job.status = 'failed'
@@ -1719,13 +1735,10 @@ export class AppDelivery {
         form.append(name === 'app.tar' ? 'app_tar' : 'skill_zip', new Blob([new Uint8Array(bytes)]), name)
       }
       if (job.proposal.delivery_format === 1) {
-        if (!Array.isArray(contract.verification?.targets) || !contract.verification.targets.length) {
-          throw new Error('本次交付尚未声明只读业务验收目标，请返回原会话让所选 AI 补全。')
-        }
         if (job.archivedRevision?.replaceAll('-', '') !== job.revision) throw new Error('本轮交付尚未归档，请重新准备')
         const capabilities = await this.platform('/resources', expected, { query: { slug: job.slug } })
         if (capabilities.delivery_format !== 1) throw new Error('当前 Platform 版本不支持技能驱动交付，请升级平台后重新发布')
-        if (capabilities.isolated_candidate !== true) throw new Error('当前 Platform 版本不支持隔离候选验收，请升级平台后重新发布')
+        if (capabilities.domain_deployment_check !== true) throw new Error('当前 Platform 版本不支持域名部署检查，请升级平台后重新发布')
         if (job.proposal.config_format === 1 && (capabilities.config_format !== 1 || capabilities.visible_config_values !== true)) {
           throw new Error('当前 Platform 版本不支持明文配置确认和版本归档，请先升级平台')
         }
@@ -1735,6 +1748,10 @@ export class AppDelivery {
         // as a form field by Platform, which checks the archived byte digest.
         form.append('delivery_plan', new Blob([new Uint8Array(plan)], { type: 'application/json' }), '')
         form.append('delivery_revision', job.archivedRevision)
+        form.append('deployment_check', 'domain')
+        job.deploymentCheck = 'domain'
+        job.assessment = undefined
+        job.assessmentPending = undefined
         if (migrationApproved) form.append('migration_approved', 'true')
       }
       let dockerfileContent = job.dockerfileContent ?? ''
@@ -1765,7 +1782,7 @@ export class AppDelivery {
         const result = await this.platform('/publish', expected, { form })
         if (result.app_url !== job.url) throw new Error('平台返回地址与确认地址不同')
         if (!await this.applyPublishReceipt(scope.directory, root, job, result)) throw new Error('平台尚未确认发布请求')
-        job.events.push('已上传经过确认的同一交付包，等待服务器构建与业务验证')
+        job.events.push(job.deploymentCheck === 'domain' ? '已上传确认的交付包，等待服务器构建、启动并检查应用域名' : '已上传经过确认的同一交付包，等待服务器构建与业务验证')
       } catch (error) {
         if (error instanceof AppRequestError && [400, 401, 403, 404, 409, 413, 422].includes(error.status)) {
           job.status = 'ready'
@@ -1806,7 +1823,7 @@ export class AppDelivery {
       if (!['building', 'unknown', 'awaiting_page_verification', 'verified', 'failed', 'publishing', 'verifying'].includes(job.status) || !job.hashes || !job.proposal) throw new Error('应用尚未发布')
       if (job.proposal.delivery_format === 1) {
         if (this.analyses.has(id) || (options?.automatic && job.assessmentPending)) return this.public(job, root)
-        if (!job.archivedRevision || !job.requestId) throw new Error('缺少本轮交付归档或发布请求号，无法启动 AI 验收')
+        if (!job.archivedRevision || !job.requestId) throw new Error('缺少本轮交付归档或发布请求号，无法核对部署结果')
         return this.advancePreparedDelivery(root, job, expected)
       }
       if (job.status === 'unknown' || job.status === 'publishing' || (job.status === 'building' && !job.version && job.requestId)) {
@@ -1937,7 +1954,7 @@ export class AppDelivery {
     if (receipt.status === 'unknown') { onChatReady?.(); return this.public(job, root) }
     checkPublishReceipt(job, receipt)
     if (receipt.status === 'running') {
-      await this.completeAssessedDelivery(root, job, receipt, expected)
+      await this.completePreparedDelivery(root, job, receipt, expected)
       onChatReady?.()
       return this.public(job, root)
     }
@@ -1948,7 +1965,7 @@ export class AppDelivery {
       onChatReady?.()
       return this.public(job, root)
     }
-    if (receipt.status !== 'built' && receipt.status !== 'runtime_ready') {
+    if (job.deploymentCheck === 'domain' || (receipt.status !== 'built' && receipt.status !== 'runtime_ready')) {
       if (job.status !== 'building' && await this.applyPublishReceipt(scope.directory, root, job, receipt)) {
         job.assessmentPending = undefined
         job.failureStage = undefined
@@ -1983,7 +2000,7 @@ export class AppDelivery {
         await this.save(root, job)
         const result = await this.platform(path + '/assessment', expected, { body: run.result })
         if (result.status === 'running') {
-          await this.completeAssessedDelivery(root, job, result, expected)
+          await this.completePreparedDelivery(root, job, result, expected)
         } else {
           if (!await this.applyPublishReceipt(scope.directory, root, job, result)) throw new Error('平台未确认本轮验收')
           await this.save(root, job)
@@ -2003,22 +2020,28 @@ export class AppDelivery {
     return this.public(job, root)
   }
 
-  private async completeAssessedDelivery(root: string, job: DeliveryJob, receipt: AppDocument, expected: string) {
+  private async completePreparedDelivery(root: string, job: DeliveryJob, receipt: AppDocument, expected: string) {
     const scope = this.scope(expected)
     checkPublishReceipt(job, receipt)
-    const reports: { build?: DeliveryAssessment; runtime?: DeliveryAssessment } =
-      typeof receipt.delivery_assessment === 'string' ? JSON.parse(receipt.delivery_assessment || '{}') : {}
-    const assessment = reports.runtime
-    if (reports.build?.outcome !== 'passed' || !reports.build.evidence?.length ||
-        assessment?.outcome !== 'passed' || !assessment.evidence?.length) {
-      throw new Error('发布记录缺少本版本的 AI 构建或业务验收结论')
+    let assessment: DeliveryAssessment | undefined
+    if (job.deploymentCheck === 'domain') {
+      if (receipt.is_active !== true) throw new Error('平台回执未确认本次版本已生效')
+    } else {
+      const reports: { build?: DeliveryAssessment; runtime?: DeliveryAssessment } =
+        typeof receipt.delivery_assessment === 'string' ? JSON.parse(receipt.delivery_assessment || '{}') : {}
+      assessment = reports.runtime
+      if (reports.build?.outcome !== 'passed' || !reports.build.evidence?.length ||
+          assessment?.outcome !== 'passed' || !assessment.evidence?.length) {
+        throw new Error('发布记录缺少本版本的 AI 构建或业务验收结论')
+      }
     }
     const remote = await this.platform(`/${job.slug}`, expected)
-    if (remote.current_version !== receipt.published_version || remote.app_url !== job.url || !matchesReceipt(remote.build_log, job.hashes)) {
-      throw new Error('验收结果与当前生效版本不一致')
+    if (remote.current_version !== receipt.published_version || remote.app_url !== job.url ||
+        (job.deploymentCheck === 'domain' && remote.status !== 'running') || !matchesReceipt(remote.build_log, job.hashes)) {
+      throw new Error('部署回执与当前生效版本不一致')
     }
     if (job.configFingerprint && job.configFingerprint !== remote.config_fingerprint) {
-      throw new Error('运行配置已变化，请通过 AI 更新流程重新验收。')
+      throw new Error('运行配置已变化，请通过应用更新向导确认并重新部署。')
     }
     await this.applyPublishReceipt(scope.directory, root, job, receipt)
     await this.demoteOtherJobsForSlug(scope.directory, job.slug, job.id)
@@ -2026,9 +2049,10 @@ export class AppDelivery {
     job.assessment = assessment
     job.assessmentPending = undefined
     job.configFingerprint = remote.config_fingerprint
-    job.checks = [{ operation: 'ai_delivery_assessment' }]
+    job.checks = [{ operation: job.deploymentCheck === 'domain' ? 'deployment_domain' : 'ai_delivery_assessment' }]
     job.superseded = undefined
     await this.save(root, job)
+    if (job.deploymentCheck === 'domain') this.core.emit('skills-changed')
   }
 
   async observeDeployment(job: DeliveryJob, root: string, input: AppDocument, expected: string, signal: AbortSignal) {
@@ -2215,7 +2239,7 @@ export class AppDelivery {
     const scope = this.scope(expected)
     const current = await this.platform(`/${slug}`, expected)
     if (current.delivery_format === 1 || /\[Artifact\] delivery\.json:[a-f0-9]{64}/.test(current.build_log ?? '')) {
-      throw new Error('请在应用更新向导中由所选 AI 分析配置变更并验收。')
+      throw new Error('请在应用更新向导中由所选 AI 分析配置变更。')
     }
     const result = await this.platform(`/${slug}/config`, expected, { method: 'PUT', body })
     const activeVersion = result.current_version ?? result.version

@@ -1845,7 +1845,7 @@ export function AppsPanel({
               <div className="oa-form-card">
                 <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a', marginBottom: 4 }}>AI 分析模型设置</div>
                 <p className="oa-hint" style={{ marginBottom: 12 }}>
-                  此次交付的分析、修复和验收均由同一个所选 AI 完成。
+                  所选 AI 负责应用分析、改造和失败修复。平台通过应用域名检查部署结果。
                 </p>
                 {modelGroups.length === 0 ? (
                   <div className="oa-hint">将沿用当前会话已选的 AI 模型。</div>
@@ -2677,7 +2677,7 @@ export function AppsPanel({
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                 <div>
                   <strong style={{ fontSize: 14, color: '#0f172a' }}>在线运行配置</strong>
-                  <div className="oa-hint">{requiresAIUpdate ? '在更新向导中由所选 AI 分析配置变更，并在新配置的候选版本上完成验收。' : '保存后会重启应用容器以应用运行配置。'}</div>
+                  <div className="oa-hint">{requiresAIUpdate ? '在更新向导中由所选 AI 分析配置变更。应用启动后，平台会检查分配的域名。' : '保存后会重启应用容器以应用运行配置。'}</div>
                 </div>
                 {!readOnly && requiresAIUpdate && (
                   <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy}

@@ -145,6 +145,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const repairInstructions = isRepair
       ? '\n修复失败部署时，先核对失败阶段和证据，需要时用 read_failed 读取失败制品。用 read_current_proposal 取得已接受的完整字段；由你判断只改配置、重试，还是提交必要的完整替换文件。'
       : ''
+    const hasDeploymentLog = Boolean(job.failedRevision && job.failedRevision === job.deploymentLogRevision)
     const portInstructions = portLocked
       ? `本任务锁定的容器端口为 ${port}。`
       : `容器端口策略：优先识别并沿用应用自身默认监听端口（从源码、现有 Dockerfile 或真实配置文件核实）；若应用无默认端口（或依赖外部注入 PORT 且无兜底值），则使用 OPC 默认端口 ${port}。${job.upgrade ? `本次为升级部署，如新版未变更端口优先沿用线上当前端口 ${port}。` : ''}容器内必须监听 0.0.0.0（禁止监听 127.0.0.1），且契约 configs 中的 PORT 必须与 runtime.port 一致，不要引用 *.example 示例文件中冲突的 PORT 或占位密钥。`
@@ -547,15 +548,15 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       const previous = (job.published || job.upgrade)
         ? await delivery.platform('/' + job.slug, appCtxId).catch(() => undefined)
         : undefined
-      const runtimeLogs = job.published
+      const runtimeLogs = job.published && !hasDeploymentLog
         ? await delivery.platform('/' + job.slug + '/logs', appCtxId).catch(() => undefined)
         : undefined
 
       if (isRepair || (job.published && (previous?.error_message || previous?.build_log || runtimeLogs?.runtime_logs))) {
         const mergedFailure = [
           job.failureContext,
-          previous?.error_message,
-          previous?.build_log?.slice(-8000),
+          !hasDeploymentLog && previous?.error_message,
+          !hasDeploymentLog && previous?.build_log?.slice(-8000),
           runtimeLogs?.runtime_logs?.slice(-4000),
         ].filter(Boolean).join('\n')
         if (mergedFailure) {
@@ -610,6 +611,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         previous_plan_available: Boolean(job.proposal),
         failed_snapshot: job.failedSnapshot,
         failure_log: job.failureContext ?? '',
+        deployment_log: hasDeploymentLog ? '先调用 opc_delivery_inspect，action=read_failed，path=@deployment/logs，读取本次构建、部署与启动日志。用返回的 next_start 继续读取，直到定位报错和根因。' : undefined,
         assessment_phase: assessment?.phase,
         task: waitingForReply ? '请结合 previous_plan 中的待确认事项处理接下来收到的用户回复。' : taskInstruction,
       })

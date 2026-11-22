@@ -359,8 +359,10 @@ def delivery_evidence_errors(contract, source, changes, *, requires_verification
         errors.append("contract.configuration_review 必须包含配置核对摘要和源码 evidence；没有配置时也要说明核实依据")
 
     verification = contract.get("verification")
-    if not isinstance(verification, dict) or not isinstance(verification.get("targets"), list) or not verification["targets"]:
-        return [*errors, "contract.verification.targets 必须声明至少一个可执行的只读验收目标；无法取得证据时请提交 blocked 并说明原因"]
+    if not isinstance(verification, dict) or "targets" not in verification:
+        return errors
+    if not isinstance(verification["targets"], list):
+        return [*errors, "contract.verification.targets 必须是列表"]
 
     apis = contract.get("apis")
     read_operations = {item["id"] for item in apis if isinstance(item, dict)
@@ -1003,6 +1005,17 @@ def main(body):
         revision = body.get("revision", "")
         d.require(isinstance(revision, str) and revision.isalnum(), "Invalid revision")
         name = body["path"]
+        if name == "@deployment/logs":
+            log = root / revision / "failed-deployment.log"
+            d.require(log.is_file(), "本轮失败的部署日志未保存在本地")
+            start = max(1, int(body.get("start", 1)))
+            with log.open(encoding="utf-8") as source:
+                for _ in range(start - 1):
+                    if not source.read(12_000):
+                        return {"path": name, "text": "", "next_start": None}
+                content = source.read(12_000)
+                has_more = bool(source.read(1))
+            return {"path": name, "text": content, "next_start": start + 1 if has_more else None}
         d.relative(root, name)
         archive = root / revision / "bundle/app.tar"
         with tarfile.open(archive) as tar:
@@ -1154,7 +1167,7 @@ def main(body):
         result = d.bundle_work(dest / "approved", dest / "bundle", login,
                                delivery_plan=proposal if proposal.get("delivery_format") == 1 else None)
         syntax_check = (
-            {"label": "候选版本验收", "status": "pending", "detail": "所选 AI 根据实际构建结果和运行事实提交验收结论"}
+            {"label": "应用部署检查", "status": "pending", "detail": "部署后由平台检查目标容器和应用域名"}
             if proposal.get("delivery_format") == 1 else check_archive_syntax(dest / "bundle/app.tar")
         )
         skill_markdown = ""

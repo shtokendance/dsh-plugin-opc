@@ -116,7 +116,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
       configuration_review: { ...object, description: '总结实际读取的配置、资源和挂载及其源码证据。没有部署配置也要说明核实依据。', properties: {
         summary: text, evidence: { ...strings, required: true, description: '实际读取的源码文件:行号' },
       } },
-      verification: { ...object, description: '由所选 AI 声明适合该应用并可以实际执行的只读验收。', properties: {
+      verification: { ...object, description: '可选的只读业务验证计划，供部署完成后使用。', properties: {
         targets: { ...objects, required: true, items: { ...object, properties: {
           id: text, kind: { ...text, enum: ['http', 'operation'] },
           path: { ...str, description: 'http 使用已核实为只读的站内路径' },
