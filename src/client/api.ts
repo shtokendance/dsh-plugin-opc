@@ -126,12 +126,20 @@ export interface DeployedApp {
   updated_at?: string
 }
 
+export interface AppDeploymentStartupCheck {
+  target_running: boolean
+  domain_reachable: boolean
+  active_version: number
+  active_version_running: boolean
+}
+
 export interface AppDeliveryJob {
   archivedRevision?: string
   assessmentPending?: boolean
   assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
   id: string
   requestId?: string
+  startupCheck?: AppDeploymentStartupCheck
   analysisSessionId?: string
   analysisChatActive?: boolean
   analysisChatStarting?: boolean

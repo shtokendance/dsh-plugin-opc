@@ -259,6 +259,20 @@ function deploymentProgress(job: AppDeliveryJob) {
   return { label: '正在构建部署…', tone: 'warn' }
 }
 
+function describeDeploymentStartup(job: AppDeliveryJob): string {
+  const check = job.startupCheck
+  if (!check) return '平台未返回应用启动检查结果。'
+  if (job.status === 'verified' && check.target_running && check.domain_reachable &&
+      check.active_version_running && check.active_version === job.version) return '本次版本已生效，应用域名可访问。'
+  if (check.target_running) return check.domain_reachable
+    ? '本次镜像已启动，应用域名可访问。平台尚未确认本次发布成功。'
+    : '本次镜像已启动，应用域名暂时无法访问。'
+  if (check.active_version_running && check.active_version > 0) return check.domain_reachable
+    ? `应用域名可访问，运行的是版本 v${check.active_version}。本次部署尚未生效。`
+    : `版本 v${check.active_version} 的容器正在运行，应用域名暂时无法访问。`
+  return check.domain_reachable ? '应用域名有响应，但未能确认本次镜像已启动。' : '未能确认本次镜像已启动，应用域名暂时无法访问。'
+}
+
 function blockedByPreviousBuild(job: AppDeliveryJob) {
   const deploymentError = (job.error ?? '').split('; previous version recovery failed:', 1)[0]
   return job.failureStage === 'deployment' && /1108/.test(deploymentError) &&
@@ -268,19 +282,19 @@ function blockedByPreviousBuild(job: AppDeliveryJob) {
 const isDeploymentInProgress = (status?: string) =>
   status === 'publishing' || status === 'building' || status === 'verifying' || status === 'unknown'
 
-function DeploymentLogs({ fetchLogs, live, buildOnly, failed, onCopy, copied }: {
+function DeploymentLogs({ fetchLogs, live, buildOnly, onCopy, copied }: {
   fetchLogs: () => Promise<string>
   live: boolean
   buildOnly: boolean
-  failed: boolean
   onCopy: (text: string) => void
   copied: boolean
 }) {
-  const [open, setOpen] = useState(live || failed)
+  const [open, setOpen] = useState(true)
   const [logs, setLogs] = useState('')
   const [error, setError] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
   const followTail = useRef(true)
+  const terminalId = useId()
   useEffect(() => {
     if (!open) return
     let active = true
@@ -309,26 +323,33 @@ function DeploymentLogs({ fetchLogs, live, buildOnly, failed, onCopy, copied }: 
   }, [logs, open])
 
   return (
-    <details className="oa-deploy-logs" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-      <summary>查看本次部署日志</summary>
+    <section className={`oa-deploy-logs${open ? ' is-open' : ''}`}>
+      <div className="oa-deploy-log-toolbar">
+        <button type="button" className="oa-deploy-log-toggle" aria-expanded={open} aria-controls={open ? terminalId : undefined} onClick={() => setOpen(current => !current)}>
+          <AppIcon name={open ? 'chevronDown' : 'chevronRight'} size={13} />
+          本次部署日志
+        </button>
+        {open && logs && <button type="button" className="oa-btn oa-btn-xs" onClick={() => onCopy(logs)}>
+          <AppIcon name={copied ? 'check' : 'copy'} size={12} />
+          {copied ? '已复制' : '复制日志'}
+        </button>}
+      </div>
       {open && (
-        <>
-          {logs && <button type="button" className="oa-btn oa-btn-xs" onClick={() => onCopy(logs)}>
-            <AppIcon name={copied ? 'check' : 'copy'} size={12} />
-            {copied ? '已复制' : '复制日志'}
-          </button>}
+        <div className="oa-deploy-log-content" id={terminalId}>
           {error && <p className="oa-hint" role="status">{live ? '暂时无法读取最新日志，将自动重试。' : '暂时无法读取日志，可重新展开查看。'}</p>}
           <pre
             className="oa-log-terminal"
+            tabIndex={0}
+            aria-label="本次部署日志内容"
             ref={logRef}
             onScroll={event => {
               const element = event.currentTarget
               followTail.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 20
             }}
           >{logs || '等待输出…'}</pre>
-        </>
+        </div>
       )}
-    </details>
+    </section>
   )
 }
 
@@ -414,6 +435,7 @@ export function AppsPanel({
   const [wizardBusy, setWizardBusy] = useState(false)
   const [wizardError, setWizardError] = useState<string | null>(null)
   const [wizardNotice, setWizardNotice] = useState<string | null>(null)
+  const [startupRecheck, setStartupRecheck] = useState<{ key: string; pending?: boolean; message?: string; error?: boolean }>()
 
   // Step 1 Form State
   const [upgradeTarget, setUpgradeTarget] = useState<DeployedApp | null>(null)
@@ -679,6 +701,7 @@ export function AppsPanel({
   )
 
   const progressJobId = wizardJob?.id
+  const progressRequestKey = `${progressJobId ?? ''}:${wizardJob?.requestId ?? ''}`
   const progressStatus = wizardJob?.status
   const progressSlug = wizardJob?.slug
   const progressUsesReceipt = Boolean(wizardJob?.archivedRevision)
@@ -1205,6 +1228,26 @@ export function AppsPanel({
       if (updated) { setWizardJob(updated); navigate?.(updated) }
     } catch (error) {
       setWizardError(readErrorMessage(error, '无法继续 AI 验收'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleRecheckStartup = async () => {
+    if (!wizardJob || !api.appVerifyWithOptions || wizardBusy) return
+    const { id, requestId } = wizardJob
+    const key = progressRequestKey
+    setWizardBusy(true)
+    setStartupRecheck({ key, pending: true })
+    try {
+      const raw = await api.appVerifyWithOptions(id, JSON.stringify({ checkStartup: true }), contextId)
+      const updated = JSON.parse(raw) as AppDeliveryJob
+      if (updated.id !== id || updated.requestId !== requestId) throw new Error('平台返回了其他部署任务的检查结果')
+      setWizardJob(current => current?.id === id && current.requestId === requestId ? updated : current)
+      setStartupRecheck({ key, message: describeDeploymentStartup(updated), error: !updated.startupCheck })
+      if (updated.status === 'verified') void loadWorkspaceData(true)
+    } catch (error) {
+      setStartupRecheck({ key, message: readErrorMessage(error, '无法重新检查应用启动状态'), error: true })
     } finally {
       setWizardBusy(false)
     }
@@ -2291,6 +2334,7 @@ export function AppsPanel({
             const progress = deploymentProgress(wizardJob)
             const failed = progress.tone === 'danger'
             const liveLogs = isDeploymentInProgress(wizardJob.status)
+            const recheck = startupRecheck?.key === progressRequestKey ? startupRecheck : undefined
             return (
               <div className="oa-deploy-progress">
                 <div className="oa-deploy-status" role="status">
@@ -2304,19 +2348,8 @@ export function AppsPanel({
                     </a>
                   )}
                 </div>
-                {(progressUsesReceipt ? api.appDeploymentLogs : api.appLogs) && (
-                  <DeploymentLogs
-                    key={`${wizardJob.id}:${wizardJob.requestId ?? ''}`}
-                    fetchLogs={fetchDeploymentLogs}
-                    live={liveLogs}
-                    buildOnly={liveLogs && !progressUsesReceipt}
-                    failed={failed}
-                    onCopy={text => void copyText('wizard-logs', text)}
-                    copied={copiedKey === 'wizard-logs'}
-                  />
-                )}
                 {wizardJob.assessment && (
-                  <div className="oa-subcard" style={{ whiteSpace: 'pre-wrap' }}>
+                  <div className="oa-subcard oa-deploy-message">
                     <strong>AI 验收结论</strong>
                     <p>{wizardJob.assessment.report}</p>
                   </div>
@@ -2325,11 +2358,17 @@ export function AppsPanel({
                   <>
                     <div className="oa-alert oa-alert-danger" role="alert">
                       <AppIcon name="warning" size={16} />
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{blockedByPreviousBuild(wizardJob)
+                      <div className="oa-deploy-message">{blockedByPreviousBuild(wizardJob)
                         ? '服务器上一轮构建还在进行。等构建结束后，可核对并重新发布原交付包。'
                         : wizardJob.error || '平台未返回具体失败原因。'}</div>
                     </div>
-                    <div>
+                    <div className="oa-deploy-actions">
+                      {api.appVerifyWithOptions && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRecheckStartup()}>
+                          <AppIcon name="refresh" size={13} />
+                          {recheck?.pending ? '正在检查…' : '重新检查应用是否已启动'}
+                        </button>
+                      )}
                       {wizardJob.assessmentPending ? (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleContinueAssessment()}>
                           继续 AI 验收
@@ -2345,6 +2384,19 @@ export function AppsPanel({
                       )}
                     </div>
                   </>
+                )}
+                {recheck?.message && (
+                  <div className={`oa-hint oa-deploy-message${recheck.error ? ' oa-deploy-recheck-error' : ''}`} role="status">{recheck.message}</div>
+                )}
+                {(progressUsesReceipt ? api.appDeploymentLogs : api.appLogs) && (
+                  <DeploymentLogs
+                    key={progressRequestKey}
+                    fetchLogs={fetchDeploymentLogs}
+                    live={liveLogs}
+                    buildOnly={liveLogs && !progressUsesReceipt}
+                    onCopy={text => void copyText('wizard-logs', text)}
+                    copied={copiedKey === 'wizard-logs'}
+                  />
                 )}
               </div>
             )
@@ -3023,7 +3075,7 @@ export function AppsPanel({
   }
 
   return (
-    <div className={`opc-apps-root${viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs' ? ' oa-apps-log-view' : ''}`}>
+    <div className={`opc-apps-root${(viewMode === 'wizard' && wizardStep === 4) || (viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs') ? ' oa-apps-log-view' : ''}`}>
       <style>{appsCss}</style>
       {viewMode === 'list' && (loadingLinkedJob || linkedJob && !restoredLinkedJob.current
         ? <p role="status">正在查找当前会话的应用任务…</p>
