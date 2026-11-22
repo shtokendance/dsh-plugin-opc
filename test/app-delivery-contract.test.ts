@@ -33,8 +33,9 @@ test('selected AI declares acceptance for static apps and explicit route authent
     const validate = (version: AppDocument) => worker({ action: 'validate', root, proposal: { ...proposal, contract: version } })
     assert.equal((await validate(contract)).valid, true)
 
-    await assert.rejects(validate({ ...contract, configuration_review: undefined, verification: { targets: [] } }),
-      (error: unknown) => /configuration_review/.test(String(error)) && /verification\.targets/.test(String(error)))
+    assert.equal((await validate({ ...contract, verification: undefined })).valid, true)
+    await assert.rejects(validate({ ...contract, configuration_review: undefined }), /configuration_review/)
+    await assert.rejects(validate({ ...contract, verification: { targets: 'invalid' } }), /verification\.targets/)
     await assert.rejects(validate({ ...contract, configuration_review: { ...contract.configuration_review,
       evidence: ['Dockerfile:99'] } }), /configuration_review/)
     await assert.rejects(validate({ ...contract, storage_mounts: [{ name: 'Data', kind: 'state-data', container_path: '/data/.' }] }), /规范路径：\/data/)

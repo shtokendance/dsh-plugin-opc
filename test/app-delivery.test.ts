@@ -1361,6 +1361,72 @@ test('skill delivery waits for the selected AI at build and runtime before enabl
   }
 })
 
+test('domain deployment completes without AI and preserves the full failed attempt log for the original session', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-domain-deploy-'))
+  try {
+    const contexts = new ContextStore()
+    contexts.replace({ issuer: 'https://example.test', subject: 'alice', tenant: 'one', spaces: ['one'], generation: 1 })
+    const expected = contexts.applicationContextId!
+    const core = Object.assign(new EventEmitter(), { auth: { contexts } }) as unknown as OpcCore
+    const delivery = new AppDelivery(core, home, { async read() { return {} }, async write() {} })
+    const id = 'a776948b-b4ad-4c38-99c4-85f187489eca'
+    const revision = '1'.repeat(32)
+    const root = join(home, 'opc', 'apps', identityHash(contexts.captureApplication(expected).context), id)
+    const url = 'http://app.example.test'
+    const analysisSessionId = 'ba8dac0c-d0b3-4da3-9a40-dab005a50499'
+    const requestId = 'fixture-request'
+    const saved = { id, name: 'App', slug: 'test-app', url, session: 'parent', analysisSessionId, events: [],
+      revision, archivedRevision: revision, requestId, status: 'building', published: true, deploymentCheck: 'domain',
+      proposal: { ...proposal(url), delivery_format: 1 }, hashes: { 'app.tar': 'a', 'skill.zip': 'b', 'delivery.json': 'c' } }
+    await mkdir(join(root, revision), { recursive: true })
+    await writeFile(join(root, 'job.json'), JSON.stringify(saved))
+    const buildLog = 'build beginning\n' + 'log from compiler\n'.repeat(1900)
+    const runtimeLogs = 'application process exited'
+    let status = 'promoting'
+    delivery.platform = async path => {
+      if (path.endsWith('/requests/' + requestId)) return {
+        status, version: 1, request_id: requestId, published_version: status === 'running' ? 1 : 0,
+        is_active: status === 'running', delivery_plan_sha256: 'c', build_log: buildLog, runtime_logs: runtimeLogs,
+      }
+      assert.equal(path, '/test-app')
+      return { status: 'running', current_version: 1, app_url: url, build_log: '[Artifact] app.tar:a\n[Artifact] skill.zip:b\n[Artifact] delivery.json:c\n' }
+    }
+    assert.equal((await delivery.verify(id, expected, { automatic: true })).status, 'building')
+    status = 'running'
+    const deployed = await delivery.verify(id, expected, { automatic: true })
+    assert.equal(deployed.status, 'verified')
+    assert.equal(deployed.assessment, undefined)
+    assert.equal(deployed.verification.checks[0].operation, 'deployment_domain')
+    await writeFile(join(root, 'job.json'), JSON.stringify(saved))
+    status = 'failed'
+    const failed = await delivery.verify(id, expected, { automatic: true })
+    assert.equal(failed.failureStage, 'deployment')
+    const received = Promise.withResolvers<void>()
+    delivery.analyze = async (job, _root, _feedback, _signal, onSessionReady, _fromChat, assessment) => {
+      try {
+        assert.equal(job.analysisSessionId, analysisSessionId)
+        assert.equal(job.analysisMode, 'repair')
+        assert.equal(assessment, undefined)
+        let start = 1, all = ''
+        do {
+          const result = await worker({ action: 'read_failed', path: '@deployment/logs', root, revision: job.failedRevision, start })
+          all += result.text
+          start = result.next_start
+        } while (start)
+        assert.equal(all, buildLog + '\n' + runtimeLogs)
+        await onSessionReady(analysisSessionId)
+        received.resolve()
+      } catch (error) {
+        received.reject(error)
+      }
+    }
+    await delivery.startAnalysis(id, '核对启动失败', expected, 'a-different-parent', { mode: 'repair' })
+    await received.promise
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('an unnumbered deployment becomes a failed request or a confirmed release from its own receipt', async () => {
   const home = await mkdtemp(join(tmpdir(), 'opc-publish-receipt-'))
   try {
@@ -2213,7 +2279,7 @@ test('plaintext input, generated values and final configuration artifacts stay c
   delivery.platform = async (path, _context, options) => {
     const form = options?.form
     if (path === '/check-slug') return { available: true, app_url: url }
-    if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, isolated_candidate: true, resources: [] }
+    if (path === '/resources') return { delivery_format: 1, config_format: 1, visible_config_values: true, domain_deployment_check: true, resources: [] }
     if (path === '/deliveries' && form) {
       if (failArchive) throw new Error('fixture archive unavailable')
       const planHash = await digest(form, 'delivery_plan')
@@ -2227,6 +2293,7 @@ test('plaintext input, generated values and final configuration artifacts stay c
     if (path === '/publish' && form) {
       // Inspect the multipart on the wire, where FormData transforms string line endings.
       const wire = await new Request(url, { method: 'POST', body: form }).formData()
+      assert.equal(wire.get('deployment_check'), 'domain')
       const manifest = wire.get('delivery_plan')
       assert.equal(typeof manifest, 'string')
       const planHash = createHash('sha256').update(String(manifest)).digest('hex')
