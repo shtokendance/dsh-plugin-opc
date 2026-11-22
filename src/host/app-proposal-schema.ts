@@ -22,7 +22,7 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
       outcome: { ...text, enum: ['ready', 'blocked'] },
       reason: text,
     } },
-    skill_markdown: { ...str, description: '按当前改造技能要求生成可用的应用 SKILL.md，含 YAML 名称与说明，记录真实业务操作与调用方式，通过配置键引用部署值' },
+    skill_markdown: { ...str, description: '提交带实际换行的 Markdown 正文，从标题或正文开头。插件生成 YAML 文件头。记录真实业务操作与调用方式，通过配置键引用部署值。' },
     issues: { ...objects, items: { ...object, properties: {
       id: text, evidence: text, impact: text, recommendation: text,
     } } },
@@ -113,8 +113,8 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
           path: text, purpose: text, evidence: { ...strings, required: true },
           actions: { type: 'array', required: true, items: { oneOf: [str, object] } }, auth: routeAuth,
         } } },
-      configuration_review: { ...object, description: '总结实际读取的配置、资源和挂载及其源码证据。没有部署配置也要说明核实依据。', properties: {
-        summary: text, evidence: { ...strings, required: true, description: '实际读取的源码文件:行号' },
+      configuration_review: { ...object, description: '可选的配置核对说明，可提供实际读取的文件和行号。', properties: {
+        summary: str, evidence: { ...strings, description: '实际读取的源码文件:行号' },
       } },
       verification: { ...object, description: '可选的只读业务验证计划，供部署完成后使用。', properties: {
         targets: { ...objects, required: true, items: { ...object, properties: {

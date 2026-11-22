@@ -34,7 +34,8 @@ test('selected AI declares acceptance for static apps and explicit route authent
     assert.equal((await validate(contract)).valid, true)
 
     assert.equal((await validate({ ...contract, verification: undefined })).valid, true)
-    await assert.rejects(validate({ ...contract, configuration_review: undefined }), /configuration_review/)
+    assert.equal((await validate({ ...contract, configuration_review: undefined })).valid, true)
+    assert.equal((await validate({ ...contract, configuration_review: { evidence: ['Dockerfile:1-2'] } })).valid, true)
     await assert.rejects(validate({ ...contract, verification: { targets: 'invalid' } }), /verification\.targets/)
     await assert.rejects(validate({ ...contract, configuration_review: { ...contract.configuration_review,
       evidence: ['Dockerfile:99'] } }), /configuration_review/)
@@ -58,6 +59,46 @@ test('selected AI declares acceptance for static apps and explicit route authent
     assert.deepEqual(parsed.proposal.contract.apis[0].auth, api.auth)
     assert.equal(parsed.proposal.contract.apis[1].auth.type, 'bearer')
     await assert.rejects(validate({ ...withAuth, apis: [{ ...api, effect: 'write', confirmation_required: true }] }), /effect: read/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('delivery validates configuration and skill credential references together before bundling', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'opc-credential-contract-'))
+  try {
+    const source = join(workspace, 'source')
+    const root = join(workspace, 'job')
+    const url = 'https://fixture.example.test'
+    await mkdir(source)
+    await writeFile(join(source, 'Dockerfile'), 'FROM nginx:alpine\n')
+    await writeFile(join(source, 'settings.py'), 'LOCAL_TOKEN = "fixture-only"\n')
+    await worker({ action: 'prepare', root, source, slug: 'fixture', url })
+    const proposal = {
+      summary: '检查技能凭据来源', delivery_format: 1, config_format: 1, verification_format: 1, changes: [],
+      skill_markdown: '# 查阅页面\n\n保留应用已有的登录方式。\n',
+      contract: {
+        schema_version: 1, slug: 'fixture', base_url: url, name: 'Fixture', description: 'Fixture application',
+        runtime: { language: 'html', version: '5', port: 80 }, build_context: ['Dockerfile'],
+        resources: [], storage_mounts: [], apis: [], pages: [],
+        configs: [{ key: 'PORT', required: false, secret: false, value_plan: { kind: 'source' },
+          source: { path: 'start.sh', keys: ['PORT'] } }],
+        credential_sources: { LOCAL_TOKEN: { path: 'settings.py', keys: ['LOCAL_TOKEN'] } },
+      },
+    }
+    const validate = () => worker({ action: 'validate', root, proposal })
+    await assert.rejects(validate(), (error: unknown) => {
+      const message = String(error)
+      assert.match(message, /PORT.*start\.sh/)
+      assert.match(message, /credential_sources\.LOCAL_TOKEN.*settings\.py/)
+      assert.doesNotMatch(message, /fixture-only/)
+      return true
+    })
+    proposal.contract.configs = []
+    Object.assign(proposal.contract.credential_sources, { LOCAL_TOKEN: { path: 'settings.py', line: 1, name: 'LOCAL_TOKEN' } })
+    assert.equal((await validate()).valid, true)
+    proposal.skill_markdown = '---\\nname: app-fixture\\ndescription: Fixture\\n---\\n# 查阅页面'
+    await assert.rejects(validate(), /skill_markdown.*换行/)
   } finally {
     await rm(workspace, { recursive: true, force: true })
   }

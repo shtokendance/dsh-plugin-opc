@@ -179,6 +179,36 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
         assert.deepEqual(JSON.parse(current.text), candidate(options[0]).contract.apis)
       })
     }
+    const repairJob: import('../src/host/app-delivery.ts').DeliveryJob = {
+      id: 'repair-fixture', slug: 'test-app', name: '测试应用', url, session: '', status: 'analyzing', events: [],
+      modelSelection: { provider: 'fixture-provider', model: 'fixture-model' },
+    }
+    const repairPlan = { ...proposal(url), changes: [], readiness: { outcome: 'ready', reason: '已核对' },
+      contract: { ...proposal(url).contract, verification: { targets: [] },
+        data_plan: { strategy: 'initialize', summary: '测试', recovery: '测试恢复' } } }
+    delivery.submit = async (job, _root, candidate) => {
+      if (candidate.skill_markdown.startsWith('broken')) throw new Error('技能正文换行无效')
+      if (candidate.skill_markdown === 'new-error') throw new Error('仍缺少配置值')
+      job.proposal = candidate
+      job.status = 'review'
+    }
+    await delivery.analyze!(repairJob, home, '', new AbortController().signal, async () => {
+      const submit = tools.get('opc_delivery_submit')
+      for (const markdown of ['broken 1', 'broken 2']) {
+        await assert.rejects(submit.execute({ ...repairPlan, skill_markdown: markdown }), /正文换行/)
+      }
+      await assert.rejects(submit.execute({ ...repairPlan, skill_markdown: 'new-error' }), /缺少配置值/)
+      await submit.execute({ ...repairPlan, skill_markdown: 'complete' })
+      assert.equal(repairJob.proposal?.skill_markdown, 'complete')
+    })
+    const repeatedJob = { ...repairJob, id: 'repeated-fixture', status: 'analyzing' as const, proposal: undefined, events: [] }
+    await assert.rejects(delivery.analyze!(repeatedJob, home, '', new AbortController().signal, async () => {
+      const submit = tools.get('opc_delivery_submit')
+      const repeated = { ...repairPlan, skill_markdown: 'broken unchanged' }
+      await assert.rejects(submit.execute(repeated), /正文换行/)
+      await assert.rejects(submit.execute(repeated), /正文换行/)
+      await assert.rejects(submit.execute(repeated), /已停止自动重试/)
+    }), /正文换行/)
     const assessment: NonNullable<Parameters<NonNullable<AppDelivery['analyze']>>[6]> = { phase: 'runtime' }
     const requestId = '5dca25e0-de32-4cf1-8ad0-687529b95c9c'
     const assessedJob: import('../src/host/app-delivery.ts').DeliveryJob = {
@@ -1993,7 +2023,7 @@ test('skill delivery bundles authored files, explicit mounts and the submitted s
     await mkdir(source, { recursive: true })
     await writeFile(join(source, 'main.py'), 'def lookup():\n    return {"ok": True}\n')
     await worker({ action: 'prepare', root: jobRoot, source, slug: 'test-app', url })
-    const markdown = '---\nname: app-test-app\ndescription: 读取测试记录\n---\n\n使用 lookup 查询测试记录。\n'
+    const markdown = '# 查询测试记录\n\n使用 lookup 查询测试记录。JSON 里的 `\\n` 是示例。\n'
     const sql = 'CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY);\n'
     const previous = proposal(url)
     const contract = { ...previous.contract, storage_mounts: [],
@@ -2001,7 +2031,7 @@ test('skill delivery bundles authored files, explicit mounts and the submitted s
     const plan = { ...previous, delivery_format: 1, skill_markdown: markdown, contract,
       changes: [...previous.changes, { path: 'db/init.sql', reason: '初始化表结构', content: sql }] }
     const result = await worker({ action: 'bundle', root: jobRoot, revision: 'r1', proposal: plan, dockerfile_only: true })
-    assert.equal(result.skill_markdown, markdown)
+    assert.equal(result.skill_markdown, '---\nname: app-test-app\ndescription: "查询测试记录"\n---\n\n' + markdown)
     assert.deepEqual(result.proposal.contract.storage_mounts, [])
     assert.deepEqual(result.proposal.contract.apis.map((api: AppDocument) => api.id), ['lookup'])
     const saved = JSON.parse(await readFile(join(jobRoot, 'r1', 'bundle', 'delivery.json'), 'utf8'))

@@ -19,7 +19,8 @@ declare module '@deepseek-ai/dsh-llm' {
 
 const ANALYSIS_TIMEOUT_MS = 15 * 60_000
 const REPLY_TIMEOUT_MS = 30 * 60_000
-const MAX_VALIDATION_ERRORS = 3
+const MAX_REPEATED_VALIDATION_ERRORS = 3
+const MAX_VALIDATION_FAILURES = 12
 
 function loadBundledSkillText(relativePath: string): string {
   const fromSrc = fileURLToPath(new URL(`../../runtime/app_delivery/${relativePath}`, import.meta.url))
@@ -192,7 +193,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       return snapshot
     }
     const rejectedProposals = new Set<string>()
-    let repeatedProposal = false
+    let consecutiveValidationErrors = 0
+    let validationStopped = false
     let draftFileChanges: { id?: string; path?: string; reason?: string }[] = []
     try {
       const draftsRaw = JSON.parse(readFileSync(join(root, 'draft_files.json'), 'utf8'))
@@ -212,7 +214,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         const safeText = await delivery.recordAnalysisReply(job, root, text, AbortSignal.any([abort, turnSignal]))
         validationErrors.length = 0
         rejectedProposals.clear()
-        repeatedProposal = false
+        consecutiveValidationErrors = 0
+        validationStopped = false
         replyCount++
         wakeReply?.()
         return safeText
@@ -370,7 +373,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       parameters: proposalParameters(port, portLocked, updating), output,
       async execute(args) {
         if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
-        if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) throw new Error('技术方案连续校验未通过，已停止自动重试')
+        if (validationStopped) throw new Error('技术方案连续校验未通过，已停止自动重试')
         job.events.push(formatToolStep('submit'))
         delivery.core.emit('change')
         let candidate: AppDocument | undefined
@@ -423,27 +426,24 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           const message = error instanceof Error ? error.message : String(error)
           const detail = await worker({ action: 'redact_feedback', root, text: message.slice(0, 2000) }, abort)
           const duplicateError = validationErrors.includes(detail)
+          consecutiveValidationErrors = validationErrors.at(-1) === detail ? consecutiveValidationErrors + 1 : 1
           validationErrors.push(detail)
           job.analysisFailure = detail
-          if (candidate) {
-            const rej = fingerprint({
-              contract: candidate.contract,
-              issues: candidate.issues,
-              changes: candidate.changes,
-              unresolved: candidate.unresolved,
-              decisions: candidate.decisions,
-              readiness: candidate.readiness,
-              reason: detail,
-            })
-            if (rejectedProposals.has(rej)) {
-              repeatedProposal = true
-              cancel()
-            }
-            rejectedProposals.add(rej)
+          let referencedDrafts: unknown[] = []
+          if (Array.isArray(candidate?.changes) && candidate.changes.length) {
+            try {
+              const drafts: Record<string, AppDocument> = JSON.parse(readFileSync(join(root, 'draft_files.json'), 'utf8'))
+              referencedDrafts = candidate.changes.map((change: AppDocument | null) => change?.id ? drafts[change.id]
+                : change?.path ? Object.values(drafts).findLast(draft => draft.path === change.path) : undefined)
+            } catch {}
           }
+          const rejected = fingerprint({ proposal: candidate ?? args, referencedDrafts, reason: detail })
+          validationStopped = rejectedProposals.has(rejected) || consecutiveValidationErrors >= MAX_REPEATED_VALIDATION_ERRORS ||
+            validationErrors.length >= MAX_VALIDATION_FAILURES
+          rejectedProposals.add(rejected)
           if (!duplicateError) job.events.push(`提案校验未通过：${detail}`)
           delivery.core.emit('change')
-          if (validationErrors.length === MAX_VALIDATION_ERRORS) cancel()
+          if (validationStopped) cancel()
           throw new Error(detail)
         }
         const questions = analysisQuestions(job.proposal)
@@ -657,7 +657,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           await analysis.agent.whenIdle()
           if (assessment?.result) return
         } catch (err) {
-          if (signal.aborted || (abort.aborted && !repeatedProposal)) throw err
+          if (signal.aborted || (abort.aborted && !validationStopped)) throw err
           errorMessage = err instanceof Error ? err.message : String(err)
         }
         if (job.status === 'review') {
@@ -665,7 +665,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           attempt = -1
           continue
         }
-        if (repeatedProposal || validationErrors.length >= MAX_VALIDATION_ERRORS) {
+        if (validationStopped) {
           throw new Error(validationErrors.at(-1) ?? '技术方案连续校验未通过，已停止自动重试')
         }
         abort.throwIfAborted()
