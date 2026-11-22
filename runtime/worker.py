@@ -355,8 +355,8 @@ def delivery_evidence_errors(contract, source, changes, *, requires_verification
     if not requires_verification:
         return errors
     review = contract.get("configuration_review")
-    if not isinstance(review, dict) or not nonempty(review.get("summary")) or not source_evidence(review.get("evidence")):
-        errors.append("contract.configuration_review 必须包含配置核对摘要和源码 evidence；没有配置时也要说明核实依据")
+    if review is not None and (not isinstance(review, dict) or ("evidence" in review and not source_evidence(review["evidence"]))):
+        errors.append("contract.configuration_review.evidence 必须引用有效的源码文件和行号")
 
     verification = contract.get("verification")
     if not isinstance(verification, dict) or "targets" not in verification:
@@ -393,6 +393,25 @@ def delivery_evidence_errors(contract, source, changes, *, requires_verification
         else:
             errors.append(f"{field}.kind 必须是 http 或 operation")
     return errors
+
+
+def normalize_skill_markdown(markdown, contract):
+    d.require(isinstance(markdown, str) and markdown.strip(), "skill_markdown 必须提供应用技能正文")
+    markdown = markdown.replace("\r\n", "\n").strip("\n")
+    d.require(not markdown.startswith(r"---\n") and
+              not ("\n" not in markdown and re.search(r"\\n(?:\\n|#{1,6} |[-*] )", markdown)),
+              r"skill_markdown 把 \n 写成了正文字符，请使用实际换行并提交 Markdown 正文")
+    if markdown.startswith("---\n"):
+        legacy_header = re.match(r"\A---\n.*?\n---[ \t]*(?:\n|\Z)", markdown, re.S)
+        d.require(legacy_header is not None, "skill_markdown 的旧 YAML 文件头未闭合，可直接提交 Markdown 正文")
+        markdown = markdown[legacy_header.end():].strip("\n")
+    d.require(bool(markdown.strip()), "skill_markdown 必须提供应用技能正文")
+    d.require("<!-- opc-admin-login -->" not in markdown, "skill_markdown 中的登录凭据必须使用配置引用")
+    d.require(isinstance(contract.get("slug"), str) and isinstance(contract.get("description"), str)
+              and contract["description"].strip(), "交付契约必须包含应用标识和业务说明")
+    result = d.skill_frontmatter(contract) + markdown + "\n"
+    d.require(len(result.encode("utf-8")) <= 128_000, "skill_markdown 超过 128000 字节")
+    return result
 
 
 def resolve_and_enrich_proposal(
@@ -479,15 +498,13 @@ def resolve_and_enrich_proposal(
         discovery_report = proposal.pop("discovery_report", None)
         transformation_report = proposal.pop("transformation_report", None)
 
+    skill_errors = []
     if skill_delivery:
         d.require(not contract.get("admin_account"), "按技能声明应用自己的账号配置和登录引用，不使用插件建号方案")
-        markdown = proposal.get("skill_markdown")
-        d.require(isinstance(markdown, str) and markdown.startswith("---\n") and len(markdown.encode("utf-8")) <= 128_000
-                  and "<!-- opc-admin-login -->" not in markdown,
-                  "请提供技能要求的 SKILL.md，使用凭据引用")
-        header = markdown.split("\n---", 1)[0]
-        d.require("\n---" in markdown and re.search(r"^name:\s*app-" + re.escape(contract.get("slug", "")) + r"\s*$", header, re.M)
-                  and re.search(r"^description:\s*\S", header, re.M), "应用 SKILL.md 必须声明对应 app-<slug> 和 description")
+        try:
+            proposal["skill_markdown"] = normalize_skill_markdown(proposal.get("skill_markdown"), contract)
+        except ValueError as exc:
+            skill_errors.append(str(exc))
 
     if not skill_delivery and repair and failed_revision and failed_revision.isalnum():
         failed_archive = root / failed_revision / "bundle/app.tar"
@@ -510,7 +527,7 @@ def resolve_and_enrich_proposal(
     if isinstance(contract, dict):
         unresolved_all = list(proposal.get("unresolved") or []) + list(contract.get("unresolved") or [])
         errors: list[str] = (
-            d.contract_shape_errors(contract) + delivery_declaration_errors(contract, complete=not unresolved_all)
+            skill_errors + d.contract_shape_errors(contract) + delivery_declaration_errors(contract, complete=not unresolved_all)
             if skill_delivery else []
         )
         if skill_delivery and not unresolved_all:
@@ -553,8 +570,11 @@ def resolve_and_enrich_proposal(
                 if config.get("source") is not None:
                     try:
                         original_value(source, config["source"])
-                    except ValueError as exc:
-                        errors.append(str(exc))
+                    except FileNotFoundError:
+                        ref = config["source"]
+                        errors.append(f"配置 {config['key']}.source 指向不存在的原始文件：{ref.get('path')}")
+                    except (ValueError, OSError) as exc:
+                        errors.append(f"配置 {config['key']}.source：{exc}")
 
         if valid_config_dicts and not skill_delivery:
             try:
@@ -588,7 +608,9 @@ def resolve_and_enrich_proposal(
             lambda: resolve_authentication(contract, prefer_explicit=skill_delivery),
             lambda: d.validate_credential_references(contract),
         ]
-        if not skill_delivery:
+        if skill_delivery:
+            checks.append(lambda: read_skill_credentials(source, contract))
+        else:
             checks.extend([
                 lambda: validate_auth_questions(proposal),
                 lambda: validate_auth_evidence(source, proposal),
@@ -666,17 +688,23 @@ def read_skill_credentials(source, contract):
     sources = contract.get("credential_sources", {})
     d.require(isinstance(sources, dict), "credential_sources 必须是对象")
     credentials = {}
+    errors = []
     for key, ref in sources.items():
-        d.require(d.ENV_NAME.fullmatch(key) and isinstance(ref, dict) and isinstance(ref.get("path"), str),
-                  "无效的源码凭据引用")
-        d.require(not is_example_config_path(ref["path"]), "示例配置不能作为技能凭据来源")
-        if "keys" in ref:
-            d.require(set(ref) == {"path", "keys"}, "源码凭据引用只允许填写路径和字段位置")
-        else:
-            d.require(set(ref) == {"path", "line", "name"}, "源码凭据引用只允许填写路径和字段位置")
-        value = original_account_field(source, ref)
-        d.require(bool(value), "源码凭据引用没有可用值")
-        credentials[key] = value
+        try:
+            d.require(d.ENV_NAME.fullmatch(key) and isinstance(ref, dict) and isinstance(ref.get("path"), str),
+                      "无效的源码凭据引用")
+            d.require(not is_example_config_path(ref["path"]), "示例配置不能作为技能凭据来源")
+            fields = {"path", "keys"} if "keys" in ref else {"path", "line", "name"}
+            d.require(set(ref) == fields, "源码凭据引用只允许填写路径和字段位置")
+            value = original_account_field(source, ref)
+            d.require(bool(value), "源码凭据引用没有可用值")
+            credentials[key] = value
+        except FileNotFoundError:
+            errors.append(f"contract.credential_sources.{key} 指向不存在的原始文件：{ref['path']}")
+        except (ValueError, OSError) as exc:
+            errors.append(f"contract.credential_sources.{key}：{exc}")
+    if errors:
+        raise ValueError("\n".join(errors))
     return credentials
 
 

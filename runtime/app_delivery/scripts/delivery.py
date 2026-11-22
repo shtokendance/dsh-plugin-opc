@@ -524,8 +524,13 @@ def runtime_environment(contract, env_file=None):
     return {key: value for key, value in values.items() if key not in provided}
 
 
+def skill_frontmatter(contract):
+    description = json.dumps(contract["description"], ensure_ascii=False)
+    return f"---\nname: app-{contract['slug']}\ndescription: {description}\n---\n\n"
+
+
 def render_skill_markdown(contract, admin_login=None):
-    md = f"---\nname: app-{contract['slug']}\ndescription: {json.dumps(contract['description'], ensure_ascii=False)}\n---\n\n# {contract['name']}\n\n应用 URL：`{contract['base_url']}`。仅在实际部署验证成功后使用。\n\n"
+    md = skill_frontmatter(contract) + f"# {contract['name']}\n\n应用 URL：`{contract['base_url']}`。仅在实际部署验证成功后使用。\n\n"
     if admin_login:
         md += "## 应用管理员登录\n\n用下方账号通过应用自身的登录流程操作。API 调用脚本会直接读取本节。需要使用网页时，用浏览器在本技能声明的应用地址登录，按页面业务流程操作。不要在回复中回显账密。\n\n"
         md += "<!-- opc-admin-login -->\n```json\n" + json.dumps(admin_login, ensure_ascii=False) + "\n```\n\n"
