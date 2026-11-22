@@ -1413,10 +1413,12 @@ test('domain deployment completes without AI and preserves the full failed attem
     const buildLog = 'build beginning\n' + 'log from compiler\n'.repeat(1900)
     const runtimeLogs = 'application process exited'
     let status = 'promoting'
-    delivery.platform = async path => {
+    let startupCheck = { target_running: false, active_version: 1, active_version_running: true, domain_reachable: true }
+    delivery.platform = async (path, _context, options) => {
       if (path.endsWith('/requests/' + requestId)) return {
         status, version: 1, request_id: requestId, published_version: status === 'running' ? 1 : 0,
         is_active: status === 'running', delivery_plan_sha256: 'c', build_log: buildLog, runtime_logs: runtimeLogs,
+        ...(options?.query?.startup_check === '1' ? { startup_check: startupCheck } : {}),
       }
       assert.equal(path, '/test-app')
       return { status: 'running', current_version: 1, app_url: url, build_log: '[Artifact] app.tar:a\n[Artifact] skill.zip:b\n[Artifact] delivery.json:c\n' }
@@ -1431,6 +1433,19 @@ test('domain deployment completes without AI and preserves the full failed attem
     status = 'failed'
     const failed = await delivery.verify(id, expected, { automatic: true })
     assert.equal(failed.failureStage, 'deployment')
+    const oldVersion = await delivery.verify(id, expected, { checkStartup: true })
+    assert.equal(oldVersion.status, 'failed')
+    assert.deepEqual((oldVersion as AppDocument).startupCheck, startupCheck)
+    startupCheck = { target_running: true, active_version: 1, active_version_running: false, domain_reachable: true }
+    const unregisteredVersion = await delivery.verify(id, expected, { checkStartup: true })
+    assert.equal(unregisteredVersion.status, 'failed')
+    assert.deepEqual((unregisteredVersion as AppDocument).startupCheck, startupCheck)
+    status = 'running'
+    startupCheck = { ...startupCheck, active_version_running: true }
+    assert.equal((await delivery.verify(id, expected, { checkStartup: true })).status, 'verified')
+    await writeFile(join(root, 'job.json'), JSON.stringify(saved))
+    status = 'failed'
+    await delivery.verify(id, expected, { automatic: true })
     const received = Promise.withResolvers<void>()
     delivery.analyze = async (job, _root, _feedback, _signal, onSessionReady, _fromChat, assessment) => {
       try {

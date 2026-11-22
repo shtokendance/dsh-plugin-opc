@@ -842,10 +842,13 @@ export const appsCss = `
 /* Terminal Log Viewer */
 .oa-deploy-progress {
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+  min-height: 0;
 }
+.oa-deploy-progress > :not(.oa-deploy-logs) { flex-shrink: 0; }
 .oa-deploy-status {
   display: flex;
   align-items: center;
@@ -859,21 +862,51 @@ export const appsCss = `
 .oa-deploy-status .oa-dot { background: currentColor; }
 .oa-health-result { align-items: center; flex-wrap: wrap; }
 .oa-health-result > div { flex: 1; }
-.oa-deploy-logs > summary {
+.oa-deploy-actions,
+.oa-deploy-log-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.oa-deploy-message {
+  min-width: 0;
+  max-height: 8em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.oa-deploy-recheck-error { color: var(--oa-danger); }
+.oa-deploy-logs,
+.oa-deploy-log-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 8px;
+}
+.oa-deploy-logs.is-open { flex: 1 1 0; min-height: 170px; }
+.oa-deploy-log-toolbar { flex-shrink: 0; justify-content: space-between; }
+.opc-apps-root .oa-deploy-log-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
   cursor: pointer;
   color: var(--oa-ink);
   font-size: 12px;
   font-weight: 600;
-  margin-bottom: 8px;
 }
-.oa-deploy-logs .oa-log-terminal { margin: 6px 0 0; max-height: 256px; }
+.oa-deploy-log-content { flex: 1 1 0; min-height: 0; }
+.oa-deploy-logs .oa-log-terminal { flex: 1 1 0; min-height: 120px; max-height: none; margin: 0; }
 .opc-apps-root.oa-apps-log-view,
 .oa-apps-log-view > .oa-overlay-view {
   flex: 1 1 0;
   min-height: 0;
 }
 .oa-apps-log-view .oa-overlay-body { min-height: 0; }
-.oa-apps-log-view .oa-overlay-body > :not(.oa-detail-log-panel) { flex-shrink: 0; }
+.oa-apps-log-view .oa-overlay-body > :not(.oa-detail-log-panel, .oa-deploy-progress) { flex-shrink: 0; }
 .oa-detail-log-panel {
   display: flex;
   flex: 1 0 240px;

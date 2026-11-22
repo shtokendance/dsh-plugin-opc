@@ -1815,6 +1815,23 @@ export class AppDelivery {
     }
     return this.exclusive(id, async () => {
       const { root, job } = await this.open(scope.directory, id)
+      if (options?.checkStartup === true) {
+        if (!job.requestId) throw new Error('缺少本次发布请求号，无法重新检查应用启动状态')
+        const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected, { query: { startup_check: '1' } })
+        if (receipt.status === 'unknown') throw new Error('平台还未返回本次发布回执，请稍后再检查')
+        checkPublishReceipt(job, receipt)
+        const startupCheck = receipt.startup_check
+        if (!startupCheck || typeof startupCheck.target_running !== 'boolean' ||
+            typeof startupCheck.domain_reachable !== 'boolean' || typeof startupCheck.active_version_running !== 'boolean' ||
+            !Number.isSafeInteger(startupCheck.active_version) || startupCheck.active_version < 0) {
+          throw new Error('平台暂未提供本次发布的启动检查结果')
+        }
+        if (job.deploymentCheck === 'domain' && receipt.status === 'running' && startupCheck.target_running &&
+            startupCheck.domain_reachable && startupCheck.active_version_running && startupCheck.active_version === receipt.published_version) {
+          await this.completePreparedDelivery(root, job, receipt, expected)
+        }
+        return { ...this.public(job, root), startupCheck }
+      }
       if (options?.automatic === true && !['building', 'unknown'].includes(job.status)) {
         const view = this.public(job, root)
         if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
