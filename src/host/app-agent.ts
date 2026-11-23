@@ -8,7 +8,7 @@ import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { ReasoningEffortId, type ContextFormed, type LlmFailure } from '@deepseek-ai/dsh-llm'
-import { analysisQuestions, AppDelivery, type AppDocument, fingerprint, worker } from './app-delivery.ts'
+import { analysisQuestions, AppDelivery, type AppDocument, type DeliveryJob, fingerprint, worker } from './app-delivery.ts'
 import { deliveryDataStrategies, proposalParameters } from './app-proposal-schema.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -97,7 +97,24 @@ interface AnalysisRound {
 
 interface AnalysisSession {
   handle?: AgentHandle
+  opening?: Promise<AgentHandle>
   round?: AnalysisRound
+  context: string
+  registerRound?: (round: AnalysisRound) => void
+}
+
+const configChatPrompt = [
+  '你正在协助用户核对当前应用的本次部署草稿。保持用户选定的模型和原部署会话，用普通用户听得懂的话回答。',
+  '先调用 opc_config_read 获取当前表单中的配置项、值和可编辑状态。用户询问时解释用途；明确要求修改时只调用 opc_config_edit 提交指定的配置项，不明确时先问清楚。',
+  '只在工具确认保存后说明已更新右侧草稿。配置由用户在右侧最终确认发布。源码、Dockerfile、已绑定资源、数据库连接、持久化挂载和新增配置项涉及改造方案，请解释影响并引导用户点击「返回核对方案」，在本会话继续分析。',
+].join('\n')
+
+const jsonOutput = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
+
+function deliveryAgentOptions(job: DeliveryJob) {
+  const model = job.modelSelection
+  return model ? { provider: model.provider, model: model.model,
+    reasoningEffort: model.reasoningEffort ? ReasoningEffortId(model.reasoningEffort) : undefined } : undefined
 }
 
 interface DeliveryObservation {
@@ -124,19 +141,124 @@ function readCurrentProposal(proposal: AppDocument | undefined, path = '', start
 
 export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
   const sessions = new Map<string, AnalysisSession>()
+  const getSession = (id: string, context: string) => {
+    const live = sessions.get(id) ?? { context }
+    live.context = context
+    sessions.set(id, live)
+    return live
+  }
+  const openSession = async (
+    job: DeliveryJob, live: AnalysisSession, options: Omit<CreateAgentOptions, 'sessionId' | 'meta'>, root?: string,
+  ) => {
+    if (live.handle) return live.handle
+    live.opening ??= (async () => {
+      const sessionId = job.analysisSessionId as never
+      const existing = sessionId ? ctx.agents.get(sessionId) : undefined
+      if (existing) {
+        const dispose = setupSession(existing.ctx, job, live)
+        try {
+          if (options.agentOptions?.provider && options.agentOptions.model) {
+            existing.model.select({ provider: options.agentOptions.provider, model: options.agentOptions.model,
+              reasoningEffort: options.agentOptions.reasoningEffort })
+          }
+          return { agent: existing, dispose: async () => dispose() }
+        } catch (error) {
+          dispose()
+          throw error
+        }
+      }
+      const setup = (child: Context) => { setupSession(child, job, live) }
+      return sessionId
+        ? ctx.agents.resume({ ...options, setup, resumeSessionId: sessionId })
+        : ctx.agents.create({ ...options, setup, sessionId: randomUUID() as never, meta: { cwd: root } })
+    })()
+    const opening = live.opening
+    try {
+      return live.handle = await opening
+    } finally {
+      if (live.opening === opening) live.opening = undefined
+    }
+  }
+
+  function setupSession(child: Context, job: DeliveryJob, live: AnalysisSession) {
+    const updating = job.deliveryMode ? job.deliveryMode === 'update' : Boolean(job.upgrade)
+    const deliveryPrompt = loadBundledSkillText(updating ? 'UPDATE.md' : 'SKILL.md') + '\n' +
+      loadBundledSkillText('references/delivery-files.md') + '\n' + loadBundledSkillText('references/assessment.md')
+    const inConfigChat = () => !live.round && delivery.configChat.has(job.id, live.context)
+    const disposers = [
+      child.tools.restrict({ allow: [] }),
+      child.systemPrompt.section({ name: 'opc-delivery', order: 1,
+        text: () => inConfigChat() ? configChatPrompt : deliveryPrompt, complete: true, interpolate: false }),
+      child.tools.register(defineTool({ name: 'opc_config_read', description: '读取本次部署右侧的配置草稿。', parameters: {}, output: jsonOutput,
+        async execute(_, { signal }) {
+          return JSON.stringify(await delivery.configChat.read(job.id, live.context, signal))
+        },
+      }), { when: inConfigChat }),
+      child.tools.register(defineTool({ name: 'opc_config_edit', description: '保存本次部署草稿中用户明确要求修改的现有配置项。先读取最新草稿。', parameters: {
+        changes: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          key: { type: 'string', required: true }, value: { type: 'string', required: true },
+        } } },
+      }, output: jsonOutput,
+        async execute({ changes }, { signal }) {
+          return JSON.stringify(await delivery.configChat.edit(job.id, live.context, changes, signal))
+        },
+      }), { when: inConfigChat }),
+    ]
+    const registered = new Set<string>()
+    live.registerRound = round => {
+      for (const [name, tool] of round.tools) {
+        if (registered.has(name)) continue
+        registered.add(name)
+        disposers.push(child.tools.register({ ...tool, execute: (...args) => {
+          const current = live.round?.tools.get(name)
+          if (!current) throw new Error('请先继续当前应用准备')
+          return current.execute(...args)
+        } }, { when: () => Boolean(live.round) }))
+      }
+    }
+    if (live.round) live.registerRound(live.round)
+    disposers.push(child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
+      const decision = await next()
+      if (decision.kind !== 'enter' || !decision.messages.length || inConfigChat()) return decision
+      const messages = []
+      for (const message of decision.messages) {
+        if (message.source.kind !== 'user' || !('rpcId' in message.source)) {
+          messages.push(message)
+          continue
+        }
+        const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').trim()
+        if (!text) continue
+        if (!live.round) {
+          await new Promise<void>((resolve, reject) => {
+            delivery.startAnalysis(job.id, '', live.context, undefined, {
+              mode: 'resume', fromChat: true, onChatReady: resolve,
+            }).catch(reject)
+          })
+        }
+        const current = live.round
+        if (!current || !await current.ready) throw new Error('当前应用会话未恢复，请核对任务状态后重试')
+        const safeText = await current.reply(text, turnSignal)
+        if (safeText) messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
+      }
+      return messages.length ? { ...decision, messages } : { kind: 'reject' }
+    }))
+    return () => { for (const dispose of disposers.reverse()) dispose?.() }
+  }
+
+  delivery.attachConfigChat = async (job, context, signal) => {
+    await openSession(job, getSession(job.id, context), { agentOptions: deliveryAgentOptions(job), signal })
+  }
+
   delivery.analyze = async (job, root, feedback, signal, onSessionReady, fromChat, assessment) => {
     const parent = ctx.agents.get(job.session as never)
-    const configured = job.modelSelection
-    const selection = configured ? { provider: configured.provider, model: configured.model,
-      reasoningEffort: configured.reasoningEffort ? ReasoningEffortId(configured.reasoningEffort) : undefined }
-      : job.analysisSessionId ? undefined : parent?.model.current() ?? parent?.session.requestHeader()?.config
+    const selection = deliveryAgentOptions(job) ??
+      (job.analysisSessionId ? undefined : parent?.model.current() ?? parent?.session.requestHeader()?.config)
     if (!selection && !job.analysisSessionId) throw new Error('请在当前会话选择此次应用交付使用的 AI 模型')
     const appCtxId = delivery.core.auth.contexts.applicationContextId!
     const isRepair = Boolean(job.failedRevision || job.failedSnapshot || job.failureContext || job.analysisMode === 'repair')
     const port = job.port ?? 8080
     const portLocked = job.portAuto !== true
     const updating = job.deliveryMode ? job.deliveryMode === 'update' : Boolean(job.upgrade)
-    const skill = loadBundledSkillText(updating ? 'UPDATE.md' : 'SKILL.md')
     const inspectActions = [
       'inventory', 'scan_routes_and_pages', 'read', 'read_current_proposal', 'read_failed', 'reference', 'template',
       'inspect_local_storage', 'read_go_dependency', 'resources', 'config_values', 'read_source_connection',
@@ -205,7 +327,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const agentOptions = selection
       ? { provider: selection.provider, model: selection.model, reasoningEffort: selection.reasoningEffort }
       : undefined
-    const live = sessions.get(job.id) ?? {}
+    const live = getSession(job.id, appCtxId)
     const round: AnalysisRound = {
       tools: new Map(),
       ready: sessionReady.promise,
@@ -222,7 +344,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       },
     }
     const register = (tool: ToolDefinition) => round.tools.set(tool.name, tool)
-    const output = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
+    const output = jsonOutput
     register(defineTool({ name: 'opc_delivery_observe',
       description: '读取候选版本实际事实。state 读取状态和日志；运行态 http 或 operation 必须用 target 指定交付契约中的只读验收目标 ID。' +
         (updating ? '已确认 PostgreSQL 迁移时，rehearsal 在隔离库演练。' : ''),
@@ -451,56 +573,11 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
           : '方案已通过校验并保存。请向用户说明关键改造和待填项。OPC 随后生成交付包，实际准备结果以任务状态为准。'
       } }))
-    const options: Omit<CreateAgentOptions, 'sessionId' | 'meta'> = {
-      agentOptions,
-      signal: abort,
-      setup(child) {
-        child.tools.restrict({ allow: [] })
-        child.systemPrompt.section({ name: 'opc-delivery', order: 1,
-          text: skill + '\n' + loadBundledSkillText('references/delivery-files.md') + '\n' + loadBundledSkillText('references/assessment.md'),
-          complete: true, interpolate: false })
-        for (const [name, tool] of round.tools) {
-          child.tools.register({ ...tool, execute: (...args) => {
-            const current = live.round?.tools.get(name)
-            if (!current) throw new Error('请先继续当前应用准备')
-            return current.execute(...args)
-          } })
-        }
-        child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
-          const decision = await next()
-          if (decision.kind !== 'enter' || !decision.messages.length) return decision
-          const messages = []
-          for (const message of decision.messages) {
-            if (message.source.kind !== 'user' || !('rpcId' in message.source)) {
-              messages.push(message)
-              continue
-            }
-            const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').trim()
-            if (!text) continue
-            if (!live.round) {
-              await new Promise<void>((resolve, reject) => {
-                delivery.startAnalysis(job.id, '', appCtxId, undefined, {
-                  mode: 'resume', fromChat: true, onChatReady: resolve,
-                }).catch(reject)
-              })
-            }
-            const current = live.round
-            if (!current || !await current.ready) throw new Error('当前应用会话未恢复，请核对任务状态后重试')
-            const safeText = await current.reply(text, turnSignal)
-            if (safeText) messages.push({ ...message, content: [{ type: 'text' as const, text: safeText }] })
-          }
-          return messages.length ? { ...decision, messages } : { kind: 'reject' }
-        })
-      },
-    }
     live.round = round
-    sessions.set(job.id, live)
     let analysis: AgentHandle
     try {
-      analysis = live.handle ?? (job.analysisSessionId
-        ? await ctx.agents.resume({ ...options, resumeSessionId: job.analysisSessionId as never })
-        : await ctx.agents.create({ ...options, sessionId: randomUUID() as never, meta: { cwd: root } }))
-      live.handle = analysis
+      live.registerRound?.(round)
+      analysis = await openSession(job, live, { agentOptions, signal: abort }, root)
     } catch (error) {
       sessions.delete(job.id)
       sessionReady.resolve(false)
@@ -709,6 +786,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
   }
   ctx.effect(() => async () => {
     delivery.analyze = undefined
+    delivery.attachConfigChat = undefined
     await Promise.allSettled([...sessions.values()].map(session => session.handle?.dispose()))
     sessions.clear()
   })

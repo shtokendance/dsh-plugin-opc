@@ -121,7 +121,7 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
           const agent = {
             session: { id: sessionId },
             tools: { restrict() {}, register: (tool: any) => tools.set(tool.name, tool) },
-            systemPrompt: { section: ({ text }: { text: string }) => { prompt = text } },
+            systemPrompt: { section: ({ text }: { text: string | (() => string) }) => { prompt = typeof text === 'string' ? text : text() } },
             on() {}, inject() {}, cancel() {}, followup() {}, async whenIdle() {},
           }
           setup(agent)
@@ -1961,7 +1961,7 @@ test('attachAppAgent names the deployment session and preserves its title and id
           const agent = {
             session: liveSession,
             tools: { restrict: () => {}, register: () => {} },
-            systemPrompt: { section: ({ text }: { text: string }) => { deliveryInstructions = text } },
+            systemPrompt: { section: ({ text }: { text: string | (() => string) }) => { deliveryInstructions = typeof text === 'string' ? text : text() } },
             on: () => {},
             cancel: () => {},
             inject: (msg: { source?: { summary?: string }; content: { text: string }[] }) => {

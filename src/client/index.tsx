@@ -65,6 +65,8 @@ function registerPanels(ctx: Context): void {
     appCancelAnalysis: (...args) => unwrap(wire.appCancelAnalysis!(...args)),
     appConfigDraft: (...args) => unwrap(wire.appConfigDraft!(...args)),
     appSaveConfigDraft: (...args) => unwrap(wire.appSaveConfigDraft!(...args)),
+    appWatchConfigChat: (...args) => wire.appWatchConfigChat!(...args),
+    appReplyConfigChat: (...args) => unwrap(wire.appReplyConfigChat!(...args)),
     appLocalArtifact: (...args) => unwrap(wire.appLocalArtifact!(...args)),
     appSaveLocalArtifact: (...args) => unwrap(wire.appSaveLocalArtifact!(...args)),
     appHandoff: (...args) => unwrap(wire.appHandoff!(...args)),

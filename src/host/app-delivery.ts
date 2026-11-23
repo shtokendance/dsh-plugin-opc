@@ -12,6 +12,8 @@ import type { OpcCore } from './core.ts'
 import { identityHash } from './context.ts'
 import { DEFAULT_APP_DOMAIN_ROOT } from './opc-config.ts'
 import { resetPythonResolutionCache, resolvePythonInterpreter, workerEnv } from './python-runtime.ts'
+import { ConfigChat } from './config-chat.ts'
+import type { ConfigChatResult } from '../config-chat.ts'
 
 export const ROLLBACK_NOTICE = '回滚恢复代码与运行配置，不自动回退数据库/卷中的业务数据；旧代码和新数据兼容性仍需验证。'
 export type AppDocument = Record<string, any>
@@ -282,6 +284,8 @@ export class AppDelivery {
   private analyses = new Map<string, AbortController>()
   private adminReplies = new Map<string, AdminReply>()
   private preparedProposals = new Map<string, { revision: string; proposalHash: string; result: AppDocument }>()
+  readonly configChat = new ConfigChat()
+  attachConfigChat?: (job: DeliveryJob, expected: string, signal: AbortSignal) => Promise<void>
   analyze?: (
     job: DeliveryJob,
     root: string,
@@ -1063,6 +1067,33 @@ export class AppDelivery {
     controller.abort()
   }
 
+  async *watchConfigChat(id: string, artifact: string, session: string, expected: string, signal: AbortSignal): AsyncIterable<string> {
+    const scope = this.scope(expected)
+    const reviewSignal = AbortSignal.any([signal, scope.signal])
+    const verify = async () => {
+      const { job } = await this.open(scope.directory, id)
+      reviewSignal.throwIfAborted()
+      if (!session || job.analysisSessionId !== session) throw new Error('请在当前部署会话中核对配置')
+      if (job.status !== 'ready' || !job.hashes || fingerprint(job.hashes) !== artifact) {
+        throw new Error('交付版本已变化，请重新核对配置')
+      }
+      return job
+    }
+    const job = await verify()
+    if (!this.attachConfigChat) throw new Error('当前 DSH 无法打开应用配置会话')
+    const attach = this.attachConfigChat
+    for await (const frame of this.configChat.connect(id, expected, async () => { await verify() },
+      () => attach(job, expected, reviewSignal), reviewSignal)) {
+      yield JSON.stringify(frame)
+    }
+  }
+
+  async replyConfigChat(id: string, request: string, body: string, expected: string) {
+    this.scope(expected).assertCurrent()
+    const result = JSON.parse(body) as ConfigChatResult
+    await this.configChat.reply(id, expected, request, result)
+  }
+
   async configDraft(id: string, expected: string) {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
@@ -1109,8 +1140,8 @@ export class AppDelivery {
 
   async saveConfigDraft(id: string, input: AppDocument, expected: string) {
     const scope = this.scope(expected)
-    const { root, job } = await this.open(scope.directory, id)
     return this.exclusive(id, async () => {
+      const { root, job } = await this.open(scope.directory, id)
       if (job.status !== 'ready' || input.artifactHash !== fingerprint(job.hashes)) throw new Error('交付版本已变化，请重新核对配置')
       const rows = input.rows
       if (!Array.isArray(rows) || rows.some(row => !row || typeof row.key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(row.key) ||

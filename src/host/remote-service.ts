@@ -157,6 +157,14 @@ export class OpcRemoteService extends TypertRemoteService {
   async appConfigDraft(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.configDraft(id, expectedContextId)) }
   @Remote
   async appSaveConfigDraft(id: string, body: string, expectedContextId: string): Promise<void> { await this.delivery.saveConfigDraft(id, JSON.parse(body), expectedContextId) }
+  @Remote({ mode: 'stream' })
+  async *appWatchConfigChat(id: string, artifact: string, session: string, expectedContextId: string, signal: AbortSignal): AsyncIterable<string> {
+    yield* this.delivery.watchConfigChat(id, artifact, session, expectedContextId, signal)
+  }
+  @Remote
+  async appReplyConfigChat(id: string, request: string, body: string, expectedContextId: string): Promise<void> {
+    await this.delivery.replyConfigChat(id, request, body, expectedContextId)
+  }
   @Remote
   async appLocalArtifact(id: string, filename: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.localArtifact(id, filename, expectedContextId)) }
   @Remote
