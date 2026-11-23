@@ -28,6 +28,7 @@ import { AppIcon } from './AppIcon.tsx'
 import { AppSkillPreview } from './AppSkillPreview.tsx'
 import { toAppSlug } from './appSlug.ts'
 import { appsCss } from './appsStyles.ts'
+import { DEFAULT_PAGE_SIZE, Pagination, paginateItems, paginationStyles } from './Pagination.tsx'
 
 type ViewMode = 'list' | 'wizard' | 'detail'
 type WizardStep = 1 | 2 | 3 | 4
@@ -532,6 +533,8 @@ export function AppsPanel({
   const beginAnalysisNavigation = () =>
     prepareAnalysisNavigation?.(sessionId, contextId, () => analysisViewActive.current)
   const [loadingList, setLoadingList] = useState(true)
+  const [appsPage, setAppsPage] = useState(1)
+  const [appsPageSize, setAppsPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
   const [{ apps, jobs, loaded: appDirectoryLoaded }, setAppDirectory] = useState({
     apps: [] as DeployedApp[],
     jobs: [] as AppDeliveryJob[],
@@ -1934,9 +1937,11 @@ export function AppsPanel({
             <span>新建第一个应用</span>
           </button>
         </div>
-      ) : (
+      ) : (() => {
+        const { pageItems: pageApps, currentPage: currentAppsPage } = paginateItems(apps, appsPage, appsPageSize)
+        return <>
         <div className="oa-apps-grid">
-          {apps.map(app => {
+          {pageApps.map(app => {
             const tone = jobStatusTone(app.status)
             const readOnly = app.can_manage !== true
             const isFailed = app.status === 'failed' || app.status === 'unhealthy'
@@ -2021,7 +2026,15 @@ export function AppsPanel({
             )
           })}
         </div>
-      )}
+        <Pagination
+          totalItems={apps.length}
+          page={currentAppsPage}
+          pageSize={appsPageSize}
+          onPageChange={setAppsPage}
+          onPageSizeChange={size => { setAppsPageSize(size); setAppsPage(1) }}
+        />
+        </>
+      })()}
     </div>
   )
 
@@ -3563,7 +3576,7 @@ export function AppsPanel({
 
   return (
     <div className={`opc-apps-root${(viewMode === 'wizard' && wizardStep === 4) || (viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs') ? ' oa-apps-log-view' : ''}`}>
-      <style>{appsCss}</style>
+      <style>{appsCss + paginationStyles}</style>
       {viewMode === 'list' && (loadingLinkedJob || restorableLinkedJob && !restoredLinkedJob.current
         ? <p role="status">正在查找当前会话的应用任务…</p>
         : renderAppListView())}
