@@ -8,6 +8,7 @@ import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { followsDeploymentAttempt, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
 import type { OpcCore } from './core.ts'
 import { identityHash } from './context.ts'
 import { DEFAULT_APP_DOMAIN_ROOT } from './opc-config.ts'
@@ -33,6 +34,7 @@ export interface DeliveryJob {
   deliveryMode?: 'initial' | 'update'
   archivedRevision?: string
   deploymentCheck?: 'domain'
+  deploymentProgress?: DeploymentAttemptProgress
   assessment?: DeliveryAssessment
   assessmentPending?: boolean
   analysisSessions?: string[]
@@ -270,7 +272,7 @@ export async function worker(input: AppDocument, signal?: AbortSignal): Promise<
 }
 
 export class AppRequestError extends Error {
-  constructor(readonly status: number, message: string) { super(message) }
+  constructor(readonly status: number, message: string, readonly code?: string, readonly blockingRequestId?: string) { super(message) }
 }
 
 export interface AppDeliveryOptions {
@@ -406,10 +408,20 @@ export class AppDelivery {
   }
   private async applyPublishReceipt(scopeDir: string, root: string, job: DeliveryJob, receipt: AppDocument) {
     checkPublishReceipt(job, receipt)
-    if (!['accepted', 'building', 'built', 'activating', 'runtime_ready', 'promoting', 'running', 'failed'].includes(receipt.status)) return false
+    if (!['accepted', 'building', 'built', 'activating', 'runtime_ready', 'promoting', 'running', 'failed', 'cancelled'].includes(receipt.status)) return false
+    if (receipt.progress?.phase) {
+      const known = job.deploymentProgress
+      job.deploymentProgress = receipt.progress.phase === 'unknown'
+        ? { ...receipt.progress, last_observed_at: known?.last_observed_at,
+          last_observed_phase: known?.phase === 'unknown' ? known.last_observed_phase : known?.phase }
+        : { ...receipt.progress, last_observed_at: Date.now() }
+    }
     job.published = true
     job.version = Object.hasOwn(receipt, 'published_version') ? receipt.published_version || undefined : receipt.version
-    if (receipt.status === 'failed') {
+    if (receipt.status === 'cancelled') {
+      job.status = 'cancelled'
+      job.error = undefined
+    } else if (receipt.status === 'failed' && !followsDeploymentAttempt(job.deploymentProgress)) {
       const facts = [receipt.delivery_step && `发布阶段：${receipt.delivery_step}`,
         receipt.migration_execution && `数据库迁移回执：${receipt.migration_execution}`,
         receipt.build_log, receipt.runtime_logs].filter(Boolean).join('\n')
@@ -734,7 +746,8 @@ export class AppDelivery {
       return { bytes: Buffer.concat(chunks), sha256: response.headers.get('x-artifact-sha256') ?? undefined }
     }
     const result = await response.json().catch(() => { throw new AppRequestError(response.status, `应用接口 HTTP ${response.status}`) })
-    if (!response.ok) throw new AppRequestError(response.status, result.error?.message ?? result.error ?? `应用接口 HTTP ${response.status}`)
+    if (!response.ok) throw new AppRequestError(response.status, result.error?.message ?? result.error ?? `应用接口 HTTP ${response.status}`,
+      result.code ?? result.error?.code, result.blocking_request_id)
     return result
   }
   async create(input: AppDocument, session: string, expected: string) {
@@ -841,6 +854,9 @@ export class AppDelivery {
     const scope = this.scope(expected)
     return this.exclusive(id, async () => {
       const { root, job } = await this.open(scope.directory, id)
+      if (job.failureStage === 'deployment' && job.deploymentProgress && !job.deploymentProgress.retry_safe) {
+        throw new Error('请先确认本次部署已结束并完成清理')
+      }
       if (!['ready', 'awaiting_page_verification', 'failed'].includes(job.status) || !job.proposal) throw new Error('当前状态无法返回改造方案核对')
       let validationError: string | undefined
       if (job.status === 'ready' && job.proposal.delivery_format === 1) {
@@ -869,8 +885,13 @@ export class AppDelivery {
     const scope = this.scope(expected)
     return this.exclusive(id, async () => {
       const { root, job } = await this.open(scope.directory, id)
-      if (job.status !== 'failed' || !job.published || !job.revision || !job.hashes || !job.proposal) {
+      if (!['failed', 'cancelled'].includes(job.status) || !job.published || !job.revision || !job.hashes || !job.proposal) {
         throw new Error('当前任务没有可重新部署的失败版本')
+      }
+      if (job.deploymentProgress && job.requestId) {
+        const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}`, expected)
+        checkPublishReceipt(job, receipt)
+        if (receipt.progress?.retry_safe !== true) throw new Error('请等平台确认上一轮已结束并完成清理，再重试')
       }
       const remote = await this.platform(`/${job.slug}`, expected)
       if (remote.can_manage !== true || remote.app_url !== job.url) throw new Error('没有权限重新部署此应用，或应用地址已变化')
@@ -881,6 +902,7 @@ export class AppDelivery {
       const rows = allConfigs.map(declared => {
         const existing = config.find(row => row.key === declared.key)
         return { key: declared.key, resource_id: existing?.resource_id, resource_key: existing?.resource_key, local_connection_confirmed: existing?.local_connection_confirmed === true,
+          value_source: existing?.value_source, has_value: existing?.has_value, secret: declared.secret === true,
           value: existing?.resource_id ? '' : (existing?.value ?? (declared.secret ? '' : declared.default) ?? '') }
       })
       await this.credentials.write(`draft-${id}`, Object.fromEntries(rows.map((row: AppDocument) => [row.key, row.value])))
@@ -900,12 +922,13 @@ export class AppDelivery {
       job.configDraft = {
         artifactHash: fingerprint(job.hashes),
         rows: rows.map(({ value: _value, ...row }) => row),
-        versionNote: '',
+        versionNote: job.configDraft?.versionNote ?? job.versionNote ?? '',
         ...(Object.keys(storageBindings).length > 0 ? { storageBindings } : {}),
       }
       job.confirmationToken = undefined
       job.status = 'ready'
-      if (job.published) job.upgrade = true
+      if (!job.deploymentProgress && job.published) job.upgrade = true
+      job.deploymentProgress = undefined
       job.published = undefined
       job.superseded = undefined
       job.events.push('已恢复失败版本的交付包和运行配置，请核对后重新部署')
@@ -921,6 +944,9 @@ export class AppDelivery {
   async startAnalysis(id: string, feedback: string, expected: string, session?: string, options?: { mode?: 'analysis' | 'repair' | 'resume'; fromChat?: boolean; onChatReady?: () => void }) {
     const scope = this.scope(expected)
     const { root, job } = await this.open(scope.directory, id)
+    if (job.failureStage === 'deployment' && job.deploymentProgress && !job.deploymentProgress.retry_safe) {
+      throw new Error('请先确认本次部署已结束并完成清理')
+    }
     if (!this.analyze) throw new Error('此 DSH 版本未提供应用分析所需的 Agent 扩展')
     if (this.busy.has(id) || ['building', 'publishing', 'unknown'].includes(job.status)) throw new Error('请先完成当前部署状态核对')
     if (job.assessmentPending && job.archivedRevision && options?.fromChat) {
@@ -1815,7 +1841,7 @@ export class AppDelivery {
       scope.assertCurrent()
       await this.credentials.write(`publish-config-${requestId}`, { rows: JSON.stringify(configs) })
       scope.assertCurrent()
-      job.status = 'publishing'; job.failureStage = undefined; job.error = undefined; job.checks = undefined; await this.save(root, job)
+      job.status = 'publishing'; job.deploymentProgress = undefined; job.failureStage = undefined; job.error = undefined; job.checks = undefined; await this.save(root, job)
       this.core.emit('skills-changed')
       try {
         const result = await this.platform('/publish', expected, { form })
@@ -1825,6 +1851,11 @@ export class AppDelivery {
       } catch (error) {
         if (error instanceof AppRequestError && [400, 401, 403, 404, 409, 413, 422].includes(error.status)) {
           job.status = 'ready'
+          if (job.deploymentCheck === 'domain') {
+            job.deploymentProgress = error.code === 'APP_DELIVERY_PENDING'
+              ? { phase: 'blocked_previous', blocking_request_id: error.blockingRequestId }
+              : { phase: 'submission_rejected' }
+          }
           job.error = error.status === 409 && error.message === 'deployment artifacts do not match the archived delivery revision'
             ? '发布制品与平台归档不一致。请返回核对方案重新生成交付包，再确认发布。'
             : error.message
@@ -1839,6 +1870,7 @@ export class AppDelivery {
           } catch { /* Preserve uncertainty until Platform returns a receipt. */ }
           if (!reconciled) {
             job.status = 'unknown'
+            if (job.deploymentCheck === 'domain') job.deploymentProgress = { phase: 'unknown' }
             job.error = '发布结果未确认，禁止自动重试：' + String(error)
           }
         }
@@ -1850,6 +1882,18 @@ export class AppDelivery {
     const scope = this.scope(expected)
     if (options?.automatic === true && this.busy.has(id)) {
       const { root, job } = await this.open(scope.directory, id)
+      if (job.deploymentProgress?.phase === 'blocked_previous') {
+        const previous = job.deploymentProgress.blocking_request_id
+        if (!previous) return this.public(job, root)
+        const receipt = await this.platform(`/${job.slug}/requests/${previous}`, expected)
+        if (receipt.request_id !== previous) throw new Error('平台返回了其他部署任务')
+        if (receipt.progress?.retry_safe === true || receipt.progress?.phase === 'succeeded') {
+          job.deploymentProgress = { phase: 'submission_rejected' }
+          job.error = '上一轮部署已结束，可以返回第三步重新确认。'
+          await this.save(root, job)
+        }
+        return this.public(job, root)
+      }
       return this.public(job, root)
     }
     return this.exclusive(id, async () => {
@@ -1871,12 +1915,12 @@ export class AppDelivery {
         }
         return { ...this.public(job, root), startupCheck }
       }
-      if (options?.automatic === true && !['building', 'unknown'].includes(job.status)) {
+      if (options?.automatic === true && !followsDeploymentAttempt(job.deploymentProgress) && !['building', 'unknown'].includes(job.status)) {
         const view = this.public(job, root)
         if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
         return view
       }
-      if (!['building', 'unknown', 'awaiting_page_verification', 'verified', 'failed', 'publishing', 'verifying'].includes(job.status) || !job.hashes || !job.proposal) throw new Error('应用尚未发布')
+      if (!['building', 'unknown', 'awaiting_page_verification', 'verified', 'failed', 'cancelled', 'publishing', 'verifying'].includes(job.status) || !job.hashes || !job.proposal) throw new Error('应用尚未发布')
       if (job.proposal.delivery_format === 1) {
         if (this.analyses.has(id) || (options?.automatic && job.assessmentPending)) return this.public(job, root)
         if (!job.archivedRevision || !job.requestId) throw new Error('缺少本轮交付归档或发布请求号，无法核对部署结果')
@@ -2006,15 +2050,27 @@ export class AppDelivery {
   private async advancePreparedDelivery(root: string, job: DeliveryJob, expected: string, onChatReady?: () => void) {
     const scope = this.scope(expected)
     const path = `/${job.slug}/requests/${job.requestId}`
-    const receipt = await this.platform(path, expected)
-    if (receipt.status === 'unknown') { onChatReady?.(); return this.public(job, root) }
+    let receipt: AppDocument
+    try {
+      receipt = await this.platform(path, expected)
+    } catch (error) {
+      scope.assertCurrent()
+      if (!job.deploymentProgress && job.deploymentCheck !== 'domain') throw error
+      onChatReady?.()
+      return this.unconfirmedDeployment(job, root)
+    }
     checkPublishReceipt(job, receipt)
+    if (receipt.status === 'unknown') {
+      onChatReady?.()
+      return (receipt.progress || job.deploymentProgress || job.deploymentCheck === 'domain')
+        ? this.unconfirmedDeployment(job, root) : this.public(job, root)
+    }
     if (receipt.status === 'running') {
       await this.completePreparedDelivery(root, job, receipt, expected)
       onChatReady?.()
       return this.public(job, root)
     }
-    if (receipt.status === 'failed') {
+    if (receipt.status === 'failed' || receipt.status === 'cancelled') {
       await this.applyPublishReceipt(scope.directory, root, job, receipt)
       job.assessmentPending = undefined
       await this.save(root, job)
@@ -2022,7 +2078,7 @@ export class AppDelivery {
       return this.public(job, root)
     }
     if (job.deploymentCheck === 'domain' || (receipt.status !== 'built' && receipt.status !== 'runtime_ready')) {
-      if (job.status !== 'building' && await this.applyPublishReceipt(scope.directory, root, job, receipt)) {
+      if ((job.status !== 'building' || receipt.progress) && await this.applyPublishReceipt(scope.directory, root, job, receipt)) {
         job.assessmentPending = undefined
         job.failureStage = undefined
         await this.save(root, job)
@@ -2074,6 +2130,25 @@ export class AppDelivery {
       }
     })().catch(() => {})
     return this.public(job, root)
+  }
+
+  private unconfirmedDeployment(job: DeliveryJob, root: string) {
+    const known = job.deploymentProgress
+    const deploymentProgress: DeploymentAttemptProgress = { ...known, phase: 'unknown', can_cancel: false, retry_safe: false,
+      last_observed_phase: known?.phase === 'unknown' ? known?.last_observed_phase : known?.phase }
+    return { ...this.public(job, root), deploymentProgress }
+  }
+
+  async cancelDeployment(id: string, requestId: string, expected: string) {
+    const scope = this.scope(expected)
+    return this.exclusive(id, async () => {
+      const { root, job } = await this.open(scope.directory, id)
+      if (!job.archivedRevision || !job.requestId || job.requestId !== requestId) throw new Error('部署任务已变化，请重新检查')
+      const receipt = await this.platform(`/${job.slug}/requests/${job.requestId}/cancel`, expected, { body: {} })
+      if (!await this.applyPublishReceipt(scope.directory, root, job, receipt)) throw new Error('平台尚未确认取消请求')
+      await this.save(root, job)
+      return this.public(job, root)
+    })
   }
 
   private async completePreparedDelivery(root: string, job: DeliveryJob, receipt: AppDocument, expected: string) {

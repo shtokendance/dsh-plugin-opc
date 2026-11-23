@@ -78,6 +78,7 @@ function registerPanels(ctx: Context): void {
     appDetails: (...args) => unwrap(wire.appDetails(...args)),
     appReopenReview: (...args) => unwrap(wire.appReopenReview!(...args)),
     appReopenDeployment: (...args) => unwrap(wire.appReopenDeployment(...args)),
+    appCancelDeployment: (...args) => unwrap(wire.appCancelDeployment!(...args)),
     appVerifyWithOptions: (...args) => unwrap(wire.appVerifyWithOptions!(...args)),
     appSetSkillEnabled: (...args) => unwrap(wire.appSetSkillEnabled!(...args)),
     appVersions: (...args) => unwrap(wire.appVersions!(...args)),

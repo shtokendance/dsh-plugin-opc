@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { followsDeploymentAttempt, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
 import type {
   AppConfigItem,
   AppDeliveryJob,
@@ -262,7 +263,73 @@ function findAppJob(jobs: AppDeliveryJob[], app: Pick<DeployedApp, 'slug' | 'cur
   )
 }
 
+const attemptLabels: Record<DeploymentAttemptProgress['phase'], string> = {
+  submitting: '正在提交部署',
+  submission_rejected: '部署未提交',
+  blocked_previous: '上一轮部署仍在处理',
+  unknown: '暂时无法确认部署进度',
+  queued: '等待构建',
+  building: '正在构建镜像',
+  preparing: '正在准备运行环境',
+  migrating: '正在迁移数据',
+  starting: '正在启动应用',
+  checking_domain: '正在检查应用域名',
+  confirming: '正在确认发布结果',
+  succeeded: '部署成功',
+  cancelling: '正在取消并清理',
+  cleaning: '正在清理本次部署',
+  cancelled: '已取消部署',
+  restoring: '正在恢复应用服务',
+  restored: '已恢复上一版本',
+  failed: '部署失败',
+  recovery_required: '需要平台处理后恢复',
+}
+
+function displayedAttempt(job: AppDeliveryJob) {
+  const attempt = job.deploymentProgress
+  if ((job.assessmentPending || (job.status === 'verifying' && job.deploymentCheck !== 'domain')) &&
+      attempt && ['preparing', 'starting'].includes(attempt.phase)) return undefined
+  return attempt
+}
+
+function attemptLabel(job: AppDeliveryJob, phase: DeploymentAttemptProgress['phase'], stalled = false) {
+  if (phase === 'starting') {
+    return stalled ? (job.upgrade ? '新版本启动比预期久' : '应用启动比预期久')
+      : (job.upgrade ? '正在启动新版本' : attemptLabels.starting)
+  }
+  if (phase === 'failed') {
+    switch (job.deploymentProgress?.failure_kind) {
+      case 'build': return '镜像构建失败'
+      case 'startup': return '应用启动失败'
+      case 'domain': return '应用域名无法访问'
+    }
+  }
+  return stalled ? (phase === 'cancelling' ? '正在取消，清理比预期久'
+    : phase === 'cleaning' ? '本次部署清理比预期久'
+    : phase === 'restoring' ? '应用恢复比预期久'
+    : phase === 'checking_domain' ? '应用域名暂未就绪'
+    : phase === 'queued' ? '构建排队比预期久'
+    : phase === 'building' ? '镜像构建比预期久'
+    : phase === 'migrating' ? '数据迁移比预期久'
+    : attemptLabels[phase]) : attemptLabels[phase]
+}
+
+function elapsedAttemptTime(started?: number) {
+  if (!started || started <= 0) return ''
+  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60_000))
+  if (!minutes) return '不到 1 分钟'
+  const hours = Math.floor(minutes / 60)
+  return hours ? `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分钟` : ''}` : `${minutes} 分钟`
+}
+
 function deploymentProgress(job: AppDeliveryJob) {
+  const attempt = displayedAttempt(job)
+  if (attempt) {
+    if (attempt.phase === 'succeeded' && job.status !== 'verified') return { label: attemptLabels.confirming, tone: 'warn' }
+    const tone = attempt.phase === 'succeeded' ? 'ok' : ['failed', 'recovery_required', 'submission_rejected'].includes(attempt.phase)
+      ? 'danger' : followsDeploymentAttempt(attempt) ? 'warn' : 'accent'
+    return { label: attemptLabel(job, attempt.phase, attempt.stalled), tone }
+  }
   if (job.archivedRevision) {
     if (job.status === 'verified') return { label: '部署成功', tone: 'ok' }
     if (job.assessmentPending) return { label: 'AI 验收已暂停', tone: 'danger' }
@@ -372,6 +439,7 @@ function DeploymentLogs({ fetchLogs, live, buildOnly, onCopy, copied }: {
 }
 
 function inferStepForJob(job: AppDeliveryJob): WizardStep {
+  if (job.deploymentProgress && (job.requestId || job.published)) return 4
   switch (job.status) {
     case 'ready':
       return job.deploymentReviewPending ? 2 : 3
@@ -731,6 +799,8 @@ export function AppsPanel({
   const progressJobId = wizardJob?.id
   const progressRequestKey = `${progressJobId ?? ''}:${wizardJob?.requestId ?? ''}`
   const progressStatus = wizardJob?.status
+  const watchingAttempt = followsDeploymentAttempt(wizardJob?.deploymentProgress)
+  const hasAttemptProgress = Boolean(wizardJob?.deploymentProgress)
   const progressSlug = wizardJob?.slug
   const progressUsesReceipt = Boolean(wizardJob?.archivedRevision)
   const fetchDeploymentLogs = useCallback(
@@ -744,13 +814,13 @@ export function AppsPanel({
 
   useEffect(() => {
     if (viewMode !== 'wizard' || wizardStep !== 4 || !progressJobId || wizardBusy ||
-        !isDeploymentInProgress(progressStatus)) return
+        !(watchingAttempt || isDeploymentInProgress(progressStatus))) return
     let alive = true
     let timer: number
     const poll = async () => {
       let keepPolling = true
       try {
-        const raw = (progressStatus === 'verifying' || progressStatus === 'publishing') && api.appJob
+        const raw = !hasAttemptProgress && (progressStatus === 'verifying' || progressStatus === 'publishing') && api.appJob
           ? await api.appJob(progressJobId, contextId)
           : await (api.appVerifyWithOptions
             ? api.appVerifyWithOptions(progressJobId, JSON.stringify({ automatic: true }), contextId)
@@ -759,7 +829,7 @@ export function AppsPanel({
         const updated = JSON.parse(raw) as AppDeliveryJob
         setWizardError(null)
         setWizardJob(current => current?.id === updated.id ? updated : current)
-        keepPolling = isDeploymentInProgress(updated.status)
+        keepPolling = followsDeploymentAttempt(updated.deploymentProgress) || isDeploymentInProgress(updated.status)
         if (!keepPolling) void loadWorkspaceData(true)
       } catch (error) {
         if (!alive) return
@@ -770,7 +840,7 @@ export function AppsPanel({
     }
     void poll()
     return () => { alive = false; window.clearTimeout(timer) }
-  }, [api, contextId, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep])
+  }, [api, contextId, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep, watchingAttempt, hasAttemptProgress])
 
   // Load Step 3 draft data when entering Step 3
   useEffect(() => {
@@ -1265,8 +1335,10 @@ export function AppsPanel({
         }),
         contextId,
       )
-      const { confirmationToken, artifactHash } = parseJson<{ confirmationToken: string; artifactHash?: string }>(confirmRaw, { confirmationToken: '' })
+      const { confirmationToken, artifactHash, requestId } = parseJson<{ confirmationToken: string; artifactHash?: string; requestId?: string }>(confirmRaw, { confirmationToken: '' })
       if (!confirmationToken) throw new Error('未能获取发布确认凭证')
+      setWizardJob({ ...wizardJob, status: 'publishing', requestId, deploymentProgress: { phase: 'submitting' } })
+      setWizardStep(4)
 
       const publishRaw = await api.appPublish(
         wizardJob.id,
@@ -1282,7 +1354,8 @@ export function AppsPanel({
       )
       const published = parseJson<AppDeliveryJob | null>(publishRaw, null)
       if (published) setWizardJob(published)
-      if (published?.status === 'ready') {
+      if (published?.status === 'ready' && !published.deploymentProgress) {
+        setWizardStep(3)
         setWizardError(published.error || '平台未接受本次发布，请核对配置后重试')
         return
       }
@@ -1380,6 +1453,40 @@ export function AppsPanel({
       await resumeWizardJob(reopened, 3)
     } catch (error) {
       setWizardError(readErrorMessage(error, '恢复原交付包失败'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleCheckAttempt = async () => {
+    if (!wizardJob || !api.appVerifyWithOptions) return
+    const { id, requestId } = wizardJob
+    setWizardBusy(true)
+    setWizardError(null)
+    try {
+      const updated = JSON.parse(await api.appVerifyWithOptions(id, JSON.stringify({ checkProgress: true }), contextId)) as AppDeliveryJob
+      if (updated.id !== id || updated.requestId !== requestId) throw new Error('平台返回了其他部署任务')
+      setWizardJob(current => current?.id === id && current.requestId === requestId ? updated : current)
+      if (updated.status === 'verified') void loadWorkspaceData(true)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '暂时无法确认部署进度'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleCancelAttempt = async () => {
+    if (!wizardJob?.requestId || !api.appCancelDeployment || !wizardJob.deploymentProgress?.can_cancel) return
+    if (!window.confirm('要取消这一次部署吗？平台会停止本次任务并清理临时资源。')) return
+    const { id, requestId } = wizardJob
+    setWizardBusy(true)
+    setWizardError(null)
+    try {
+      const updated = JSON.parse(await api.appCancelDeployment(id, requestId, contextId)) as AppDeliveryJob
+      if (updated.id !== id || updated.requestId !== requestId) throw new Error('平台返回了其他部署任务')
+      setWizardJob(current => current?.id === id && current.requestId === requestId ? updated : current)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '暂时无法取消本次部署，请重新检查'))
     } finally {
       setWizardBusy(false)
     }
@@ -2476,7 +2583,10 @@ export function AppsPanel({
           {wizardStep === 4 && wizardJob && (() => {
             const progress = deploymentProgress(wizardJob)
             const failed = progress.tone === 'danger'
-            const liveLogs = isDeploymentInProgress(wizardJob.status)
+            const attempt = displayedAttempt(wizardJob)
+            const liveLogs = followsDeploymentAttempt(attempt) || isDeploymentInProgress(wizardJob.status)
+            const elapsed = elapsedAttemptTime(attempt?.phase_started_at)
+            const previous = attempt?.blocking_request_id ? jobs.find(job => job.slug === wizardJob.slug && job.requestId === attempt.blocking_request_id) : undefined
             const recheck = startupRecheck?.key === progressRequestKey ? startupRecheck : undefined
             return (
               <div className="oa-deploy-progress">
@@ -2490,14 +2600,53 @@ export function AppsPanel({
                       <AppIcon name="external" size={13} /> 打开应用
                     </a>
                   )}
+                  {attempt && progress.tone !== 'ok' && (
+                    <div className="oa-deploy-actions">
+                      {!['submitting', 'submission_rejected', 'cancelled', 'restored'].includes(attempt.phase) && api.appVerifyWithOptions && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCheckAttempt()}>重新检查</button>
+                      )}
+                      {attempt.can_cancel && !['unknown', 'cancelling', 'cleaning'].includes(attempt.phase) && api.appCancelDeployment && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCancelAttempt()}>取消本次部署</button>
+                      )}
+                      {attempt.phase === 'blocked_previous' && previous && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void resumeWizardJob(previous, 4)}>查看上一轮部署</button>
+                      )}
+                      {attempt.phase === 'submission_rejected' && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => setWizardStep(3)}>返回第三步</button>
+                      )}
+                      {attempt.retry_safe && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>重试部署</button>
+                      )}
+                      {attempt.retry_safe && (attempt.failure_kind === 'build' || attempt.failure_kind === 'startup') && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>让 AI 分析修复问题</button>
+                      )}
+                      {attempt.phase === 'restored' && (
+                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">打开当前版本</a>
+                      )}
+                    </div>
+                  )}
                 </div>
+                {attempt && (
+                  <div className="oa-hint oa-deploy-message">
+                    {attempt.phase === 'unknown' && <div>
+                      正在核对同一笔部署。
+                      {attempt.last_observed_phase && ` 上次确认到「${attemptLabel(wizardJob, attempt.last_observed_phase)}」。`}
+                      {attempt.last_observed_at && ` ${new Date(attempt.last_observed_at).toLocaleTimeString('zh-CN')}`}
+                    </div>}
+                    {attempt.phase === 'blocked_previous' && <div>上一轮结束并完成清理后，即可返回第三步确认本次部署。</div>}
+                    {attempt.stalled && elapsed && <div>已等待 {elapsed}{attempt.phase === 'starting' ? '，应用还没启动完成。' : '。'}</div>}
+                    {attempt.active_version && progress.tone !== 'ok' ? <div>最近上线版本 v{attempt.active_version}</div> : null}
+                    {attempt.phase === 'recovery_required' && <div>平台正在保护应用数据。请复制本次部署日志，交由平台管理员处理。</div>}
+                    {(failed || attempt.phase === 'restored') && wizardJob.error && <div>{wizardJob.error}</div>}
+                  </div>
+                )}
                 {wizardJob.assessment && (
                   <div className="oa-subcard oa-deploy-message">
                     <strong>AI 验收结论</strong>
                     <p>{wizardJob.assessment.report}</p>
                   </div>
                 )}
-                {failed && (
+                {failed && !attempt && (
                   <>
                     <div className="oa-alert oa-alert-danger" role="alert">
                       <AppIcon name="warning" size={16} />

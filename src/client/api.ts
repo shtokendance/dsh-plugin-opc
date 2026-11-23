@@ -1,3 +1,5 @@
+import type { DeploymentAttemptProgress } from '../deployment-attempt.ts'
+
 /** JSON business payloads use the same public methods as the Host Remote service. */
 export interface AppModelGroup {
   id: string
@@ -134,6 +136,8 @@ export interface AppDeploymentStartupCheck {
 }
 
 export interface AppDeliveryJob {
+  deploymentProgress?: DeploymentAttemptProgress
+  deploymentCheck?: 'domain'
   archivedRevision?: string
   assessmentPending?: boolean
   assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
@@ -255,6 +259,7 @@ export interface OpcApi {
   appPrepare(id: string, hash: string, context: string): Promise<string>
   appReopenReview?(id: string, context: string): Promise<string>
   appReopenDeployment(id: string, context: string): Promise<string>
+  appCancelDeployment?(id: string, requestId: string, context: string): Promise<string>
   appCancelAnalysis?(id: string, context: string): Promise<void>
   appConfigDraft?(id: string, context: string): Promise<string>
   appSaveConfigDraft?(id: string, body: string, context: string): Promise<void>
