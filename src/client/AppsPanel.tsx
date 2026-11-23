@@ -2948,12 +2948,18 @@ export function AppsPanel({
       artifacts: '能力与技能',
     } satisfies Record<DetailTab, string>
 
+    const onlineRuntime = api.appRuntimeChange ? runtimeStatus : undefined
     const runtimeBlocked = runtimeOperationBusy(runtimeOperation) || runtimeOperation?.state === 'unknown' || runtimeOperation?.state === 'recovery_unknown'
-    const runtimeEditable = runtimeStatus && !runtimeBlocked &&
-      activeVersion && activeVersion.version === detailApp.current_version && (activeVersion.config_revision ?? '') === runtimeStatus.config_revision
-    const runtimeChanges = Object.fromEntries(Object.entries(runtimeDraft).filter(([key, value]) =>
-      runtimeStatus?.editable_keys.includes(key) && detailApp.app_config?.find(item => item.key === key)?.value !== value))
-    const runtimeBaseline = { base_version: detailApp.current_version, base_config_revision: runtimeStatus?.config_revision }
+    const runtimeEditable = onlineRuntime && !readOnly && !runtimeBlocked &&
+      activeVersion && activeVersion.version === detailApp.current_version && (activeVersion.config_revision ?? '') === onlineRuntime.config_revision
+    const runtimeOriginals = detailApp.app_config ?? []
+    const editableRuntimeKeys = new Set(runtimeEditable && !runtimeSubmitting ? onlineRuntime.editable_keys : [])
+    const runtimeChanges = Object.fromEntries(runtimeOriginals
+      .filter(item => onlineRuntime?.editable_keys.includes(item.key) && Object.hasOwn(runtimeDraft, item.key) && item.value !== runtimeDraft[item.key])
+      .map(item => [item.key, runtimeDraft[item.key]]))
+    const runtimeConfigs = runtimeOriginals.map(item =>
+      Object.hasOwn(runtimeChanges, item.key) ? { ...item, value: runtimeChanges[item.key], value_source: 'manual' } : item)
+    const runtimeBaseline = { base_version: detailApp.current_version, base_config_revision: onlineRuntime?.config_revision }
     const logView = !readOnly && detailTab === 'logs'
     const detailLog = formatLogOutput(detailLogsData[detailLogsSubTab])
     const logSummary = detailLogsSubTab === 'runtime' ? '容器服务输出（最近 500 行）'
@@ -3170,22 +3176,42 @@ export function AppsPanel({
           {detailTab === 'configs' && api.appRuntimeStatus && !runtimeStatus && !currentRuntimeError && (
             <div className="oa-alert" role="status"><span className="oa-dot oa-pulse" /> 正在加载运行配置…</div>
           )}
-          {detailTab === 'configs' && runtimeStatus && api.appRuntimeChange && (
+          {detailTab === 'configs' && (
             <div className="oa-form-card">
               <div className="oa-runtime-toolbar">
-                <strong>应用 v{detailApp.current_version} · 配置第 {runtimeStatus.config_number} 版</strong>
-                <div className="oa-runtime-actions">
-                  <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>配置历史</button>
-                  <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>让 AI 分析配置更新</button>
-                  <button type="button" className="oa-btn oa-btn-primary" disabled={!runtimeEditable || runtimeSubmitting || !Object.keys(runtimeChanges).length}
-                    onClick={() => void submitRuntimeChange(detailApp, { kind: 'config', ...runtimeBaseline, changes: runtimeChanges })}>保存并重启</button>
+                <div>
+                  <strong>在线运行配置</strong>
+                  <div className="oa-hint">
+                    {onlineRuntime
+                      ? `应用 v${detailApp.current_version} · 配置第 ${onlineRuntime.config_number} 版`
+                      : requiresAIUpdate
+                        ? '在更新向导中由所选 AI 分析配置变更。应用启动后，平台会检查分配的域名。'
+                        : '保存后会重启应用容器以应用运行配置。'}
+                  </div>
                 </div>
+                {onlineRuntime ? (
+                  <div className="oa-runtime-actions">
+                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>配置历史</button>
+                    <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>让 AI 分析配置更新</button>
+                    <button type="button" className="oa-btn oa-btn-primary" disabled={!runtimeEditable || runtimeSubmitting || !Object.keys(runtimeChanges).length}
+                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'config', ...runtimeBaseline, changes: runtimeChanges })}>保存并重启</button>
+                  </div>
+                ) : requiresAIUpdate ? (
+                  <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy}
+                    onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>
+                    让 AI 分析配置更新
+                  </button>
+                ) : api.appUpdateConfig && (
+                  <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy} onClick={() => void handleSaveDetailConfig()}>
+                    {detailBusy ? '正在保存并重启…' : '保存配置并重启容器'}
+                  </button>
+                )}
               </div>
-              {runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>查看最近操作状态</button>}
-              {showRuntimeHistory && <div className="oa-runtime-history">
-                {runtimeStatus.revisions.length === 0 && <div className="oa-hint">当前配置为此应用版本的初始配置。</div>}
-                {runtimeStatus.revisions.map(revision => {
-                  const active = revision.state === 'succeeded' && revision.config_revision === runtimeStatus.config_revision
+              {onlineRuntime && runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>查看最近操作状态</button>}
+              {onlineRuntime && showRuntimeHistory && <div className="oa-runtime-history">
+                {onlineRuntime.revisions.length === 0 && <div className="oa-hint">当前配置为此应用版本的初始配置。</div>}
+                {onlineRuntime.revisions.map(revision => {
+                  const active = revision.state === 'succeeded' && revision.config_revision === onlineRuntime.config_revision
                   return <div className="oa-runtime-toolbar" key={revision.id}>
                     <div>
                       <strong>配置第 {revision.config_number} 版{active ? ' · 正在使用' : ''}</strong>
@@ -3197,61 +3223,35 @@ export function AppsPanel({
                   </div>
                 })}
               </div>}
-              {!detailApp.app_config?.length && <div className="oa-hint">当前应用版本没有声明运行配置项。</div>}
-              {detailApp.app_config?.map(item => {
-                const editable = runtimeStatus.editable_keys.includes(item.key)
-                return <label className="oa-runtime-config-item" key={item.key}>
-                  <span><code>{item.key}</code> {item.description}</span>
-                  <input className="oa-input oa-mono" aria-label={`${item.key} 配置值`}
-                    readOnly={!editable || !runtimeEditable || runtimeSubmitting}
-                    value={runtimeDraft[item.key] ?? item.effective_value ?? item.value ?? ''}
-                    onChange={event => setRuntimeDraft(draft => ({ ...draft, [item.key]: event.target.value }))} />
-                </label>
-              })}
-            </div>
-          )}
-
-          {detailTab === 'configs' && !runtimeStatus && (
-            <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-                <div>
-                  <strong style={{ fontSize: 14, color: '#0f172a' }}>在线运行配置</strong>
-                  <div className="oa-hint">{requiresAIUpdate ? '在更新向导中由所选 AI 分析配置变更。应用启动后，平台会检查分配的域名。' : '保存后会重启应用容器以应用运行配置。'}</div>
-                </div>
-                {!readOnly && requiresAIUpdate && (
-                  <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy}
-                    onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>
-                    让 AI 分析配置更新
-                  </button>
-                )}
-                {!readOnly && !requiresAIUpdate && api.appUpdateConfig && (
-                  <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy} onClick={() => void handleSaveDetailConfig()}>
-                    {detailBusy ? '正在保存并重启…' : '保存配置并重启容器'}
-                  </button>
-                )}
-              </div>
 
               <div className="oa-field" style={{ maxWidth: 260 }}>
                 <label className="oa-label" htmlFor={`${formId}-edit-port`}>容器监听端口</label>
                 <input id={`${formId}-edit-port`}
-                  className="oa-input oa-mono"
+                  className={`oa-input oa-mono${onlineRuntime ? ' oa-cfg-readonly' : ''}`}
                   type="number"
                   min={1}
                   max={65535}
-                  disabled={readOnly || requiresAIUpdate}
+                  readOnly={Boolean(onlineRuntime)}
+                  disabled={!onlineRuntime && (readOnly || requiresAIUpdate)}
                   value={editPort}
                   onChange={e => setEditPort(e.target.value)}
                 />
               </div>
 
               <AppDeliveryConfig
-                configs={editConfigs}
-                originals={detailApp.app_config ?? []}
+                configs={onlineRuntime ? runtimeConfigs : editConfigs}
+                originals={runtimeOriginals}
                 resources={resources}
+                lockedPort={onlineRuntime ? detailApp.container_port : undefined}
+                runtimeEditableKeys={onlineRuntime ? editableRuntimeKeys : undefined}
                 onChange={next => {
-                  if (!readOnly && !requiresAIUpdate) setEditConfigs(next)
+                  if (onlineRuntime) {
+                    setRuntimeDraft(Object.fromEntries(next
+                      .filter(item => editableRuntimeKeys.has(item.key))
+                      .map(item => [item.key, item.value])))
+                  } else if (!readOnly && !requiresAIUpdate) setEditConfigs(next)
                 }}
-                readOnly={readOnly || requiresAIUpdate}
+                readOnly={Boolean(onlineRuntime) || readOnly || requiresAIUpdate}
               />
             </div>
           )}

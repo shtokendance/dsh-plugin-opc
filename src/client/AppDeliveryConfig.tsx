@@ -116,6 +116,7 @@ export function AppDeliveryConfig({
   readOnly = false,
   publishIssues,
   skillDriven = false,
+  runtimeEditableKeys,
 }: {
   configs: AppConfigItem[]
   allowNew?: boolean
@@ -126,9 +127,11 @@ export function AppDeliveryConfig({
   readOnly?: boolean
   publishIssues?: ReadonlyMap<number, ConfigPublishIssue>
   skillDriven?: boolean
+  runtimeEditableKeys?: ReadonlySet<string>
   onChange: (items: AppConfigItem[]) => void
 }) {
   const configId = useId()
+  const onlineRuntime = runtimeEditableKeys !== undefined
 
   const update = (index: number, value: AppConfigItem) =>
     onChange(configs.map((item, i) => (i === index ? value : item)))
@@ -140,6 +143,18 @@ export function AppDeliveryConfig({
     const isPortLocked = lockedPort !== undefined && item.key === 'PORT'
     if (isPortLocked) {
       return { label: '已对齐', tone: 'oa-pill-ok', changed: false }
+    }
+    if (onlineRuntime && item.resource_id) {
+      return { label: `平台资源：${selected?.name || item.source_label || item.resource_id}`, tone: 'oa-pill-accent', changed: false }
+    }
+    if (onlineRuntime && original) {
+      const changed = item.value !== original.value
+      if (!item.value && item.required && (changed || !original.has_value)) {
+        return { label: '待填写', tone: 'oa-pill-warn', changed }
+      }
+      if (changed) return { label: item.value ? '已修改' : '已清空', tone: 'oa-pill-accent', changed }
+      if (item.value || original.has_value) return { label: '沿用原值', tone: 'oa-pill-ok', changed }
+      return { label: '未设置', tone: '', changed }
     }
     if (selected) {
       return { label: `平台资源：${selected.name}`, tone: 'oa-pill-accent', changed: true }
@@ -223,7 +238,9 @@ export function AppDeliveryConfig({
       (item.value_source === 'original' && original?.has_original_value)
     ))
     const portValue = isPortLocked ? String(lockedPort) : item.value
+    const canEditRuntimeValue = runtimeEditableKeys?.has(item.key)
     const boundValue = (config: AppConfigItem) => {
+      if (onlineRuntime && config.effective_value !== undefined) return config.effective_value
       const resource = resources.find(r => r.id === config.resource_id)
       const preview = resource?.env_preview?.[config.resource_key || config.key]
       return preview && preview !== '[REDACTED]' ? preview : config.effective_value ?? ''
@@ -335,13 +352,13 @@ export function AppDeliveryConfig({
                   className="oa-input oa-mono oa-cfg-readonly"
                 />
               </div>
-            ) : selected ? (
+            ) : selected || (onlineRuntime && item.resource_id) ? (
               <input
                 aria-label={`${item.key} 配置值`}
                 {...valueIssueProps}
                 readOnly
                 value={boundValue(item)}
-                placeholder={`由「${selected.name}」注入 · ${item.resource_key || item.key}`}
+                placeholder={`由「${selected?.name || item.source_label || item.resource_id}」注入 · ${item.resource_key || item.key}`}
                 className="oa-input oa-cfg-readonly"
                 style={{ color: 'var(--oa-accent)' }}
               />
@@ -351,10 +368,13 @@ export function AppDeliveryConfig({
                   aria-label={`${item.key || '新增项'} 配置值`}
                   {...valueIssueProps}
                   type="text"
-                  disabled={readOnly}
+                  disabled={!onlineRuntime && readOnly}
+                  readOnly={onlineRuntime && !canEditRuntimeValue}
                   value={item.value}
                   placeholder={
-                    item.value_source === 'generated'
+                    onlineRuntime
+                      ? item.required ? '请输入配置值' : '可留空'
+                      : item.value_source === 'generated'
                       ? '已生成，输入新值可替换'
                       : hasOriginalSecret
                       ? '留空沿用原值，输入新值则覆盖'
@@ -364,7 +384,7 @@ export function AppDeliveryConfig({
                           ? '请输入配置值'
                           : '选填，留空则不注入该环境变量'
                   }
-                  className="oa-input oa-mono"
+                  className={`oa-input oa-mono${onlineRuntime && !canEditRuntimeValue ? ' oa-cfg-readonly' : ''}`}
                   style={{ minHeight: 34, padding: '6px 10px', fontSize: 12 }}
                   onChange={e =>
                     update(index, {
@@ -536,9 +556,11 @@ export function AppDeliveryConfig({
                 <span className="oa-pill oa-pill-accent">已修改 {modifiedItems.length} 项</span>
               )}
             </div>
-            <p className="oa-hint" style={{ margin: '3px 0 0' }}>
-              留空或保持不变将沿用应用默认值；修改仅在本次容器运行时生效，不改本地源码。应用配置值可在部署会话中核对。
-            </p>
+            {!onlineRuntime && (
+              <p className="oa-hint" style={{ margin: '3px 0 0' }}>
+                留空或保持不变将沿用应用默认值；修改仅在本次容器运行时生效，不改本地源码。应用配置值可在部署会话中核对。
+              </p>
+            )}
           </div>
           {!readOnly && allowNew && (
             <button
@@ -595,9 +617,11 @@ export function AppDeliveryConfig({
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
             <span style={{ fontWeight: 600 }}>配置变更摘要</span>
             <span className="oa-hint">
-              {modifiedItems.length
-                ? `已调整 ${modifiedItems.length} 项配置或平台资源 · 草稿自动保存`
-                : '全部沿用应用默认值或原配置 · 草稿自动保存'}
+              {onlineRuntime
+                ? modifiedItems.length ? `${modifiedItems.length} 项待保存` : '暂无修改'
+                : modifiedItems.length
+                  ? `已调整 ${modifiedItems.length} 项配置或平台资源 · 草稿自动保存`
+                  : '全部沿用应用默认值或原配置 · 草稿自动保存'}
             </span>
           </div>
           {modifiedItems.map((item, idx) => {
