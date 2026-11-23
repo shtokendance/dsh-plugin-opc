@@ -26,23 +26,24 @@ export function registerTools(ctx: Context, core: OpcCore): void {
   }
   const output = { schema: { type: 'string' as const }, render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }] }
   ctx.effect(() => ctx.tools.register(defineTool({
-    name: 'opc_knowledge_search', description: '检索当前企业空间知识库；遇到 OPC 知识库引用时只传 query，宿主从本轮引用确定空间和知识库；再用 opc_knowledge_read 读取命中正文并注明文档名。',
+    name: 'opc_knowledge_search', description: '检索企业知识库；遇到 OPC 知识库引用时只传 query，宿主从本轮引用确定空间和知识库；再用 opc_knowledge_read 读取命中正文并注明文档名。',
     parameters: { query: { type: 'string', required: true }, space: { type: 'string' }, knowledge_base_id: { type: 'string' } },
     output,
     async execute(args, exec) { const s = scope(exec); return JSON.stringify(await core.search(s.session, s.turn, args.query, args.space, args.knowledge_base_id)) },
   })))
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'opc_knowledge_read', description: '读取企业知识文档；限定模式下只能读取本轮检索命中的文档。',
-    parameters: { knowledge_id: { type: 'string', required: true } }, output,
-    async execute(args, exec) { const s = scope(exec); return JSON.stringify(await core.read(s.session, s.turn, args.knowledge_id)) },
+    parameters: { knowledge_id: { type: 'string', required: true }, space: { type: 'string' } }, output,
+    async execute(args, exec) { const s = scope(exec); return JSON.stringify(await core.read(s.session, s.turn, args.knowledge_id, args.space)) },
   })))
   ctx.effect(() => ctx.tools.register(defineTool({
-    name: 'opc_mcp_invoke', description: '调用当前空间企业 MCP 工具。高敏操作需用户审批；UNKNOWN_OUTCOME 时禁止自动重试。',
-    parameters: { service_id: { type: 'string', required: true }, tool_name: { type: 'string', required: true }, arguments: { type: 'object', additionalProperties: true } }, output,
+    name: 'opc_mcp_invoke', description: '调用企业 MCP 工具。高敏操作需用户审批；UNKNOWN_OUTCOME 时禁止自动重试。',
+    parameters: { service_id: { type: 'string', required: true }, tool_name: { type: 'string', required: true }, tenant_id: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } }, output,
     async execute(args, exec) {
       const agent = exec.agent
       if (!agent) throw new OpcError('AGENT_REQUIRED')
-      return JSON.stringify(await core.mcp.invoke({ serviceId: args.service_id, toolName: args.tool_name, arguments: args.arguments }, async () => 'allowed-once', exec.signal))
+      const tenantId = args.tenant_id || core.resolveMcpServiceTenant(args.service_id)
+      return JSON.stringify(await core.mcp.invoke({ serviceId: args.service_id, toolName: args.tool_name, tenantId, arguments: args.arguments }, async () => 'allowed-once', exec.signal))
     },
   })))
 }

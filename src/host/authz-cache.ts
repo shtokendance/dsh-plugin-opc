@@ -2,7 +2,7 @@ import { AuthManager } from './auth.ts'
 import { OpcError } from './context.ts'
 
 export interface ResourceItem {
-  tenant_id: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; availability: string; catalog_id?: string; knowledge_base_id?: string
+  tenant_id: string; tenant_name?: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; availability: string; catalog_id?: string; knowledge_base_id?: string
   name: string; version?: string; bundle_sha256?: string; description?: string
 }
 function object(value: unknown): Record<string, unknown> {
@@ -14,6 +14,7 @@ export function resourceItem(value: unknown): ResourceItem {
   if (typeof item.tenant_id !== 'string' || typeof item.name !== 'string' || typeof item.availability !== 'string') throw new OpcError('INVALID_PLATFORM_RESPONSE')
   return {
     tenant_id: item.tenant_id, name: item.name, availability: item.availability,
+    tenant_name: typeof item.tenant_name === 'string' ? item.tenant_name : undefined,
     source_tenant_id: typeof item.source_tenant_id === 'string' ? item.source_tenant_id : undefined,
     source_tenant_name: typeof item.source_tenant_name === 'string' ? item.source_tenant_name : undefined,
     permission: typeof item.permission === 'string' ? item.permission : undefined,
@@ -23,6 +24,38 @@ export function resourceItem(value: unknown): ResourceItem {
     bundle_sha256: typeof item.bundle_sha256 === 'string' ? item.bundle_sha256 : undefined,
     description: typeof item.description === 'string' ? item.description : undefined,
   }
+}
+
+export function resourceAccessRank(tenantId: string, sourceTenantId?: string, permission?: string): number {
+  if (!sourceTenantId || sourceTenantId === tenantId) return 4
+  if (permission === 'admin') return 3
+  if (permission === 'editor') return 2
+  if (permission === 'viewer') return 1
+  return 0
+}
+
+export function dedupeResources(items: ResourceItem[]): ResourceItem[] {
+  const bestIdx = new Map<string, number>()
+  const out: ResourceItem[] = []
+  for (const item of items) {
+    const owner = item.source_tenant_id || item.tenant_id
+    const resourceId = item.catalog_id ?? item.knowledge_base_id ?? item.name
+    const kind = item.catalog_id ? 'skill' : 'kb'
+    const key = `${kind}\0${owner}\0${resourceId}`
+    const idx = bestIdx.get(key)
+    if (idx !== undefined) {
+      const cur = out[idx]
+      const curRank = resourceAccessRank(cur.tenant_id, cur.source_tenant_id, cur.permission)
+      const newRank = resourceAccessRank(item.tenant_id, item.source_tenant_id, item.permission)
+      if (newRank > curRank || (newRank === curRank && item.tenant_id < cur.tenant_id)) {
+        out[idx] = item
+      }
+      continue
+    }
+    bestIdx.set(key, out.length)
+    out.push(item)
+  }
+  return out
 }
 
 /** Cache keys include the captured epoch; late authorization never crosses identities. */
@@ -47,18 +80,17 @@ export class ResourceAuthorization {
       if (response.status === 401 || code === 'SESSION_REVOKED') await this.auth.invalidateSession()
       throw new OpcError(code ?? 'SESSION_NOT_AUTHORIZED')
     }
-    if (!Array.isArray(response.body.spaces) || !response.body.spaces.includes(captured.context.tenant)) throw new OpcError('SPACE_FORBIDDEN')
+    if (!Array.isArray(response.body.spaces) || response.body.spaces.length === 0) throw new OpcError('SPACE_FORBIDDEN')
     this.#sessionExpires = Date.now() + 60_000
   }
   async knowledge(tenant: string, id: string, list: () => Promise<ResourceItem[]>): Promise<ResourceItem> {
     this.sync()
     const captured = this.auth.contexts.capture()
-    if (tenant !== captured.context.tenant) throw new OpcError('SPACE_FORBIDDEN')
+    if (!captured.context.spaces.includes(tenant)) throw new OpcError('SPACE_FORBIDDEN')
     await this.session(); captured.assertCurrent()
     const key = JSON.stringify(['knowledge', tenant, id])
     const cached = this.#entries.get(key)
     if (cached && cached.expires > Date.now()) return cached.item
-    // Platform exposes the authorized KB directory, not a single-KB resource route.
     const items = await list(); captured.assertCurrent()
     const item = items.find(item => item.tenant_id === tenant && item.knowledge_base_id === id && item.availability === 'available')
     if (!item) { this.#entries.delete(key); throw new OpcError('RESOURCE_NOT_ACCESSIBLE') }
@@ -68,7 +100,7 @@ export class ResourceAuthorization {
   async catalog(tenant: string, catalog: string): Promise<ResourceItem> {
     this.sync()
     const captured = this.auth.contexts.capture()
-    if (tenant !== captured.context.tenant) throw new OpcError('SPACE_FORBIDDEN')
+    if (!captured.context.spaces.includes(tenant)) throw new OpcError('SPACE_FORBIDDEN')
     try { await this.session() } catch (error) {
       if (error instanceof OpcError && error.code === 'SPACE_FORBIDDEN') await this.onRevoked(tenant, catalog)
       throw error

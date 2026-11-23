@@ -22,10 +22,12 @@ function invocation(body: Record<string, unknown>): Record<string, unknown> {
 /** One submission and one decision; an unknown write outcome is never retried. */
 export class McpBridge {
   constructor(private readonly auth: AuthManager, private readonly options = { pollMs: 1000, timeoutMs: 120_000 }) {}
-  async invoke(input: { serviceId: string; toolName: string; arguments?: Record<string, unknown>; contextId?: string }, approve: RequestApproval, signal?: AbortSignal): Promise<unknown> {
+  async invoke(input: { serviceId: string; toolName: string; arguments?: Record<string, unknown>; contextId?: string; tenantId?: string }, approve: RequestApproval, signal?: AbortSignal): Promise<unknown> {
     const captured = this.auth.contexts.capture(input.contextId)
+    const targetTenant = input.tenantId || captured.context.tenant
+    if (!captured.context.spaces.includes(targetTenant)) throw new OpcError('SPACE_FORBIDDEN')
     const combined = AbortSignal.any([captured.signal, AbortSignal.timeout(this.options.timeoutMs), ...(signal ? [signal] : [])])
-    const tenant = encodeURIComponent(captured.context.tenant)
+    const tenant = encodeURIComponent(targetTenant)
     let submitted = false
     const request = async (path: string, body?: unknown) => {
       combined.throwIfAborted(); captured.assertCurrent()
@@ -35,7 +37,7 @@ export class McpBridge {
     try {
       const args = structuredClone(input.arguments ?? {})
       submitted = true
-      const response = await request('/integration/v1/mcp/invoke', { service_id: input.serviceId, tool_name: input.toolName, arguments: args, tenant_id: captured.context.tenant, idempotency_key: randomUUID() })
+      const response = await request('/integration/v1/mcp/invoke', { service_id: input.serviceId, tool_name: input.toolName, arguments: args, tenant_id: targetTenant, idempotency_key: randomUUID() })
       captured.assertCurrent()
       const body = checked(response)
       let current = invocation(body)

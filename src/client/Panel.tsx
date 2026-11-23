@@ -864,7 +864,8 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   const [mcpFilter, setMcpFilter] = useState<'all' | 'connected' | 'unmounted'>('all')
   const docInputRef = useRef<HTMLInputElement>(null)
   const topSearchCardRef = useRef<HTMLDivElement>(null)
-  const pin = state.pinnedScopes?.[sessionId] ?? ''
+  const pinDetail = state.pinnedScopeDetails?.[sessionId]
+  const pin = pinDetail?.knowledgeBaseId ?? state.pinnedScopes?.[sessionId] ?? ''
   const epoch = useRef(0)
 
   const selectPage = useCallback((page: PanelKind) => {
@@ -928,6 +929,15 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   }, [state.signedIn, kind, state.opcConfig?.appDomainRoot, state.opcConfig?.defaultPort, state.opcConfig?.platformBaseUrl])
 
   const context = state.context
+  const spaceNames = new Map((context?.spacesDetail ?? []).map(space => [space.id, space.name]))
+  const resolveSpaceInfo = (tenantId?: string, tenantName?: string, sourceTenantId?: string, sourceTenantName?: string) => {
+    const tid = tenantId ?? ''
+    const isShared = Boolean(sourceTenantId && sourceTenantId !== tid)
+    const ownerName = isShared
+      ? (sourceTenantName || spaceNames.get(sourceTenantId!) || sourceTenantId!)
+      : (tenantName || spaceNames.get(tid) || tid)
+    return { ownerName, isShared }
+  }
   const appContextId = context?.applicationContextId
   useEffect(() => {
     if (pageChosen.current || !visible || !state.signedIn || !appContextId || !api.appJobByAnalysisSession) return
@@ -953,17 +963,6 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             <span className="user-avatar">{((context.displayName || context.subject)[0] || 'U').toUpperCase()}</span>
             <span className="user-name">{context.displayName || context.subject}</span>
           </div>
-          {kind !== 'home' && kind !== 'apps' && !showSettings && <select
-            aria-label="企业空间"
-            className="space-select"
-            value={context.tenant}
-            disabled={busy}
-            onChange={e => void run(() => api.switchTenant(e.target.value))}
-          >
-            {(context.spacesDetail ?? context.spaces.map(id => ({ id, name: id }))).map(space => (
-              <option key={space.id} value={space.id}>{space.name}</option>
-            ))}
-          </select>}
           {!showSettings && kind !== 'home' && <button
             className="btn-header"
             disabled={busy}
@@ -1080,8 +1079,9 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               e.preventDefault()
               if (!docQuery.trim()) return
               const version = epoch.current
+              const [selectedTenant, selectedKb] = kb.includes('::') ? kb.split('::') : ['', kb]
               void run(async () => {
-                const result = JSON.parse(await api.searchKnowledge(sessionId, docQuery.trim(), kb, context.contextId))
+                const result = JSON.parse(await api.searchKnowledge(sessionId, docQuery.trim(), selectedKb, context.contextId, selectedTenant))
                 if (version === epoch.current) {
                   setHits(result.results ?? [])
                   setHasSearchedDoc(true)
@@ -1095,8 +1095,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               value={kb}
               onChange={e => setKb(e.target.value)}
             >
-              <option value="">当前空间全部可用知识库</option>
-              {items.map(item => <option key={item.knowledge_base_id} value={item.knowledge_base_id}>{item.name}</option>)}
+              <option value="">全部可用知识库</option>
+              {items.map(item => {
+                const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
+                const optionLabel = context.spaces.length > 1 || info.isShared ? `${item.name}（${info.ownerName}）` : item.name
+                return <option key={`${item.tenant_id}:${item.knowledge_base_id}`} value={`${item.tenant_id}::${item.knowledge_base_id}`}>{optionLabel}</option>
+              })}
             </select>
             <input
               ref={docInputRef}
@@ -1154,7 +1158,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         {/* Empty Doc Search Feedback */}
         {hasSearchedDoc && hits.length === 0 && !busy && (
           <div className="notice" style={{ background: '#f8fafc', borderColor: '#94a3b8', color: '#64748b', fontSize: 12, margin: '8px 0' }}>
-            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或在上方选择「当前空间全部可用知识库」。
+            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或在上方选择「全部可用知识库」。
           </div>
         )}
 
@@ -1174,26 +1178,38 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                 收起结果
               </button>
             </div>
-            {hits.map((hit, i) => (
+            {hits.map((hit, i) => {
+              const hitTenant = String(hit.tenant_id ?? hit.source_tenant ?? '')
+              const hitInfo = resolveSpaceInfo(
+                hitTenant,
+                typeof hit.tenant_name === 'string' ? hit.tenant_name : undefined,
+                typeof hit.source_tenant === 'string' ? hit.source_tenant : undefined,
+                typeof hit.source_tenant_name === 'string' ? hit.source_tenant_name : undefined,
+              )
+              return (
               <div key={String(hit.knowledge_id) + i} className="resource-card" style={{ marginBottom: 8, padding: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <button
                     style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', fontWeight: 600, color: '#2563eb', cursor: 'pointer' }}
                     onClick={action(async () => {
                       const version = epoch.current
-                      const result = JSON.parse(await api.readKnowledgeDocument(sessionId, String(hit.knowledge_id), context.contextId))
+                      const result = JSON.parse(await api.readKnowledgeDocument(sessionId, String(hit.knowledge_id), context.contextId, hitTenant))
                       if (version === epoch.current) setDoc(result.data?.content ?? '')
                     })}
                   >
                     📖 {String(hit.title ?? hit.knowledge_id)}
                   </button>
-                  {typeof hit.score === 'number' && <span className="badge">相关度: {hit.score.toFixed(2)}</span>}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    {hitInfo.ownerName && <span className="badge">{hitInfo.ownerName}</span>}
+                    {typeof hit.score === 'number' && <span className="badge">相关度: {hit.score.toFixed(2)}</span>}
+                  </div>
                 </div>
                 <p style={{ margin: '6px 0 0', fontSize: 12, color: '#64748b', lineHeight: 1.5 }}>
                   {String(hit.snippet ?? hit.content ?? '')}
                 </p>
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
@@ -1208,22 +1224,20 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           </div>
         )}
 
-        {/* Pinned Knowledge Scope Banner */}
         {pin && (
           <div className="notice">
-            <strong>当前对话问答已限定范围：</strong>{items.find(item => item.knowledge_base_id === pin)?.name ?? pin}
-            <button style={{ marginLeft: 8 }} onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, null, context.contextId) })}>取消限定</button>
+            <strong>当前对话问答已限定范围：</strong>{(items.find(item => item.knowledge_base_id === pin && (!pinDetail || item.tenant_id === pinDetail.tenantId))?.name) ?? pin}
+            <button style={{ marginLeft: 8 }} onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, null, context.contextId, '') })}>取消限定</button>
           </div>
         )}
 
-        {/* Knowledge Base Catalog Section Header */}
         <div className="kb-section-header">
           <div className="kb-section-title">
             <span>📚 知识库列表</span>
             <span className="badge">{knowledgeItems.length}</span>
             {includesSharedKnowledge && <select aria-label="知识库来源" value={knowledgeFilter} onChange={e => setKnowledgeFilter(e.target.value as typeof knowledgeFilter)}>
               <option value="all">全部可用</option>
-              <option value="owned">本空间</option>
+              <option value="owned">自有</option>
               <option value="shared">共享给我</option>
             </select>}
           </div>
@@ -1240,8 +1254,10 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         {includesSharedKnowledge === false && <div className="notice">当前平台版本仅提供本空间知识库目录。</div>}
         {items.length > 0 && knowledgeItems.length === 0 && <div className="notice">此来源下没有可用知识库。</div>}
         <div className="cards-grid">
-          {knowledgeItems.map(item => (
-            <div key={item.knowledge_base_id} className="resource-card">
+          {knowledgeItems.map(item => {
+            const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
+            return (
+            <div key={`${item.tenant_id}:${item.knowledge_base_id}`} className="resource-card">
               <div>
                 <div className="card-header">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -1252,23 +1268,25 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     {item.availability === 'available' ? '已就绪' : '未就绪'}
                   </span>
                 </div>
-                {item.source_tenant_id && item.source_tenant_id !== item.tenant_id && (
-                  <span className="badge">共享自 {item.source_tenant_name ?? item.source_tenant_id}{item.permission === 'viewer' ? ' · 只读' : ''}</span>
-                )}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
+                  <span className="badge">
+                    {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && item.permission === 'viewer' ? ' · 只读' : ''}
+                  </span>
+                </div>
                 <p className="card-desc">{item.description || '暂无知识库描述'}</p>
               </div>
               <div className="card-actions">
                 <button
                   className="primary"
                   disabled={busy || item.availability !== 'available'}
-                  onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId) })}
+                  onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId, item.tenant_id) })}
                 >
                   限定问答范围
                 </button>
                 <button
                   style={{ background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0' }}
                   onClick={() => {
-                    setKb(item.knowledge_base_id!)
+                    setKb(`${item.tenant_id}::${item.knowledge_base_id!}`)
                     setKbSearchMode('doc')
                     setTimeout(() => {
                       docInputRef.current?.focus()
@@ -1280,7 +1298,8 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                 </button>
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
       </>}
 
@@ -1358,8 +1377,10 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           </div>
 
           <div className="cards-grid">
-            {filteredItems.map(item => (
-              <div key={item.catalog_id} className="resource-card">
+            {filteredItems.map(item => {
+              const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
+              return (
+              <div key={`${item.tenant_id}:${item.catalog_id}`} className="resource-card">
                 <div>
                   <div className="card-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -1373,6 +1394,11 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                       {item.installed ? (item.installed.enabled ? '已启用' : '已停用') : '未安装'}
                     </span>
                   </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
+                    <span className="badge">
+                      {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && item.permission === 'viewer' ? ' · 只读' : ''}
+                    </span>
+                  </div>
                   <p className="card-desc">{item.description || '暂无技能说明'}</p>
                 </div>
                 <div className="card-actions">
@@ -1380,7 +1406,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     <button
                       className="primary"
                       disabled={busy || item.availability !== 'available'}
-                      onClick={action(async () => { await api.installSkill(item.catalog_id!, item.bundle_sha256!, context.contextId); await load() })}
+                      onClick={action(async () => { await api.installSkill(item.catalog_id!, item.bundle_sha256!, context.contextId, item.tenant_id); await load() })}
                     >
                       {item.installed ? '更新版本' : '下载安装'}
                     </button>
@@ -1388,21 +1414,22 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                   {item.installed && <>
                     <button
                       disabled={busy}
-                      onClick={action(async () => { await api.setSkillEnabled(item.catalog_id!, !item.installed!.enabled, context.contextId); await load() })}
+                      onClick={action(async () => { await api.setSkillEnabled(item.catalog_id!, !item.installed!.enabled, context.contextId, item.tenant_id); await load() })}
                     >
                       {item.installed.enabled ? '停用' : '启用'}
                     </button>
                     <button
                       disabled={busy}
                       style={{ color: '#dc2626', borderColor: '#fecaca', background: '#fef2f2' }}
-                      onClick={action(async () => { await api.uninstallSkill(item.catalog_id!, context.contextId); await load() })}
+                      onClick={action(async () => { await api.uninstallSkill(item.catalog_id!, context.contextId, item.tenant_id); await load() })}
                     >
                       卸载
                     </button>
                   </>}
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         </>
       })()}
@@ -1421,11 +1448,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           const term = mcpSearch.trim().toLowerCase()
           const name = String(service.name ?? service.service_id).toLowerCase()
           const desc = String(service.description ?? '').toLowerCase()
+          const spaceText = `${String(service.tenant_name ?? '')} ${String(service.source_tenant_name ?? '')} ${String(service.tenant_id ?? '')}`.toLowerCase()
           const toolMatches = (Array.isArray(service.tools) ? service.tools : []).some(t => {
             const tName = (typeof t === 'string' ? t : t.name).toLowerCase()
             return tName.includes(term)
           })
-          return name.includes(term) || desc.includes(term) || toolMatches
+          return name.includes(term) || desc.includes(term) || spaceText.includes(term) || toolMatches
         })
 
         return <>
@@ -1489,7 +1517,16 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           </div>
 
           <div className="cards-grid">
-            {filteredServices.map(service => <div key={String(service.service_id)} className="resource-card">
+            {filteredServices.map(service => {
+              const serviceTenant = String(service.tenant_id ?? '')
+              const info = resolveSpaceInfo(
+                serviceTenant,
+                typeof service.tenant_name === 'string' ? service.tenant_name : undefined,
+                typeof service.source_tenant_id === 'string' ? service.source_tenant_id : undefined,
+                typeof service.source_tenant_name === 'string' ? service.source_tenant_name : undefined,
+              )
+              return (
+              <div key={`${serviceTenant}:${String(service.service_id)}`} className="resource-card">
               <div>
                 <div className="card-header">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1502,6 +1539,13 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     </span>
                   )}
                 </div>
+                {info.ownerName && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
+                    <span className="badge">
+                      {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && service.permission === 'viewer' ? ' · 只读' : ''}
+                    </span>
+                  </div>
+                )}
                 <p className="card-desc">{String(service.description ?? '')}</p>
               </div>
               <div className="card-actions">
@@ -1511,7 +1555,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     style={state.mountedServices?.includes(String(service.service_id)) ? {} : { background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
                     onClick={action(() => state.mountedServices?.includes(String(service.service_id))
                       ? api.unmountMcpService(String(service.service_id), context.contextId)
-                      : api.mountMcpService(String(service.service_id), context.contextId)
+                      : api.mountMcpService(String(service.service_id), context.contextId, serviceTenant)
                     )}
                   >
                     {state.mountedServices?.includes(String(service.service_id)) ? '取消挂载' : '挂载到 DSH'}
@@ -1528,12 +1572,14 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                         <p style={{ margin: '2px 0 6px', fontSize: 12, color: '#64748b' }}>{tool.description}</p>
                         {tool.risk && <span className="badge" style={{ marginBottom: 6 }}>{tool.risk === 'read' ? '只读' : tool.risk}{tool.require_approval ? ' · 需审批' : ''}</span>}
                       </>}
-                      <McpDebug api={api} serviceId={String(service.service_id)} toolName={typeof tool === 'string' ? tool : tool.name} contextId={context.contextId}/>
+                      <McpDebug api={api} serviceId={String(service.service_id)} toolName={typeof tool === 'string' ? tool : tool.name} contextId={context.contextId} tenantId={serviceTenant}/>
                     </div>
                   ))}
                 </div>
               </details>
-            </div>)}
+            </div>
+              )
+            })}
           </div>
         </>
       })()}
@@ -1541,7 +1587,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
       {kind !== 'home' && kind !== 'apps' && !busy && (kind === 'mcp' ? services.length === 0 : items.length === 0) && (
         <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94a3b8' }}>
           <p style={{ fontSize: 14, margin: '0 0 6px' }}>当前没有可见资源</p>
-          <p style={{ fontSize: 12 }}>可切换企业空间或点击右上角刷新目录</p>
+          <p style={{ fontSize: 12 }}>可点击右上角刷新目录</p>
         </div>
       )}
     </main>}
@@ -1551,12 +1597,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   </section>
 }
 
-function McpDebug({ api, serviceId, toolName, contextId }: { api: OpcApi; serviceId: string; toolName: string; contextId: string }) {
+function McpDebug({ api, serviceId, toolName, contextId, tenantId }: { api: OpcApi; serviceId: string; toolName: string; contextId: string; tenantId: string }) {
   const [args, setArgs] = useState('{}'), [result, setResult] = useState(''), [pending, setPending] = useState(false)
   const generation = useRef(0)
   useEffect(() => { generation.current++; setResult(''); setPending(false); return () => { generation.current++ } }, [contextId])
   return <details style={{ marginTop: 6 }}><summary style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>在线调试调用</summary><textarea style={{ width: '100%', minHeight: 60, marginTop: 6, fontSize: 12 }} aria-label={`${toolName} JSON 参数`} value={args} onChange={e => setArgs(e.target.value)}/><button style={{ marginTop: 6 }} disabled={pending} onClick={() => {
     const current = generation.current; setPending(true); setResult('')
-    void api.invokeMcpTool(serviceId, toolName, args, contextId).then(value => { if (current === generation.current) setResult(value) }, error => { if (current === generation.current) setResult(String(error)) }).finally(() => { if (current === generation.current) setPending(false) })
+    void api.invokeMcpTool(serviceId, toolName, args, contextId, tenantId).then(value => { if (current === generation.current) setResult(value) }, error => { if (current === generation.current) setResult(String(error)) }).finally(() => { if (current === generation.current) setPending(false) })
   }}>{pending ? '执行中…' : '调用'}</button>{result && <pre style={{ marginTop: 6, fontSize: 11, background: '#f1f5f9', padding: 8, borderRadius: 4, overflowX: 'auto' }}>{result}</pre>}</details>
 }

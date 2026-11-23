@@ -49,16 +49,17 @@ async function extract(bytes: Buffer, root: string): Promise<string> {
 export class SkillInstaller {
   #locks = new Map<string, Promise<unknown>>()
   constructor(private readonly home: string) {}
-  private root(context: EnterpriseContext, catalog: string): string {
-    return join(this.home, 'enterprise-skills', 'catalog', identityHash(context), safeId(context.tenant), safeId(catalog))
+  private root(context: EnterpriseContext, catalog: string, tenant = context.tenant): string {
+    return join(this.home, 'enterprise-skills', 'catalog', identityHash(context), safeId(tenant), safeId(catalog))
   }
   private async serialized<T>(key: string, action: () => Promise<T>): Promise<T> {
     const pending = (this.#locks.get(key) ?? Promise.resolve()).catch(() => {}).then(action)
     this.#locks.set(key, pending)
     try { return await pending } finally { if (this.#locks.get(key) === pending) this.#locks.delete(key) }
   }
-  async install(context: EnterpriseContext, input: { catalogId: string; expectedSha256: string; headerSha256: string | null; bytes: Buffer; name: string; version: string }, assertCurrent: () => void): Promise<InstallRecord> {
-    const root = this.root(context, input.catalogId)
+  async install(context: EnterpriseContext, input: { catalogId: string; expectedSha256: string; headerSha256: string | null; bytes: Buffer; name: string; version: string; tenantId?: string }, assertCurrent: () => void): Promise<InstallRecord> {
+    const tenant = input.tenantId || context.tenant
+    const root = this.root(context, input.catalogId, tenant)
     return this.serialized(root, async () => {
       if (!/^[a-f0-9]{64}$/.test(input.expectedSha256) || input.headerSha256 !== input.expectedSha256 || createHash('sha256').update(input.bytes).digest('hex') !== input.expectedSha256) throw new OpcError('SKILL_HASH_MISMATCH')
       if (input.bytes.length > 256 * 1024 * 1024) unsafe()
@@ -77,7 +78,7 @@ export class SkillInstaller {
           if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
           if (!(await lstat(version)).isDirectory()) unsafe()
         }
-        const record: InstallRecord = { tenant_id: context.tenant, catalog_id: input.catalogId, name: input.name, version: input.version, active_sha256: input.expectedSha256, enabled: true, identity_hash: identityHash(context), installed_at: Math.floor(Date.now() / 1000) }
+        const record: InstallRecord = { tenant_id: tenant, catalog_id: input.catalogId, name: input.name, version: input.version, active_sha256: input.expectedSha256, enabled: true, identity_hash: identityHash(context), installed_at: Math.floor(Date.now() / 1000) }
         await writeFile(pointer, JSON.stringify(record), { flag: 'wx', mode: 0o600 })
         assertCurrent()
         await rename(pointer, join(root, 'active.json'))
@@ -93,8 +94,8 @@ export class SkillInstaller {
     if (!metadata || typeof metadata.name !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(metadata.name) || typeof metadata.description !== 'string') unsafe()
     return { name: metadata.name, description: metadata.description, content: match[2] }
   }
-  async list(context: EnterpriseContext): Promise<InstallRecord[]> {
-    const root = dirname(this.root(context, 'placeholder'))
+  async list(context: EnterpriseContext, tenant = context.tenant): Promise<InstallRecord[]> {
+    const root = dirname(this.root(context, 'placeholder', tenant))
     let names: string[]
     try { names = await readdir(root) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error }
     const records: InstallRecord[] = []
@@ -102,20 +103,30 @@ export class SkillInstaller {
       if (!idPattern.test(name)) continue
       try {
         const record = JSON.parse(await readFile(join(root, name, 'active.json'), 'utf8')) as InstallRecord
-        if (record.catalog_id !== name || record.tenant_id !== context.tenant || record.identity_hash !== identityHash(context) || !/^[a-f0-9]{64}$/.test(record.active_sha256) || typeof record.enabled !== 'boolean') unsafe()
+        if (record.catalog_id !== name || record.tenant_id !== tenant || record.identity_hash !== identityHash(context) || !/^[a-f0-9]{64}$/.test(record.active_sha256) || typeof record.enabled !== 'boolean') unsafe()
         records.push(record)
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     }
     return records
   }
-  async remove(context: EnterpriseContext, catalog: string): Promise<void> {
-    const root = this.root(context, catalog)
+  async listAll(context: EnterpriseContext): Promise<InstallRecord[]> {
+    const seen = new Set<string>()
+    const records: InstallRecord[] = []
+    for (const tenant of context.spaces) {
+      if (seen.has(tenant)) continue
+      seen.add(tenant)
+      records.push(...await this.list(context, tenant))
+    }
+    return records
+  }
+  async remove(context: EnterpriseContext, catalog: string, tenant = context.tenant): Promise<void> {
+    const root = this.root(context, catalog, tenant)
     await this.serialized(root, () => rm(root, { recursive: true, force: true }))
   }
-  async setEnabled(context: EnterpriseContext, catalog: string, enabled: boolean, assertCurrent: () => void): Promise<void> {
-    const root = this.root(context, catalog)
+  async setEnabled(context: EnterpriseContext, catalog: string, enabled: boolean, assertCurrent: () => void, tenant = context.tenant): Promise<void> {
+    const root = this.root(context, catalog, tenant)
     await this.serialized(root, async () => {
-      const record = (await this.list(context)).find(r => r.catalog_id === catalog)
+      const record = (await this.list(context, tenant)).find(r => r.catalog_id === catalog)
       if (!record) throw new OpcError('SKILL_NOT_INSTALLED')
       const temp = join(root, `.active-${randomUUID()}.tmp`)
       try { await writeFile(temp, JSON.stringify({ ...record, enabled }), { flag: 'wx', mode: 0o600 }); assertCurrent(); await rename(temp, join(root, 'active.json')) }
@@ -124,6 +135,6 @@ export class SkillInstaller {
   }
   skillPath(context: EnterpriseContext, record: InstallRecord): string {
     if (!/^[a-f0-9]{64}$/.test(record.active_sha256)) unsafe()
-    return join(this.root(context, record.catalog_id), 'versions', record.active_sha256, 'SKILL.md')
+    return join(this.root(context, record.catalog_id, record.tenant_id), 'versions', record.active_sha256, 'SKILL.md')
   }
 }

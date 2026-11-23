@@ -65,20 +65,21 @@ export class ManagedMcpMounts {
     this.#unmountedByUser.delete(id)
   }
 
-  async mount(serviceId: string, expectedContextId: string): Promise<void> {
+  async mount(serviceId: string, expectedContextId: string, tenantId?: string): Promise<void> {
     this.#unmountedByUser.delete(serviceId)
     const captured = this.core.auth.contexts.capture(expectedContextId)
     if (this.#mounts.has(serviceId)) return
-    const body = await this.core.request(`/integration/v1/mcp/services?include_schema=true&tenant=${encodeURIComponent(captured.context.tenant)}`)
+    const body = await this.core.listMcpServices()
     captured.assertCurrent()
     const data = body.data as { services?: Record<string, unknown>[] } | undefined
-    const service = data?.services?.find(item => item.service_id === serviceId)
+    const service = data?.services?.find(item => item.service_id === serviceId && (!tenantId || !item.tenant_id || item.tenant_id === tenantId))
     if (!service || !Array.isArray(service.tools)) throw new OpcError('RESOURCE_NOT_ACCESSIBLE')
     await this.mountSingleService(service, captured)
   }
 
   private async mountSingleService(service: Record<string, unknown>, captured: ReturnType<ContextStore['capture']>): Promise<void> {
     const serviceId = String(service.service_id)
+    const serviceTenant = typeof service.tenant_id === 'string' && service.tenant_id ? service.tenant_id : captured.context.tenant
     if (this.#mounts.has(serviceId)) return
     const tools = (service.tools as unknown[]).map((item: unknown) => {
       if (typeof item === 'string') return { name: item, inputSchema: { type: 'object', additionalProperties: true } }
@@ -114,7 +115,7 @@ export class ManagedMcpMounts {
               if (!params || typeof params.name !== 'string' || !tools.some(tool => tool.name === params.name)) throw new OpcError('UNKNOWN_TOOL')
               const args = params.arguments ?? {}
               if (!args || typeof args !== 'object' || Array.isArray(args)) throw new OpcError('INVALID_ARGUMENTS')
-              const output = await this.core.mcp.invoke({ serviceId, toolName: params.name, arguments: args as Record<string, unknown>, contextId: expectedContextId }, this.approve, controller.signal)
+              const output = await this.core.mcp.invoke({ serviceId, toolName: params.name, arguments: args as Record<string, unknown>, contextId: expectedContextId, tenantId: serviceTenant }, this.approve, controller.signal)
               result = output && typeof output === 'object' && 'content' in output && Array.isArray(output.content) ? output : { content: [{ type: 'text', text: JSON.stringify(output ?? null) }] }
               break
             }
@@ -142,7 +143,7 @@ export class ManagedMcpMounts {
     try {
       if (!this.core.auth.contexts.current) return
       const captured = this.core.auth.contexts.capture()
-      const body = await this.core.request(`/integration/v1/mcp/services?include_schema=true&tenant=${encodeURIComponent(captured.context.tenant)}`)
+      const body = await this.core.listMcpServices()
       captured.assertCurrent()
       const data = body.data as { services?: Record<string, unknown>[] } | undefined
       if (!Array.isArray(data?.services)) return
@@ -155,7 +156,7 @@ export class ManagedMcpMounts {
         }
       }
     } catch {
-      // Non-fatal
+      return
     }
   }
 
