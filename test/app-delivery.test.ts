@@ -121,7 +121,9 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
           const agent = {
             session: { id: sessionId },
             tools: { restrict() {}, register: (tool: any) => tools.set(tool.name, tool) },
-            systemPrompt: { section: ({ text }: { text: string | (() => string) }) => { prompt = typeof text === 'string' ? text : text() } },
+            systemPrompt: { section: ({ text }: { text: string | (() => string) }) => {
+              prompt = typeof text === 'string' ? text : text()
+            } },
             on() {}, inject() {}, cancel() {}, followup() {}, async whenIdle() {},
           }
           setup(agent)
@@ -1897,7 +1899,7 @@ exec(m._ADDITIVE_SQLITE_SYNC_PY, {"__builtins__": __builtins__})
   }
 })
 
-test('attachAppAgent names the deployment session and preserves its title and identity on continuation', async () => {
+test('attachAppAgent keeps the same session for deployment preparation and post-deployment questions', async () => {
   const workDir = await mkdtemp(join(tmpdir(), 'opc-agent-auth-'))
   try {
     // 1. Python auth validation diagnostics and trimmed auth_blockers match
@@ -1944,7 +1946,11 @@ test('attachAppAgent names the deployment session and preserves its title and id
     await titleContext.plugin(SessionTitleService, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 })
     let liveSession: Session | undefined
     const injectedNotices: string[] = []
-    let deliveryInstructions = ''
+    let getDeliveryInstructions = () => ''
+    let handleUserMessage: ((message: AppDocument) => Promise<AppDocument>) | undefined
+    let promptAtTurnStart = ''
+    let toolsAtTurnStart: boolean[] = []
+    const toolConditions: ((context: { signal: AbortSignal }) => boolean | Promise<boolean>)[] = []
     let deliveryContext: AppDocument | undefined
     let resumeCalled = false
     const fakeCtx = {
@@ -1960,9 +1966,22 @@ test('attachAppAgent names the deployment session and preserves its title and id
           liveSession = titleContext.sessions.create(sessionId as SessionId)
           const agent = {
             session: liveSession,
-            tools: { restrict: () => {}, register: () => {} },
-            systemPrompt: { section: ({ text }: { text: string | (() => string) }) => { deliveryInstructions = typeof text === 'string' ? text : text() } },
-            on: () => {},
+            tools: { restrict: () => {}, register: (_tool: unknown, options?: { when: (context: { signal: AbortSignal }) => boolean | Promise<boolean> }) => {
+              toolConditions.push(options?.when ?? (() => true))
+            } },
+            systemPrompt: { section: ({ text }: { text: string | (() => string) }) => {
+              getDeliveryInstructions = typeof text === 'string' ? () => text : text
+            } },
+            on: (event: string, handler: (payload: { signal: AbortSignal }, next: () => Promise<AppDocument>) => Promise<AppDocument>) => {
+              if (event === 'agent/pre-step') {
+                handleUserMessage = async message => {
+                  const signal = new AbortController().signal
+                  toolsAtTurnStart = await Promise.all(toolConditions.map(isAvailable => isAvailable({ signal })))
+                  try { return await handler({ signal }, async () => ({ kind: 'enter', messages: [message] })) }
+                  finally { promptAtTurnStart = getDeliveryInstructions() }
+                }
+              }
+            },
             cancel: () => {},
             inject: (msg: { source?: { summary?: string }; content: { text: string }[] }) => {
               const summary = msg.source?.summary
@@ -1983,7 +2002,7 @@ test('attachAppAgent names the deployment session and preserves its title and id
 
     const ac = new AbortController()
     const fakeJob: any = {
-      id: 'job-1',
+      id: '866cde1e-de19-43af-b7ef-69518975e67f',
       name: '供应商系统',
       slug: 'baoxiao',
       url: 'http://baoxiao.apps.example.test',
@@ -2006,6 +2025,7 @@ test('attachAppAgent names the deployment session and preserves its title and id
     assert.equal(createdSessions.length, 1)
     assert.notEqual(createdSessions[0], 'disposed-session-1')
     assert.ok(injectedNotices.some(s => s.includes('等待确认的问题：管理员账号如何创建？')))
+    const deliveryInstructions = getDeliveryInstructions()
     assert.deepEqual(deliveryInstructions.match(/^## \d+\..+$/gm), [
       '## 1. 获取应用信息',
       '## 2. 做部署所需的改造',
@@ -2024,6 +2044,34 @@ test('attachAppAgent names the deployment session and preserves its title and id
     assert.equal(createdSessions.length, 1)
     assert.equal(resumeCalled, false)
     assert.equal(titleContext.sessionTitle.get(liveSession!)?.title, '供应商系统验收')
+
+    const scope = contexts.captureApplication(contexts.applicationContextId!)
+    const jobRoot = join(workDir, 'opc', 'apps', identityHash(scope.context), fakeJob.id)
+    const jobPath = join(jobRoot, 'job.json')
+    await mkdir(jobRoot, { recursive: true })
+    const message = {
+      source: { kind: 'user', rpcId: 'follow-up' },
+      content: [{ type: 'text', text: '部署好了，我在哪里登录？' }],
+    }
+    const completedJob = { ...fakeJob, status: 'verified', version: 3, published: true }
+    await writeFile(jobPath, JSON.stringify(completedJob))
+    assert.ok(handleUserMessage)
+    assert.deepEqual(await handleUserMessage(message), { kind: 'enter', messages: [message] })
+    assert.match(promptAtTurnStart, /部署后答疑/)
+    assert.match(promptAtTurnStart, /baoxiao\.apps\.example\.test/)
+    assert.ok(!toolsAtTurnStart.some(Boolean))
+    assert.deepEqual(JSON.parse(await readFile(jobPath, 'utf8')), completedJob)
+    assert.equal(createdSessions.length, 1)
+
+    await writeFile(jobPath, JSON.stringify({ ...completedJob, status: 'failed' }))
+    delivery.startAnalysis = async (_id, _feedback, _expected, _session, options) => {
+      assert.equal(options?.mode, 'resume')
+      assert.equal(options?.fromChat, true)
+      throw new Error('reached paused deployment recovery')
+    }
+    await assert.rejects(() => handleUserMessage!(message), /reached paused deployment recovery/)
+    assert.equal(promptAtTurnStart, deliveryInstructions)
+    assert.ok(!toolsAtTurnStart.some(Boolean))
   } finally {
     await rm(workDir, { recursive: true, force: true })
   }

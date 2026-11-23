@@ -101,6 +101,7 @@ interface AnalysisSession {
   round?: AnalysisRound
   context: string
   registerRound?: (round: AnalysisRound) => void
+  followupPrompt?: string
 }
 
 const configChatPrompt = [
@@ -188,7 +189,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const disposers = [
       child.tools.restrict({ allow: [] }),
       child.systemPrompt.section({ name: 'opc-delivery', order: 1,
-        text: () => inConfigChat() ? configChatPrompt : deliveryPrompt, complete: true, interpolate: false }),
+        text: () => inConfigChat() ? configChatPrompt : live.followupPrompt ?? deliveryPrompt, complete: true, interpolate: false }),
       child.tools.register(defineTool({ name: 'opc_config_read', description: '读取本次部署右侧的配置草稿。', parameters: {}, output: jsonOutput,
         async execute(_, { signal }) {
           return JSON.stringify(await delivery.configChat.read(job.id, live.context, signal))
@@ -220,6 +221,20 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     disposers.push(child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
       const decision = await next()
       if (decision.kind !== 'enter' || !decision.messages.length || inConfigChat()) return decision
+      if (!live.round && decision.messages.some(message => message.source.kind === 'user' && 'rpcId' in message.source)) {
+        const deployed = await delivery.getDeploymentFollowup(job.id, live.context)
+        turnSignal.throwIfAborted()
+        if (deployed && !live.round) {
+          live.followupPrompt = [
+            '你正在原部署会话中提供部署后答疑。根据本会话的部署记录和应用说明，直接回答用户的问题。',
+            '用普通用户能理解的话说明登录入口、配置项用途、在哪里操作以及怎样确认结果。信息不足时说明需要核实的内容。',
+            '部署记录中的 verified 表示发布流程已完成，awaiting_page_verification 表示部署已完成但仍待页面验证，superseded 表示这是历史部署。',
+            `本会话关联的部署记录：${JSON.stringify(deployed)}`,
+          ].join('\n')
+          return decision
+        }
+      }
+      live.followupPrompt = undefined
       const messages = []
       for (const message of decision.messages) {
         if (message.source.kind !== 'user' || !('rpcId' in message.source)) {
@@ -573,6 +588,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           ? `方案已保存，等待用户回复。请在当前对话中列出待确认的问题与可选方案，再结束本轮：\n${questions.join('\n')}`
           : '方案已通过校验并保存。请向用户说明关键改造和待填项。OPC 随后生成交付包，实际准备结果以任务状态为准。'
       } }))
+    live.followupPrompt = undefined
     live.round = round
     let analysis: AgentHandle
     try {
