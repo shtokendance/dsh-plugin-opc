@@ -2365,6 +2365,10 @@ export class AppDelivery {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     return this.platform(`/${slug}/recheck`, expected, { method: 'POST', body: {} })
   }
+  async runtimeManagement(slug: string, expected: string, command?: AppDocument) {
+    if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
+    return this.platform(`/${slug}/runtime-management`, expected, command ? { method: 'POST', body: command } : {})
+  }
   async updateConfig(slug: string, body: AppDocument, expected: string) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     const scope = this.scope(expected)

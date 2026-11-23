@@ -71,6 +71,7 @@ export interface AppStorageOverview {
 }
 
 export interface AppVersionItem {
+  config_revision?: string
   id: string
   app_id: string
   slug: string
@@ -283,6 +284,8 @@ export interface OpcApi {
   appSaveDownload(slug: string, selection: string, context: string): Promise<string>
   appStorage?(slug: string, context: string): Promise<string>
   appRecheck?(slug: string, context: string): Promise<string>
+  appRuntimeStatus?(slug: string, context: string): Promise<string>
+  appRuntimeChange?(slug: string, commandJson: string, context: string): Promise<string>
   appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>
   appRollback?(slug: string, payloadJson: string, context: string): Promise<string>
   state(): Promise<string>

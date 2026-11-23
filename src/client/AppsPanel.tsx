@@ -32,6 +32,39 @@ import { appsCss } from './appsStyles.ts'
 type ViewMode = 'list' | 'wizard' | 'detail'
 type WizardStep = 1 | 2 | 3 | 4
 type ConfigSubTab = 'configs' | 'skill' | 'dockerfile' | 'mounts'
+type RuntimeOperation = {
+  id: string
+  kind: 'restart' | 'config' | 'restore' | 'baseline'
+  state: 'pending' | 'restarting' | 'checking' | 'restoring' | 'unknown' | 'recovery_unknown' | 'failed' | 'restored' | 'succeeded'
+  message: string
+  config_number?: number
+  config_revision?: string
+  changed_keys?: string
+  created_by?: string
+  created_at?: string
+}
+type RuntimeManagementStatus = {
+  operation: RuntimeOperation | null
+  revisions: RuntimeOperation[]
+  config_revision: string
+  config_number: number
+  editable_keys: string[]
+}
+type RuntimeApp = Pick<DeployedApp, 'slug' | 'name' | 'current_version'>
+type RuntimeCommand = {
+  kind: 'restart' | 'config' | 'restore' | 'recheck'
+  operation_id?: string
+  base_version?: number
+  base_config_revision?: string
+  changes?: Record<string, string>
+}
+function runtimeOperationBusy(operation?: RuntimeOperation | null) {
+  return Boolean(operation && ['pending', 'restarting', 'checking', 'restoring'].includes(operation.state))
+}
+function runtimeOperationNeedsCheck(operation?: RuntimeOperation | null) {
+  return Boolean(operation && (operation.state === 'unknown' || operation.state === 'recovery_unknown' || (operation.state === 'failed' && operation.kind === 'restart')))
+}
+
 type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
 
@@ -608,10 +641,20 @@ export function AppsPanel({
 
   // Detail View State
   const [detailApp, setDetailApp] = useState<DeployedApp | null>(null)
-  const [detailTab, setDetailTab] = useState<DetailTab>('artifacts')
+  const [detailTab, setDetailTab] = useState<DetailTab>('configs')
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailBusy, setDetailBusy] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [runtimePanel, setRuntimePanel] = useState<{ app: RuntimeApp; confirmRestart: boolean } | null>(null)
+  const [runtimeData, setRuntimeData] = useState<{ slug: string; status: RuntimeManagementStatus } | null>(null)
+  const [runtimeError, setRuntimeError] = useState<{ slug: string; message: string } | null>(null)
+  const [runtimeSubmitting, setRuntimeSubmitting] = useState(false)
+  const [runtimeRefresh, setRuntimeRefresh] = useState(0)
+  const [runtimeDraft, setRuntimeDraft] = useState<Record<string, string>>({})
+  const [showRuntimeHistory, setShowRuntimeHistory] = useState(false)
+  const refreshedRuntimeOperation = useRef<string | null>(null)
+  const runtimeContext = useRef(contextId)
+  runtimeContext.current = contextId
   const [detailNotice, setDetailNotice] = useState<string | null>(null)
   const [detailHealthCheck, setDetailHealthCheck] = useState<(AppHealthCheck & { slug: string }) | null>(null)
   const [versionsError, setVersionsError] = useState<string | null>(null)
@@ -859,7 +902,7 @@ export function AppsPanel({
 
   // Open Detail View & load all 5 tabs data
   const openAppDetail = useCallback(
-    async (slug: string, initialTab: DetailTab = 'artifacts', preserveFeedback = false) => {
+    async (slug: string, initialTab: DetailTab = 'configs', preserveFeedback = false) => {
       const request = ++detailLoad.current
       setDetailHealthCheck(null)
       setViewMode('detail')
@@ -894,6 +937,7 @@ export function AppsPanel({
           {},
         )
         setDetailApp(detail)
+        setRuntimeDraft({})
         setEditPort(String(detail.container_port ?? opcConfig.defaultPort))
         setEditConfigs(Array.isArray(detail.app_config) ? detail.app_config.map(c => ({ ...c })) : [])
         setVersions(Array.isArray(verParsed.versions) ? verParsed.versions : [])
@@ -911,6 +955,78 @@ export function AppsPanel({
     },
     [api, contextId, opcConfig.defaultPort],
   )
+
+  const runtimeSlug = runtimePanel?.app.slug ?? (viewMode === 'detail' && detailApp?.can_manage === true ? detailApp.slug : undefined)
+  const runtimeStatus = runtimeData?.slug === runtimeSlug ? runtimeData?.status : undefined
+  const runtimeOperation = runtimeStatus?.operation
+  const currentRuntimeError = runtimeError?.slug === runtimeSlug ? runtimeError?.message : undefined
+
+  useEffect(() => {
+    if (!runtimeSlug || !api.appRuntimeStatus) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async () => {
+      try {
+        const status = JSON.parse(await api.appRuntimeStatus!(runtimeSlug, contextId)) as RuntimeManagementStatus
+        if (stopped) return
+        setRuntimeError(null)
+        setRuntimeData({ slug: runtimeSlug, status })
+        if (runtimeOperationBusy(status.operation)) timer = setTimeout(refresh, 2000)
+      } catch (error) {
+        if (stopped) return
+        setRuntimeError({ slug: runtimeSlug, message: readErrorMessage(error, '暂时无法读取操作状态') })
+      }
+    }
+    void refresh()
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [api, contextId, runtimeSlug, runtimeRefresh])
+
+  useEffect(() => {
+    setRuntimePanel(null)
+    setRuntimeData(null)
+    setRuntimeError(null)
+    setRuntimeSubmitting(false)
+  }, [contextId])
+
+  useEffect(() => {
+    if (runtimeOperation?.state !== 'succeeded' || runtimeOperation.kind === 'restart' ||
+        viewMode !== 'detail' || detailApp?.slug !== runtimeSlug ||
+        refreshedRuntimeOperation.current === runtimeOperation.id) return
+    refreshedRuntimeOperation.current = runtimeOperation.id
+    if (runtimeStatus?.config_revision !== (versions.find(version => version.is_active)?.config_revision ?? '')) {
+      void openAppDetail(runtimeSlug!, 'configs', true)
+    }
+  }, [runtimeOperation, runtimeStatus, viewMode, detailApp?.slug, runtimeSlug, versions, openAppDetail])
+
+  const openRuntimePanel = (app: RuntimeApp, confirmRestart: boolean) => {
+    setRuntimeError(null)
+    setRuntimePanel({ app, confirmRestart })
+    setRuntimeRefresh(value => value + 1)
+  }
+
+  const submitRuntimeChange = async (app: RuntimeApp, command: RuntimeCommand) => {
+    if (!api.appRuntimeChange || runtimeSubmitting) return
+    setRuntimeSubmitting(true)
+    setRuntimeError(null)
+    setRuntimePanel({ app, confirmRestart: false })
+    try {
+      const operation = JSON.parse(await api.appRuntimeChange(app.slug, JSON.stringify(command), contextId)) as RuntimeOperation
+      if (runtimeContext.current !== contextId) return
+      setRuntimeData(previous => ({
+        slug: app.slug,
+        status: {
+          revisions: [], config_revision: command.base_config_revision ?? '', config_number: 1, editable_keys: [],
+          ...(previous?.slug === app.slug ? previous.status : {}),
+          operation,
+        },
+      }))
+      setRuntimeRefresh(value => value + 1)
+    } catch (error) {
+      if (runtimeContext.current === contextId) setRuntimeError({ slug: app.slug, message: readErrorMessage(error, '操作提交失败') })
+    } finally {
+      if (runtimeContext.current === contextId) setRuntimeSubmitting(false)
+    }
+  }
 
   const refreshDetailLogs = useCallback(async () => {
     if (detailApp?.can_manage !== true) return
@@ -1893,8 +2009,11 @@ export function AppsPanel({
                       </button>
                     </>
                   )}
+                  {!readOnly && (app.current_version ?? 0) > 0 && api.appRuntimeStatus && api.appRuntimeChange && (
+                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => openRuntimePanel(app, true)}>重启应用</button>
+                  )}
                   <button type="button" className="oa-btn oa-btn-xs oa-btn-link oa-app-card-detail"
-                    onClick={() => void openAppDetail(app.slug, isFailed && !readOnly ? 'logs' : 'artifacts')}>
+                    onClick={() => void openAppDetail(app.slug, isFailed && !readOnly ? 'logs' : 'configs')}>
                     {isFailed && !readOnly ? '失败日志' : '详情'}<AppIcon name="chevronRight" size={12} />
                   </button>
                 </div>
@@ -2822,13 +2941,19 @@ export function AppsPanel({
       (matchingJob?.version === detailApp.current_version && matchingJob?.proposal?.delivery_format === 1)
     const activeLocalJob = matchingJob?.version === detailApp.current_version && matchingJob?.status === 'verified' ? matchingJob : undefined
     const detailTabs = {
-      artifacts: '能力与技能',
       configs: '运行配置',
       storage: '持久化存储',
       versions: `版本历史 (${visibleVersions.length})`,
       logs: '日志与 Dockerfile',
+      artifacts: '能力与技能',
     } satisfies Record<DetailTab, string>
 
+    const runtimeBlocked = runtimeOperationBusy(runtimeOperation) || runtimeOperation?.state === 'unknown' || runtimeOperation?.state === 'recovery_unknown'
+    const runtimeEditable = runtimeStatus && !runtimeBlocked &&
+      activeVersion && activeVersion.version === detailApp.current_version && (activeVersion.config_revision ?? '') === runtimeStatus.config_revision
+    const runtimeChanges = Object.fromEntries(Object.entries(runtimeDraft).filter(([key, value]) =>
+      runtimeStatus?.editable_keys.includes(key) && detailApp.app_config?.find(item => item.key === key)?.value !== value))
+    const runtimeBaseline = { base_version: detailApp.current_version, base_config_revision: runtimeStatus?.config_revision }
     const logView = !readOnly && detailTab === 'logs'
     const detailLog = formatLogOutput(detailLogsData[detailLogsSubTab])
     const logSummary = detailLogsSubTab === 'runtime' ? '容器服务输出（最近 500 行）'
@@ -2855,6 +2980,9 @@ export function AppsPanel({
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {!readOnly && (detailApp.current_version ?? 0) > 0 && api.appRuntimeStatus && api.appRuntimeChange && (
+              <button type="button" className="oa-btn oa-btn-sm" onClick={() => openRuntimePanel(detailApp, true)}>重启应用</button>
+            )}
             <button
               type="button"
               className="oa-btn oa-btn-sm"
@@ -2992,7 +3120,7 @@ export function AppsPanel({
 
           {/* 5 Segmented Detail Tabs */}
           {!readOnly && (
-            <div className="oa-segmented" role="tablist" aria-label="应用详情">
+            <div className="oa-segmented oa-detail-tab-list" role="tablist" aria-label="应用详情">
               {(Object.keys(detailTabs) as DetailTab[]).map((tab, index, tabs) => (
                 <button key={tab} id={`${formId}-tab-${tab}`} type="button" role="tab"
                   aria-selected={detailTab === tab} aria-controls={`${formId}-detail-panel`} tabIndex={detailTab === tab ? 0 : -1}
@@ -3026,7 +3154,48 @@ export function AppsPanel({
           )}
 
           {/* Tab 2: Configs */}
-          {detailTab === 'configs' && (
+          {detailTab === 'configs' && runtimeStatus && api.appRuntimeChange && (
+            <div className="oa-form-card">
+              <div className="oa-runtime-toolbar">
+                <strong>应用 v{detailApp.current_version} · 配置第 {runtimeStatus.config_number} 版</strong>
+                <div className="oa-runtime-actions">
+                  <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>配置历史</button>
+                  <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>让 AI 分析配置更新</button>
+                  <button type="button" className="oa-btn oa-btn-primary" disabled={!runtimeEditable || runtimeSubmitting || !Object.keys(runtimeChanges).length}
+                    onClick={() => void submitRuntimeChange(detailApp, { kind: 'config', ...runtimeBaseline, changes: runtimeChanges })}>保存并重启</button>
+                </div>
+              </div>
+              {runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>查看最近操作状态</button>}
+              {showRuntimeHistory && <div className="oa-runtime-history">
+                {runtimeStatus.revisions.length === 0 && <div className="oa-hint">当前配置为此应用版本的初始配置。</div>}
+                {runtimeStatus.revisions.map(revision => {
+                  const active = revision.state === 'succeeded' && revision.config_revision === runtimeStatus.config_revision
+                  return <div className="oa-runtime-toolbar" key={revision.id}>
+                    <div>
+                      <strong>配置第 {revision.config_number} 版{active ? ' · 正在使用' : ''}</strong>
+                      <div className="oa-hint">{revision.changed_keys || '初始配置'}{revision.created_at ? ' · ' + new Date(revision.created_at).toLocaleString('zh-CN') : ''}</div>
+                      <div className="oa-hint">{revision.created_by} {revision.message}</div>
+                    </div>
+                    {revision.state === 'succeeded' && !active && <button type="button" className="oa-btn oa-btn-xs" disabled={!runtimeEditable || runtimeSubmitting}
+                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'restore', ...runtimeBaseline, operation_id: revision.id })}>恢复并重启</button>}
+                  </div>
+                })}
+              </div>}
+              {!detailApp.app_config?.length && <div className="oa-hint">当前应用版本没有声明运行配置项。</div>}
+              {detailApp.app_config?.map(item => {
+                const editable = runtimeStatus.editable_keys.includes(item.key)
+                return <label className="oa-runtime-config-item" key={item.key}>
+                  <span><code>{item.key}</code> {item.description}</span>
+                  <input className="oa-input oa-mono" aria-label={`${item.key} 配置值`}
+                    readOnly={!editable || !runtimeEditable || runtimeSubmitting}
+                    value={runtimeDraft[item.key] ?? item.effective_value ?? item.value ?? ''}
+                    onChange={event => setRuntimeDraft(draft => ({ ...draft, [item.key]: event.target.value }))} />
+                </label>
+              })}
+            </div>
+          )}
+
+          {detailTab === 'configs' && !runtimeStatus && (
             <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                 <div>
@@ -3384,6 +3553,41 @@ export function AppsPanel({
         : renderAppListView())}
       {viewMode === 'wizard' && renderWizardView()}
       {viewMode === 'detail' && renderDetailView()}
+      {runtimePanel && (
+        <div className="oa-runtime-backdrop">
+          <section className="oa-form-card oa-runtime-panel" role="dialog" aria-modal="true" aria-labelledby={`${formId}-runtime-title`}
+            onKeyDown={event => { if (event.key === 'Escape') setRuntimePanel(null) }}>
+            <div className="oa-runtime-toolbar">
+              <strong id={`${formId}-runtime-title`}>{runtimePanel.app.name} · 运行状态</strong>
+              <button type="button" autoFocus className="oa-btn oa-btn-xs" onClick={() => setRuntimePanel(null)}>关闭状态</button>
+            </div>
+            {runtimeSubmitting && <div role="status"><span className="oa-dot oa-pulse" /> 正在提交操作…</div>}
+            {!runtimeSubmitting && !runtimeStatus && !currentRuntimeError && <div role="status"><span className="oa-dot oa-pulse" /> 正在读取操作状态…</div>}
+            {!runtimeSubmitting && runtimeOperation && <div role="status" className={`oa-alert ${runtimeOperation.state === 'succeeded' ? 'oa-alert-ok' : 'oa-alert-warn'}`}>
+              {runtimeOperationBusy(runtimeOperation) && <span className="oa-dot oa-pulse" />}
+              {runtimeOperation.message}
+            </div>}
+            {currentRuntimeError && <div role="alert" className="oa-alert oa-alert-danger">{currentRuntimeError}</div>}
+            {runtimePanel.confirmRestart && runtimeStatus && !runtimeOperationBusy(runtimeOperation) &&
+              !runtimeOperationNeedsCheck(runtimeOperation) && <div className="oa-hint">重启期间，应用访问可能短暂中断。</div>}
+            <div className="oa-runtime-actions">
+              {runtimePanel.confirmRestart && runtimeStatus && !runtimeOperationBusy(runtimeOperation) &&
+                runtimeOperation?.state !== 'unknown' && runtimeOperation?.state !== 'recovery_unknown' && (
+                <button type="button" className="oa-btn oa-btn-primary" disabled={runtimeSubmitting}
+                  onClick={() => void submitRuntimeChange(runtimePanel.app, { kind: 'restart' })}>确认重启</button>
+              )}
+              {runtimeOperation && runtimeOperationNeedsCheck(runtimeOperation) && <button type="button" className="oa-btn" disabled={runtimeSubmitting}
+                onClick={() => void submitRuntimeChange(runtimePanel.app, { kind: 'recheck', operation_id: runtimeOperation.id })}>重新检查</button>}
+              {currentRuntimeError && <button type="button" className="oa-btn" onClick={() => setRuntimeRefresh(value => value + 1)}>刷新状态</button>}
+              {runtimeOperation && <button type="button" className="oa-btn" onClick={() => {
+                const slug = runtimePanel.app.slug
+                setRuntimePanel(null)
+                void openAppDetail(slug, 'logs')
+              }}>查看日志</button>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   )
 }

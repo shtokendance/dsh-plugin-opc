@@ -239,6 +239,14 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appRecheck(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.recheck(slug, expectedContextId)) }
   @Remote
+  async appRuntimeStatus(slug: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.runtimeManagement(slug, expectedContextId))
+  }
+  @Remote
+  async appRuntimeChange(slug: string, commandJson: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.runtimeManagement(slug, expectedContextId, JSON.parse(commandJson)))
+  }
+  @Remote
   async appUpdateConfig(slug: string, bodyJson: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.updateConfig(slug, JSON.parse(bodyJson), expectedContextId)) }
   @Remote
   async appDelete(slug: string, purgeVolumes: boolean, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.deleteApp(slug, purgeVolumes, expectedContextId)) }

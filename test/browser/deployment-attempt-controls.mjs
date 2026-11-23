@@ -18,7 +18,8 @@ test('the fourth step follows the original attempt through delay, uncertainty, c
       window.current = first
       const api = {
         appJobByAnalysisSession: async () => JSON.stringify(first),
-        appCatalog: async () => '{"apps":[]}',
+        appCatalog: async () => JSON.stringify({ apps: [{ slug: first.slug, name: first.name, can_manage: true, status: 'running', current_version: 2 }] }),
+        appJob: async () => JSON.stringify(window.current),
         appList: async () => '[]',
         appResources: async () => '{"resources":[]}',
         appModels: async () => '[]',
