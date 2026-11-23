@@ -67,6 +67,66 @@ test('deployment logs use the current request for both first deployment and upgr
   }
 })
 
+test('online runtime configuration uses the authenticated Platform routes', async t => {
+  const requests: AppDocument[] = []
+  const changes = { kind: 'config', base_version: 1, base_config_revision: 'active', changes: { PUBLIC_ORIGIN: 'https://app.example.test' } }
+  const status = { config_revision: 'active', config_number: 1, editable_keys: ['PUBLIC_ORIGIN'], operation: null, revisions: [] }
+  const operation = { id: 'test-operation', kind: 'config', state: 'pending' }
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(Buffer.from(chunk))
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined
+    requests.push({ path: req.url, method: req.method, auth: req.headers.authorization, body })
+    res.setHeader('Content-Type', 'application/json')
+    res.statusCode = req.method === 'POST' ? 202 : 200
+    res.end(JSON.stringify(req.method === 'POST' ? operation : status))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())))
+  const address = server.address() as { port: number }
+  const { delivery, expected } = deliveryFixture(`http://127.0.0.1:${address.port}`)
+  assert.deepEqual(await delivery.runtimeManagement('supplier-audit-sys', expected), status)
+  assert.deepEqual(await delivery.runtimeManagement('supplier-audit-sys', expected, changes), operation)
+  await assert.rejects(delivery.platform('/supplier-audit-sys/runtime-management/arbitrary', expected), /不支持的应用操作/)
+  const path = '/integration/v1/apps/supplier-audit-sys/runtime-management'
+  const auth = 'Bearer platform-fixture-token'
+  assert.deepEqual(requests, [
+    { path, method: 'GET', auth, body: undefined },
+    { path, method: 'POST', auth, body: changes },
+  ])
+})
+
+test('deployment cancellation reaches Platform and saves its receipt', async t => {
+  const requests: AppDocument[] = []
+  const home = await mkdtemp(join(tmpdir(), 'opc-deployment-cancel-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(Buffer.from(chunk))
+    requests.push({ path: req.url, method: req.method, body: Buffer.concat(chunks).toString() })
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({
+      request_id: candidateJob.requestId, status: 'cancelled',
+      published_version: 0, progress: { phase: 'cancelled', retry_safe: true },
+    }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())))
+  const address = server.address() as { port: number }
+  const issuer = `http://127.0.0.1:${address.port}`
+  const { delivery, expected } = deliveryFixture(issuer, [], home)
+  const dir = join(home, 'opc', 'apps', identityHash({ issuer, subject: 'owner' }), candidateJob.id)
+  const path = join(dir, 'job.json')
+  await mkdir(dir, { recursive: true })
+  await writeFile(path, JSON.stringify({ ...candidateJob, archivedRevision: 'ab123', status: 'building' }))
+  const cancelled = await delivery.cancelDeployment(candidateJob.id, candidateJob.requestId!, expected)
+  assert.equal(cancelled.status, 'cancelled')
+  assert.equal(cancelled.deploymentProgress.phase, 'cancelled')
+  assert.deepEqual(requests, [{ path: '/integration/v1/apps/example-app/requests/request1/cancel', method: 'POST', body: '{}' }])
+})
+
 test('candidate login and business requests use the authorized proxy and selected credential resource', async () => {
   const seen: AppDocument[] = []
   const server = createServer(async (req, res) => {
