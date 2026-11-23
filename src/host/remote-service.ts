@@ -291,7 +291,7 @@ export class OpcRemoteService extends TypertRemoteService {
     const state = this.core.auth.state
     const mounted = this.mounts?.list() ?? []
     const cfg = this.configStore.getPayload(this.core.auth.http.base.href)
-    return JSON.stringify({ ...state, knowledgeMentionScopeVersion: 1, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), opcConfig: { platformBaseUrl: cfg.platform_base, appDomainRoot: cfg.effective_app_domain_root, rawAppDomainRoot: cfg.app_domain_root, defaultPort: cfg.app_default_port }, context: state.context ? { ...state.context, contextId: contextId(state.context), applicationContextId: this.core.auth.contexts.applicationContextId, epoch: this.core.auth.contexts.epoch } : null })
+    return JSON.stringify({ ...state, knowledgeMentionScopeVersion: 1, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), pinnedScopeDetails: this.core.scopes.pinDetails(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), opcConfig: { platformBaseUrl: cfg.platform_base, appDomainRoot: cfg.effective_app_domain_root, rawAppDomainRoot: cfg.app_domain_root, defaultPort: cfg.app_default_port }, context: state.context ? { ...state.context, contextId: contextId(state.context), applicationContextId: this.core.auth.contexts.applicationContextId, epoch: this.core.auth.contexts.epoch } : null })
   }
   @Remote({ mode: 'stream' })
   async *watchState(signal: AbortSignal): AsyncIterable<string> {
@@ -321,66 +321,73 @@ export class OpcRemoteService extends TypertRemoteService {
   async listSkillsCatalog(q: string): Promise<string> {
     const captured = this.core.auth.contexts.capture()
     const items = await this.core.catalog('skills', q)
-    const installed = await this.core.installer.list(captured.context); captured.assertCurrent()
-    return JSON.stringify(items.map(item => ({ ...item, installed: installed.find(record => record.catalog_id === item.catalog_id) ?? null })))
+    const installed = await this.core.installer.listAll(captured.context); captured.assertCurrent()
+    return JSON.stringify(items.map(item => ({ ...item, installed: installed.find(record => record.catalog_id === item.catalog_id && record.tenant_id === item.tenant_id) ?? null })))
   }
   @Remote
-  async installSkill(catalogId: string, expectedSha256: string, expectedContextId: string): Promise<void> { await this.core.install({ catalogId, expectedSha256, contextId: expectedContextId }) }
+  async installSkill(catalogId: string, expectedSha256: string, expectedContextId: string, tenantId: string): Promise<void> {
+    await this.core.install({ catalogId, expectedSha256, contextId: expectedContextId, tenantId: tenantId || undefined })
+  }
   @Remote
-  async setSkillEnabled(catalogId: string, enabled: boolean, expectedContextId: string): Promise<void> {
+  async setSkillEnabled(catalogId: string, enabled: boolean, expectedContextId: string, tenantId: string): Promise<void> {
     const captured = this.core.auth.contexts.capture(expectedContextId)
-    if (enabled) await this.core.authz.catalog(captured.context.tenant, catalogId)
+    const tenant = tenantId || captured.context.tenant
+    if (!captured.context.spaces.includes(tenant)) throw new OpcError('SPACE_FORBIDDEN')
+    if (enabled) await this.core.authz.catalog(tenant, catalogId)
     captured.assertCurrent()
-    await this.core.installer.setEnabled(captured.context, catalogId, enabled, captured.assertCurrent)
+    await this.core.installer.setEnabled(captured.context, catalogId, enabled, captured.assertCurrent, tenant)
     this.core.emit('skills-changed')
   }
   @Remote
-  async uninstallSkill(catalogId: string, expectedContextId: string): Promise<void> {
+  async uninstallSkill(catalogId: string, expectedContextId: string, tenantId: string): Promise<void> {
     const captured = this.core.auth.contexts.capture(expectedContextId)
-    await this.core.installer.remove(captured.context, catalogId); this.core.emit('skills-changed')
+    const tenant = tenantId || captured.context.tenant
+    if (!captured.context.spaces.includes(tenant)) throw new OpcError('SPACE_FORBIDDEN')
+    await this.core.installer.remove(captured.context, catalogId, tenant); this.core.emit('skills-changed')
   }
   @Remote
-  async setPinnedKnowledgeScope(sessionId: string, knowledgeBaseId: string | null, expectedContextId: string): Promise<void> {
+  async setPinnedKnowledgeScope(sessionId: string, knowledgeBaseId: string | null, expectedContextId: string, tenantId: string): Promise<void> {
     const captured = this.core.auth.contexts.capture(expectedContextId)
+    const tenant = tenantId || captured.context.tenant
     if (knowledgeBaseId) {
+      if (!captured.context.spaces.includes(tenant)) throw new OpcError('SPACE_FORBIDDEN')
       const available = await this.core.catalog('knowledge-bases'); captured.assertCurrent()
-      if (!available.some(item => item.knowledge_base_id === knowledgeBaseId && item.availability === 'available')) throw new OpcError('RESOURCE_NOT_ACCESSIBLE')
+      if (!available.some(item => item.knowledge_base_id === knowledgeBaseId && item.tenant_id === tenant && item.availability === 'available')) throw new OpcError('RESOURCE_NOT_ACCESSIBLE')
     }
-    this.core.scopes.pin(sessionId, knowledgeBaseId ? { tenantId: captured.context.tenant, knowledgeBaseId, contextId: expectedContextId } : null)
+    this.core.scopes.pin(sessionId, knowledgeBaseId ? { tenantId: tenant, knowledgeBaseId, contextId: expectedContextId } : null)
     this.core.emit('change')
   }
   @Remote
-  async searchKnowledge(sessionId: string, query: string, knowledgeBaseId: string, expectedContextId: string): Promise<string> {
+  async searchKnowledge(sessionId: string, query: string, knowledgeBaseId: string, expectedContextId: string, tenantId: string): Promise<string> {
     const captured = this.core.auth.contexts.capture(expectedContextId)
     const session = `preview:${sessionId}`
-    this.core.scopes.pin(session, knowledgeBaseId ? { tenantId: captured.context.tenant, knowledgeBaseId, contextId: expectedContextId } : null)
+    const tenant = tenantId || captured.context.tenant
+    this.core.scopes.pin(session, knowledgeBaseId ? { tenantId: tenant, knowledgeBaseId, contextId: expectedContextId } : null)
     this.core.scopes.begin(session, 'preview')
-    return JSON.stringify(await this.core.search(session, 'preview', query, undefined, knowledgeBaseId || undefined))
+    return JSON.stringify(await this.core.search(session, 'preview', query, knowledgeBaseId ? tenant : undefined, knowledgeBaseId || undefined))
   }
   @Remote
-  async readKnowledgeDocument(sessionId: string, knowledgeId: string, expectedContextId: string): Promise<string> {
+  async readKnowledgeDocument(sessionId: string, knowledgeId: string, expectedContextId: string, tenantId: string): Promise<string> {
     this.core.auth.contexts.capture(expectedContextId)
-    return JSON.stringify(await this.core.read(`preview:${sessionId}`, 'preview', knowledgeId))
+    return JSON.stringify(await this.core.read(`preview:${sessionId}`, 'preview', knowledgeId, tenantId || undefined))
   }
   @Remote
   async listMcpServices(): Promise<string> {
-    const { context } = this.core.auth.contexts.capture()
-    return JSON.stringify(await this.core.request(`/integration/v1/mcp/services?include_schema=true&tenant=${encodeURIComponent(context.tenant)}`))
+    return JSON.stringify(await this.core.listMcpServices())
   }
   @Remote
-  async invokeMcpTool(serviceId: string, toolName: string, argumentsJson: string, expectedContextId: string): Promise<string> {
+  async invokeMcpTool(serviceId: string, toolName: string, argumentsJson: string, expectedContextId: string, tenantId: string): Promise<string> {
     this.core.auth.contexts.capture(expectedContextId)
     const args: unknown = JSON.parse(argumentsJson)
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new OpcError('INVALID_ARGUMENTS')
-    const result = await this.core.mcp.invoke({ serviceId, toolName, arguments: args as Record<string, unknown>, contextId: expectedContextId }, this.requestApproval)
+    const result = await this.core.mcp.invoke({ serviceId, toolName, arguments: args as Record<string, unknown>, contextId: expectedContextId, tenantId: tenantId || undefined }, this.requestApproval)
     return JSON.stringify(result ?? null)
   }
   private requestApproval: RequestApproval = async () => {
-    // 企微已登录场景下，默认自动批准，无需用户手动确认，且不在面板上展示审批卡片
     return 'allowed-once'
   }
   @Remote
-  async mountMcpService(serviceId: string, expectedContextId: string): Promise<void> { if (!this.mounts) throw new OpcError('MCP_MOUNT_UNAVAILABLE'); await this.mounts.mount(serviceId, expectedContextId) }
+  async mountMcpService(serviceId: string, expectedContextId: string, tenantId: string): Promise<void> { if (!this.mounts) throw new OpcError('MCP_MOUNT_UNAVAILABLE'); await this.mounts.mount(serviceId, expectedContextId, tenantId || undefined) }
   @Remote
   async unmountMcpService(serviceId: string, expectedContextId: string): Promise<void> { this.core.auth.contexts.capture(expectedContextId); this.mounts?.unmountByUser(serviceId) }
   @Remote

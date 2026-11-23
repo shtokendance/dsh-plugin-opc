@@ -11,13 +11,26 @@ export function registerMentions(ctx: Context, api: OpcApi) {
       const state: AuthState = JSON.parse(await api.state())
       if (!state.context || state.knowledgeMentionScopeVersion !== 1) return []
       const term = query.replace(/^opc\s*/i, '')
-      const rows: Resource[] = JSON.parse(await api.listKnowledgeBases(term))
+      const parsed = JSON.parse(await api.listKnowledgeBases(term)) as Resource[] | { items?: Resource[] }
+      const rows: Resource[] = Array.isArray(parsed) ? parsed : (parsed.items ?? [])
       const after: AuthState = JSON.parse(await api.state())
       if (signal.aborted || after.knowledgeMentionScopeVersion !== 1 || after.context?.contextId !== state.context.contextId) return []
-      return rows.filter(row => row.knowledge_base_id && row.tenant_id === state.context!.tenant).map(row => ({
-        name: 'opc ' + row.name, label: row.name, section: 'OPC 知识库', icon: OpcIcon,
-        value: 'opc-kb:' + state.context!.contextId + '/' + encodeURIComponent(row.knowledge_base_id!),
-      }))
+      const multiSpace = state.context.spaces.length > 1
+      const spaceNames = new Map((state.context.spacesDetail ?? []).map(space => [space.id, space.name]))
+      return rows.filter(row => row.knowledge_base_id && state.context!.spaces.includes(row.tenant_id)).map(row => {
+        const isShared = Boolean(row.source_tenant_id && row.source_tenant_id !== row.tenant_id)
+        const ownerSpace = isShared
+          ? (row.source_tenant_name || spaceNames.get(row.source_tenant_id!) || row.source_tenant_id!)
+          : (row.tenant_name || spaceNames.get(row.tenant_id) || row.tenant_id)
+        const displayLabel = multiSpace || isShared ? `${row.name}（${ownerSpace}）` : row.name
+        return {
+          name: `opc ${row.name} ${ownerSpace}`,
+          label: displayLabel,
+          section: 'OPC 知识库',
+          icon: OpcIcon,
+          value: `opc-kb:${state.context!.contextId}/${encodeURIComponent(row.tenant_id)}/${encodeURIComponent(row.knowledge_base_id!)}`,
+        }
+      })
     },
     onPick({ candidate }) {
       if (!candidate.value) return

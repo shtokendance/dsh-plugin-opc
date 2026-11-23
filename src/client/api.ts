@@ -297,20 +297,21 @@ export interface OpcApi {
   switchTenant(tenant: string): Promise<void>
   listKnowledgeBases(q: string): Promise<string>
   listSkillsCatalog(q: string): Promise<string>
-  installSkill(id: string, sha: string, contextId: string): Promise<void>
-  setSkillEnabled(id: string, enabled: boolean, contextId: string): Promise<void>
-  uninstallSkill(id: string, contextId: string): Promise<void>
-  setPinnedKnowledgeScope(session: string, kb: string | null, context: string): Promise<void>
-  searchKnowledge(session: string, query: string, kb: string, context: string): Promise<string>
-  readKnowledgeDocument(session: string, id: string, context: string): Promise<string>
-  invokeMcpTool(service: string, tool: string, argumentsJson: string, contextId: string): Promise<string>
+  installSkill(id: string, sha: string, contextId: string, tenantId: string): Promise<void>
+  setSkillEnabled(id: string, enabled: boolean, contextId: string, tenantId: string): Promise<void>
+  uninstallSkill(id: string, contextId: string, tenantId: string): Promise<void>
+  setPinnedKnowledgeScope(session: string, kb: string | null, context: string, tenantId: string): Promise<void>
+  searchKnowledge(session: string, query: string, kb: string, context: string, tenantId: string): Promise<string>
+  readKnowledgeDocument(session: string, id: string, context: string, tenantId: string): Promise<string>
+  invokeMcpTool(service: string, tool: string, argumentsJson: string, contextId: string, tenantId: string): Promise<string>
   decideDebugInvocation(id: string, allowed: boolean, contextId: string): Promise<void>
-  mountMcpService(service: string, context: string): Promise<void>
+  mountMcpService(service: string, context: string, tenantId: string): Promise<void>
   unmountMcpService(service: string, context: string): Promise<void>
   listMcpServices(): Promise<string>
 }
 export interface AuthState {
   pinnedScopes?: Record<string, string>
+  pinnedScopeDetails?: Record<string, { tenantId: string; knowledgeBaseId: string }>
   mcpConnections?: Record<string, { state: string; toolCount: number }>
   knowledgeMentionScopeVersion?: number
   mountAvailable?: boolean
@@ -320,4 +321,4 @@ export interface AuthState {
   opcConfig?: { platformBaseUrl: string; appDomainRoot: string; rawAppDomainRoot?: string; defaultPort: number }
   context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; applicationContextId?: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
 }
-export interface Resource { name: string; description?: string; tenant_id: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }
+export interface Resource { name: string; description?: string; tenant_id: string; tenant_name?: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }
