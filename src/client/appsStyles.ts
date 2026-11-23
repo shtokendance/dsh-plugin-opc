@@ -483,7 +483,7 @@ export const appsCss = `
   gap: 8px;
 }
 .oa-runtime-toolbar { justify-content: space-between; }
-.oa-runtime-config-item, .oa-runtime-history {
+.oa-runtime-history {
   display: grid;
   gap: 8px;
   border-top: 1px solid var(--oa-line);
