@@ -30,6 +30,81 @@ function proposal(url: string) {
       verification: { cases: [{ operation: 'lookup', json_contains: { ok: true } }] }, unresolved: [] } }
 }
 
+test('large proposals resume from saved parts, preserve content and generate deployable artifacts', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-large-proposal-'))
+  try {
+    const source = join(home, 'source')
+    const root = join(home, 'job')
+    const url = 'http://test-app.apps.opc.test'
+    await mkdir(source)
+    await writeFile(join(source, 'main.py'), 'def lookup():\n    return {"ok": True}\n')
+    await worker({ action: 'prepare', root, source, slug: 'test-app', url })
+    const base = proposal(url)
+    const { contract, changes, ...rest } = base
+    const call = (action: string, args = {}) => worker({ action, root, draft_revision: 2, ...args })
+    const stage = (section: string, part: number, content: string, last: boolean, extra = {}) =>
+      call('stage_proposal', { section, part, content, last, ...extra })
+    const header = await stage('proposal', 1, JSON.stringify({ ...rest, changes: [{ ...changes[0], id: 'docker', content: undefined }],
+      readiness: { outcome: 'ready', reason: 'fixture' }, contract: { ...contract, storage_mounts: [] },
+    }), true)
+    await stage('file.docker', 1, changes[0].content, true)
+    await stage('skill_markdown', 1, '# 查询记录\n\n[操作说明](references/opc-guide.md)\n', true)
+    await call('stage_proposal', { section: 'contract.apis', part: 1, items: [], last: false })
+    await call('stage_proposal', { section: 'contract.apis', part: 2, items: contract.apis, last: true })
+    await assert.rejects(stage('contract.apis', 1, '[]', false), /同一种分段格式/)
+    const first = '参考说明\n'.repeat(300)
+    await stage('reference.guide', 1, first, false)
+    await stage('reference.guide', 1, first, false)
+    await assert.rejects(stage('reference.guide', 3, '丢失一段', true), /第 2 段/)
+    await assert.rejects(stage('reference.guide', 1, '不同正文', false), /replace/)
+    const status = await call('proposal_draft_status')
+    assert.equal(status.draft_id, header.draft_id)
+    assert.equal(status.sections.find((s: AppDocument) => s.section === 'reference.guide').next_part, 2)
+    await assert.rejects(call('assemble_proposal', { draft_id: header.draft_id }), /reference\.guide/)
+    const referenceChunk = '更多参考说明\n'.repeat(560)
+    for (let part = 2; part <= 13; part++) await stage('reference.guide', part, referenceChunk, false)
+    const next = await stage('reference.guide', 14, '完成。\n', true)
+    const pattern = 'A'.repeat(10_000)
+    const section = 'contract.configuration_review'
+    for (let index = 0; index < 108; index++) {
+      const prefix = index === 0 ? '{"summary":"' : ''
+      const suffix = index === 107 ? '","evidence":["main.py:1"]}' : ''
+      await stage(section, index + 1, prefix + pattern + suffix, index === 107)
+    }
+    await assert.rejects(call('assemble_proposal', { draft_id: 'invalid' }), /草稿编号/)
+    await assert.rejects(stage('contract.__proto__', 1, '{}', true), /分段字段/)
+    await assert.rejects(stage('summary', 1, '超'.repeat(5000), true), /单段/)
+    const assembled = await call('assemble_proposal', { draft_id: next.draft_id })
+    assert.equal(assembled.contract.configuration_review.summary.length, 1_080_000)
+    assert.deepEqual(assembled.contract.apis, contract.apis)
+    assert.equal(assembled.changes[0].content, changes[0].content)
+    const result = await worker({ action: 'bundle', root, revision: 'large', proposal: { ...assembled, delivery_format: 1 }, dockerfile_only: true })
+    const bundle = join(root, 'large', 'bundle')
+    const plan = await readFile(join(bundle, 'delivery.json'))
+    assert.ok(plan.byteLength > 1_048_576 && plan.byteLength < 2_097_152)
+    assert.equal(JSON.parse(plan.toString()).contract.configuration_review.summary, pattern.repeat(108))
+    const zip = unzipSync(await readFile(join(bundle, 'skill.zip')))
+    const fullReference = first + referenceChunk.repeat(12) + '完成。\n'
+    assert.ok(Buffer.byteLength(fullReference) > 128_000)
+    assert.equal(Buffer.from(zip['references/opc-guide.md']).toString(), fullReference)
+    assert.match(result.skill_markdown, /references\/opc-guide\.md/)
+    const reference = await worker({ action: 'read_skill_reference', root, revision: 'large', name: 'guide', start: 1,
+      expected_sha256: result.summary.files['skill.zip'] })
+    assert.equal(reference.text, fullReference.slice(0, 4000))
+    assert.equal(reference.next_start, 4001)
+    const nextPage = await worker({ action: 'read_skill_reference', root, revision: 'large', name: 'guide', start: reference.next_start,
+      expected_sha256: result.summary.files['skill.zip'] })
+    assert.equal(nextPage.text, fullReference.slice(4000, 8000))
+    await assert.rejects(worker({ action: 'read_skill_reference', root, revision: 'large', name: '../guide',
+      expected_sha256: result.summary.files['skill.zip'] }), /参考文件名称/)
+    assembled.contract.configuration_review.summary = pattern.repeat(220)
+    await assert.rejects(worker({ action: 'bundle', root, revision: 'oversized', proposal: { ...assembled, delivery_format: 1 }, dockerfile_only: true }),
+      /delivery\.json.*2 MiB/)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('host rejects changes to the confirmed container port', async () => {
   const delivery = new AppDelivery({} as OpcCore, tmpdir(), { async read() { return {} }, async write() {} })
   const url = 'http://127.0.0.1:8080'
@@ -174,7 +249,14 @@ test('deployment agent scopes instructions and tools by mode and reads confirmed
         await assert.rejects(submit.execute({ proposal: JSON.stringify(candidate(updating ? 'initialize' : 'postgres_copy')) }), /data_plan\.strategy/)
         const { readiness, ...withoutDecision } = candidate(options[0])
         await assert.rejects(submit.execute({ ...withoutDecision, changes: [] }), /readiness/)
-        await submit.execute({ ...candidate(options[0]), changes: [] })
+        if (updating) {
+          const draft = tools.get('opc_delivery_draft')
+          const stored = JSON.parse(await draft.execute({ action: 'save', section: 'proposal', part: 1,
+            content: JSON.stringify({ ...candidate(options[0]), changes: [] }), last: true }))
+          await submit.execute({ draft_id: stored.draft_id })
+        } else {
+          await submit.execute({ ...candidate(options[0]), changes: [] })
+        }
         assert.deepEqual(job.proposal?.readiness, readiness)
         assert.equal(job.proposal?.base_version, updating ? 3 : 0)
         const current = JSON.parse(await inspect.execute({ action: 'read_current_proposal', path: 'contract.apis' }))

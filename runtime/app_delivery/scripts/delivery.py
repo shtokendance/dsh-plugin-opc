@@ -589,7 +589,7 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
     save(out / "app-manifest.json", manifest)
     md = render_skill_markdown(contract, admin_login) if delivery_plan is None else delivery_plan["skill_markdown"]
     if delivery_plan is not None:
-        save(out / "delivery.json", {
+        archived_plan = {
             "format": 1, "slug": contract["slug"], "contract": contract,
             **({"config_format": 1, "base_config_revision": delivery_plan.get("base_config_revision", "")}
                if delivery_plan.get("config_format") == 1 else {}),
@@ -601,7 +601,10 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
                 {"path": f["path"], "reason": f["reason"], "sha256": sha(files[f["path"]].read_bytes())}
                 for f in delivery_plan["changes"]
             ],
-        })
+        }
+        require(len((json.dumps(archived_plan, ensure_ascii=False, indent=2) + "\n").encode("utf-8")) <= 2 << 20,
+                "delivery.json 超过 Platform 当前的 2 MiB 归档上限。请将长说明转为技能参考文件，保留实际部署与调用所需的契约。")
+        save(out / "delivery.json", archived_plan)
     with zipfile.ZipFile(out / "skill.zip", "w", zipfile.ZIP_DEFLATED) as z:
         def member(name, data):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
@@ -609,6 +612,8 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
             info.external_attr = 0o100644 << 16
             z.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED)
         member("SKILL.md", md)
+        for name, content in sorted((delivery_plan or {}).get("skill_references", {}).items()):
+            member(f"references/opc-{name}.md", content)
         skill_contract = {**contract, "configs": [
             {k: v for k, v in c.items() if k != "value" and (k not in ("default", "app_default") or not c.get("secret"))}
             for c in contract.get("configs", [])
@@ -616,6 +621,9 @@ def bundle_work(work, out, admin_login=None, *, delivery_plan=None):
         member("references/operations.json", json.dumps(skill_contract, ensure_ascii=False, indent=2))
         if contract["apis"]:
             member("scripts/invoke_api.py", Path(__file__).with_name("invoke_api.py").read_bytes())
+    if delivery_plan is not None:
+        require((out / "skill.zip").stat().st_size <= 8 << 20, "技能包 skill.zip 超过 Platform 的 8 MiB 归档上限。")
+        require((out / "app.tar").stat().st_size <= 240 << 20, "应用包 app.tar 超过 Platform 的 240 MiB 归档上限。请检查构建上下文是否包含缓存、依赖或备份。")
     result = {"skill_version": VERSION, "base_url": contract["base_url"], "status": "packaged-not-deployed", "files": {p.name: sha(p.read_bytes()) for p in sorted(out.iterdir())}}
     save(out / "summary.json", result)
     return result

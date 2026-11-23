@@ -287,12 +287,13 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const portInstructions = portLocked
       ? `本任务锁定的容器端口为 ${port}。`
       : `容器端口策略：优先识别并沿用应用自身默认监听端口（从源码、现有 Dockerfile 或真实配置文件核实）；若应用无默认端口（或依赖外部注入 PORT 且无兜底值），则使用 OPC 默认端口 ${port}。${job.upgrade ? `本次为升级部署，如新版未变更端口优先沿用线上当前端口 ${port}。` : ''}容器内必须监听 0.0.0.0（禁止监听 127.0.0.1），且契约 configs 中的 PORT 必须与 runtime.port 一致，不要引用 *.example 示例文件中冲突的 PORT 或占位密钥。`
-    const prevPlan = compactPreviousPlan(job.proposal)
+    const previousPlan = compactPreviousPlan(job.proposal)
+    const prevPlan = previousPlan && Buffer.byteLength(JSON.stringify(previousPlan)) <= 16_000 ? previousPlan : undefined
     const taskInstruction = assessment
       ? `当前是${assessment.phase === 'build' ? '构建产物' : '运行版本'}验收阶段。先通过 opc_delivery_observe 读取事实，然后提交 opc_delivery_assess 结论。`
       : isRepair
       ? '沿用已确认方案，先用失败制品核实根因，只修复导致中断的问题。'
-      : prevPlan || job.analysisFailure ? '从已有方案、暂存文件与上次中断位置继续。只补本轮缺的内容。'
+      : previousPlan || job.analysisFailure ? '从已有方案、暂存文件与上次中断位置继续。只补本轮缺的内容。'
         : '按技能的三步完成本次应用改造。'
 
     const timeout = new AbortController()
@@ -458,12 +459,18 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             ? await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/delivery.json`, appCtxId)
             : undefined
           const snapshot = await readActiveSnapshot(active)
-          return JSON.stringify({ version: active.version, config_revision: active.config_revision, container_port: active.container_port,
+          const baseline = { version: active.version, config_revision: active.config_revision, container_port: active.container_port,
             configs: (active.app_config ?? snapshot?.app_config ?? []).map(({ key, value, effective_value, secret, resource_id, resource_key, has_value, preserve_on_upgrade }: AppDocument) =>
               ({ key, value: effective_value ?? value, secret, resource_id, resource_key, has_value, preserve_on_upgrade })),
             mounts: (snapshot?.storage_mounts ?? active.storage_mounts ?? []).map(({ name, container_path, resource_id, volume_name, storage_backend, kind, purpose }: AppDocument) =>
               ({ name, container_path, resource_id, volume_name, storage_backend, kind, purpose })),
-            delivery: plan }, null, 2)
+            delivery: plan }
+          if (args.path || args.start !== undefined) return JSON.stringify(readCurrentProposal(baseline, args.path, args.start))
+          const result = JSON.stringify(baseline, null, 2)
+          if (Buffer.byteLength(result) <= 24_000) return result
+          return JSON.stringify({ version: active.version, config_revision: active.config_revision, container_port: active.container_port,
+            paged: true, sections: ['configs', 'mounts', ...(plan ? ['delivery'] : [])],
+            message: '线上基线较大。继续调用 active_version，按 path 分别读取 configs、mounts 或 delivery 下的具体字段，使用 next_start 续读。' })
         }
         if (args.action === 'version_file') {
           const active = await readActiveVersion()
@@ -506,17 +513,51 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         const res = await worker({ action: 'propose_file', root, ...args, skill_delivery: true }, abort)
         return JSON.stringify(res)
       } }))
-    register(defineTool({ name: 'opc_delivery_submit', description: '以结构化字段提交完整改造提案。若已暂存文件，changes 可仅传 {id, path, reason, group}。旧版可用 proposal JSON 字符串。',
+    register(defineTool({ name: 'opc_delivery_draft',
+      description: '按段暂存较大的提案。status 查询已保存段号；save 传 section、part、last，以及 content 或 items；clear 清空指定 section。完整后用 opc_delivery_submit 只传 draft_id。',
+      parameters: {
+        action: { type: 'string', enum: ['status', 'save', 'clear'], required: true },
+        section: { type: 'string', description: 'proposal 或单个字段，如 contract.configs、skill_markdown、file.docker、reference.guide' },
+        part: { type: 'integer', description: '同一字段从 1 开始连续编号' },
+        content: { type: 'string', description: '该段原文。proposal/契约字段拼接后应为合法 JSON，技能正文、文件、参考资料使用原始文本' },
+        items: { type: 'array', items: { type: 'json' }, description: '为 contract.configs、contract.apis 等数组分批提供结构化条目。字段保持同一种格式。' },
+        last: { type: 'boolean', description: '最后一段传 true' },
+        replace: { type: 'boolean', description: '修改已保存的指定段时传 true' },
+      }, output,
+      async execute(args) {
+        if (assessment || job.status !== 'analyzing') throw new Error('请先继续当前应用准备')
+        const action = { status: 'proposal_draft_status', save: 'stage_proposal', clear: 'clear_proposal_section' }[args.action]
+        if (!action) throw new Error('未知的草稿操作')
+        const result = await worker({ ...args, action, root, draft_revision: job.revisionCount ?? 0 }, abort)
+        if (args.action === 'save' && args.last) {
+          job.events.push(`已暂存提案内容：${args.section}`)
+          delivery.core.emit('change')
+        }
+        return JSON.stringify(result)
+      },
+    }))
+    register(defineTool({ name: 'opc_delivery_submit', description: '小提案直接提交结构化字段。大提案用 opc_delivery_draft 分段保存，最后只传 draft_id。若已暂存文件，changes 可仅传 {id, path, reason, group}。',
       parameters: proposalParameters(port, portLocked, updating), output,
       async execute(args) {
         if (job.status !== 'analyzing') throw new Error('本轮已提交方案')
         if (validationStopped) throw new Error('技术方案连续校验未通过，已停止自动重试')
         job.events.push(formatToolStep('submit'))
         delivery.core.emit('change')
+        const { draft_id, proposal, ...fields } = args
+        if (draft_id && (proposal || Object.values(fields).some(value => value !== undefined))) {
+          throw new Error('提交分段提案时只传 draft_id')
+        }
+        const savedDraft = draft_id
+          ? await worker({ action: 'assemble_proposal', root, draft_revision: job.revisionCount ?? 0, draft_id }, abort)
+          : undefined
         let candidate: AppDocument | undefined
         try {
-          const { proposal, ...fields } = args
-          candidate = proposal ? JSON.parse(proposal) : { issues: [], unresolved: [], changes: [], decisions: [], ...fields }
+          try {
+            candidate = proposal ? JSON.parse(proposal) : { issues: [], unresolved: [], changes: [], decisions: [], ...(savedDraft ?? fields) }
+          } catch (error) {
+            if (error instanceof SyntaxError) throw new Error('提交的提案 JSON 格式无效。请用 opc_delivery_draft 分段保存，最后只提交草稿编号。')
+            throw error
+          }
           if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('提案必须是完整的 JSON 对象')
           if (candidate && typeof candidate.contract === 'object' && candidate.contract !== null) {
             candidate.contract = { ...candidate.contract, slug: job.slug, base_url: job.url }
@@ -766,7 +807,8 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         if (stopped) throw new Error('已停止 AI 分析，原源码和已有回答已保留。')
         if (replyCount !== repliesBeforeTurn) attempt = 0
         const providerMessage = failure?.message ?? errorMessage
-        const badToolJson = /tool input is invalid JSON/i.test(providerMessage)
+        const badToolJson = /tool input is invalid JSON/i.test(providerMessage) ||
+          (failure?.code === 'MALFORMED_RESPONSE' && /tool call.*JSON/i.test(providerMessage))
         const invalidOutput = badToolJson || truncated
         const networkError = /(?:timed?\s*out|timeout|connection\s*reset|ECONNRESET|ETIMEDOUT|fetch failed|network|terminated)/i.test(providerMessage)
         const reason = invalidOutput
@@ -786,11 +828,13 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
           throw new Error(reason)
         }
         job.events.push(invalidOutput
-          ? `🔄 ${reason}，正在缩短提交内容后重试（${attempt + 1}/2）`
+          ? `🔄 ${reason}，正在继续提交已保存的提案（${attempt + 1}/2）`
           : networkError ? `🔄 AI 服务暂时中断，正在继续准备（${attempt + 1}/2）`
           : `🔄 正在修正应用准备检查（${attempt + 1}/2）`)
         delivery.core.emit('change')
-        prompt = `先用 read_current_proposal 读取已接受的相关字段并保留完整方案，按以下反馈只修正需要改动的字段。需要补证据时只重读对应位置：${reason}`
+        prompt = invalidOutput && !assessment
+          ? `${reason}。用 opc_delivery_draft 的 status 查看已保存的字段和下一段编号，继续分段暂存并在最后只提交 draft_id。若继续受限，减少每段内容。保留完整配置、接口和技能内容。`
+          : `先用 read_current_proposal 读取已接受的相关字段并保留完整方案，按以下反馈只修正需要改动的字段。需要补证据时只重读对应位置：${reason}`
       }
     } finally {
       sessionReady.resolve(false)

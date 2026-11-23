@@ -38,14 +38,28 @@ export class AppSkillProvider implements SkillProvider {
     options.signal?.throwIfAborted()
     const contract = job.proposal!.contract
     const invokeGuide = `API 使用 opc_app_invoke，job_id=${job.id}。参数 JSON 传 params，正文 JSON 传 body，工具会按技能中声明的方式登录。页面操作使用浏览器和本技能的应用账号，避免在回复中回显账密。非只读操作需用户批准，失败时不得重复执行结果未知的写操作。`
+    const referenceGuide = job.skillMarkdown?.includes('references/opc-')
+      ? `\n- 参考资料按需用 opc_app_read_reference 读取，job_id=${job.id}，name 为 references/opc-<name>.md 中的 <name>。用 next_start 续读。`
+      : ''
     const body = job.skillMarkdown?.trim()
-      ? `${job.skillMarkdown.trim()}\n\n## DSH 调用方式\n- ${invokeGuide}\n- 应用地址：${job.url}\n`
+      ? `${job.skillMarkdown.trim()}\n\n## DSH 调用方式\n- ${invokeGuide}\n- 应用地址：${job.url}${referenceGuide}\n`
       : `# ${job.name}\n${contract.description}\n应用地址：${job.url}\n只读业务 API 已验证；页面未验证。\n${invokeGuide}\n接口与页面：\n${JSON.stringify({ apis: contract.apis, pages: contract.pages, workflows: contract.workflows }, null, 2)}`
     return { ...candidate, content: body }
   }
 }
 
 export function registerAppTools(ctx: Context, delivery: AppDelivery) {
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'opc_app_read_reference', description: '分页读取已验证 OPC 应用技能正文引用的资料。',
+    parameters: { job_id: { type: 'string', required: true }, name: { type: 'string', required: true },
+      start: { type: 'integer' } },
+    output: { schema: { type: 'string' }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] },
+    async execute(args, exec) {
+      const expected = delivery.core.auth.contexts.applicationContextId
+      if (!exec.agent || !expected) throw new Error('需要已登录的对话身份')
+      return JSON.stringify(await delivery.readSkillReference(args.job_id, expected, args.name, args.start ?? 1, exec.signal))
+    },
+  })))
   ctx.effect(() => ctx.tools.register(defineTool({ name: 'opc_app_invoke', description: '调用已部署且业务验证通过的 OPC 应用。先加载 app-* 技能获得 job_id 与 operation。写入操作需要用户批准，结果未知时不要重试。',
     parameters: { job_id: { type: 'string', required: true }, operation: { type: 'string', required: true }, params: { type: 'string', required: true }, body: { type: 'string' } },
     output: { schema: { type: 'string' }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] },
