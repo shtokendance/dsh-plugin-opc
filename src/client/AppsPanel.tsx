@@ -3154,6 +3154,22 @@ export function AppsPanel({
           )}
 
           {/* Tab 2: Configs */}
+          {detailTab === 'configs' && api.appRuntimeStatus && currentRuntimeError && (
+            <div className="oa-alert oa-alert-danger" role="alert">
+              <AppIcon name="warning" size={16} />
+              <div style={{ flex: 1 }}>
+                <strong>暂时无法读取运行配置</strong>
+                <div>{currentRuntimeError}</div>
+              </div>
+              <button type="button" className="oa-btn oa-btn-xs" onClick={() => {
+                setRuntimeError(null)
+                setRuntimeRefresh(value => value + 1)
+              }}>重新加载配置</button>
+            </div>
+          )}
+          {detailTab === 'configs' && api.appRuntimeStatus && !runtimeStatus && !currentRuntimeError && (
+            <div className="oa-alert" role="status"><span className="oa-dot oa-pulse" /> 正在加载运行配置…</div>
+          )}
           {detailTab === 'configs' && runtimeStatus && api.appRuntimeChange && (
             <div className="oa-form-card">
               <div className="oa-runtime-toolbar">
