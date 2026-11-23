@@ -24,6 +24,7 @@ if sys.version_info < (3, 9):
 
 from app_delivery.scripts import delivery as d
 from app_delivery.scripts.invoke_api import execute, skill_login_credentials
+from app_proposal_draft import MAX_REFERENCE_BYTES, REFERENCE_NAME, proposal_draft
 from app_delivery_admin import apply_account, original_account_field, resolve_account, validate_account_plan
 from app_delivery_auth import resolve_authentication, validate_auth_evidence, validate_auth_probe_coverage, validate_auth_questions
 from app_delivery_config import loopback_connection, original_fields, original_value
@@ -410,8 +411,21 @@ def normalize_skill_markdown(markdown, contract):
     d.require(isinstance(contract.get("slug"), str) and isinstance(contract.get("description"), str)
               and contract["description"].strip(), "交付契约必须包含应用标识和业务说明")
     result = d.skill_frontmatter(contract) + markdown + "\n"
-    d.require(len(result.encode("utf-8")) <= 128_000, "skill_markdown 超过 128000 字节")
+    d.require(len(result.encode("utf-8")) <= 128_000,
+              "skill_markdown 超过 128000 字节。请保留入口和操作说明，把详细资料分段保存为 reference.<名称>，并在正文留下引用。")
     return result
+
+
+def validate_skill_references(references, markdown):
+    d.require(isinstance(references, dict), "技能参考文件必须按名称组织")
+    total = 0
+    for name, content in references.items():
+        d.require(REFERENCE_NAME.fullmatch(name), "无效的技能参考文件名称")
+        size = len(content.encode("utf-8")) if isinstance(content, str) else 0
+        d.require(0 < size <= MAX_REFERENCE_BYTES, f"技能参考文件 {name} 为空或超过 2 MiB，请分成多个参考文件。")
+        d.require(f"references/opc-{name}.md" in markdown, f"请在技能正文链接参考文件 references/opc-{name}.md")
+        total += size
+    d.require(total <= 6 * 1024 * 1024, "技能参考文件合计超过 6 MiB，请只保留技能实际使用的资料。")
 
 
 def resolve_and_enrich_proposal(
@@ -503,6 +517,7 @@ def resolve_and_enrich_proposal(
         d.require(not contract.get("admin_account"), "按技能声明应用自己的账号配置和登录引用，不使用插件建号方案")
         try:
             proposal["skill_markdown"] = normalize_skill_markdown(proposal.get("skill_markdown"), contract)
+            validate_skill_references(proposal.get("skill_references", {}), proposal["skill_markdown"])
         except ValueError as exc:
             skill_errors.append(str(exc))
 
@@ -907,6 +922,27 @@ def validate_config_origins(root: Path, contract: dict):
 def main(body):
     root = Path(body["root"]).resolve()
     action = body["action"]
+    if action in {"stage_proposal", "proposal_draft_status", "clear_proposal_section", "assemble_proposal"}:
+        return proposal_draft(root, action, body)
+    if action == "read_skill_reference":
+        name = body.get("name")
+        revision = body.get("revision")
+        start = body.get("start", 1)
+        d.require(isinstance(name, str) and REFERENCE_NAME.fullmatch(name), "无效的技能参考文件名称")
+        d.require(revision is None or (isinstance(revision, str) and revision.isalnum()), "无效的技能版本")
+        d.require(type(start) is int and start > 0, "start 必须为从 1 开始的字符位置")
+        path = root / revision / "bundle/skill.zip" if revision else root / "skill.zip"
+        d.require(path.is_file() and path.stat().st_size <= 8 * 1024 * 1024, "本地技能包不可用")
+        content = path.read_bytes()
+        d.require(d.sha(content) == body.get("expected_sha256"), "本地技能包摘要不一致")
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            member = f"references/opc-{name}.md"
+            matches = [info for info in archive.infolist() if info.filename == member]
+            d.require(len(matches) == 1 and matches[0].file_size <= MAX_REFERENCE_BYTES, "技能参考文件不存在或超过 2 MiB")
+            text = archive.read(matches[0]).decode("utf-8")
+        page_end = start + 4000
+        return {"name": name, "start": start, "text": text[start - 1:page_end - 1],
+                "next_start": page_end if page_end <= len(text) else None}
     if action == "original_config_values":
         values, _ = extract_original_config_values(root / "review/source", body.get("configs", []))
         return values

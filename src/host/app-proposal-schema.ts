@@ -132,5 +132,6 @@ export function proposalParameters(port: number, portLocked: boolean, updating: 
       id: text, question: text, impact: text, options: { ...strings, required: true },
     } } },
     proposal: { ...str, description: '旧版完整提案 JSON 字符串，仅在没有结构化参数时使用' },
+    draft_id: { ...str, description: 'opc_delivery_draft 返回的草稿编号。分段提交时只传这个字段。' },
   } satisfies ParameterSchemaSpec
 }

@@ -1,6 +1,6 @@
 # 部署交付文件
 
-通过 `opc_delivery_inspect` 的 `reference` 读取本文件。准备完整提案后调用 `opc_delivery_submit`。大文件先用 `opc_delivery_propose_file` 暂存完整内容，再在提案中引用 ID。需要用户决策时，把问题加入 `unresolved`，等待回复后复用本轮证据。
+通过 `opc_delivery_inspect` 的 `reference` 读取本文件。准备完整提案后调用 `opc_delivery_submit`。用 `opc_delivery_propose_file` 单独暂存改造文件，或按[大提案分段提交](#大提案分段提交)保存较长内容。需要用户决策时，把问题加入 `unresolved`，等待回复后复用本轮证据。
 
 ## 阅读范围
 
@@ -38,6 +38,15 @@
 2. 对照源码根目录和暂存清单，确认根 Dockerfile、实际构建输入和本次文件变更都在 `build_context` 中。路径使用项目内真实路径。插件本地副本目录和无关占位文件无需进入交付。
 3. 分别核对 `configs[].source` 和 `credential_sources`。用 `{path,keys}` 读取原始 YAML、JSON、TOML、`.env` 或 properties 文件中的实际值。程序源码行号用于说明和证据。只有确实从源码常量读取已有登录凭据时，才用 `credential_sources` 的 `{path,line,name}`。本次输入、生成或继承的凭据直接引用相应配置键。
 4. 对每个收录到技能的 API 和页面确认鉴权。公开入口显式声明，使用同一机制的入口共用有源码证据的规则。确认技能正文里的操作 ID 存在。按校验反馈修正全部指出的字段，只补需要的新证据。
+
+## 大提案分段提交
+
+小提案直接传结构化字段。配置、接口或正文较多时，先用 `opc_delivery_draft` 保存各段，最后调用 `opc_delivery_submit`，只传当前的 `draft_id`。工具保存后会回传字段及段号。
+
+1. 用 `section: proposal` 保存基础 JSON 对象。较大的配置和接口数组分别用 `contract.configs`、`contract.apis` 等字段及结构化 `items` 分批提交，插件按段合并数组。单个配置、接口对象或其他 JSON 值需要拆分时，用 `content` 传片段，拼接后应为完整的 JSON 值。技能正文 `skill_markdown`、改造文件 `file.<id>`、参考资料 `reference.<name>` 直接传原始文本。
+2. `part` 从 1 连续编号，最后一段传 `last: true`。每次尽量控制在 8 KiB 内。中断后用 `action: status` 查已保存字段和 `next_part`，从下一段继续。修正指定段时传 `replace: true`，要重写整个字段时先 `clear`。大文件分段保存后在 `changes` 引用相同的 `id`，省略 `content`。
+3. 技能正文保留入口、操作索引和原生登录说明。把长指南分段保存为 `reference.<name>`，在正文写相对链接 `references/opc-<name>.md`。参考资料随技能包归档，正文和资料中的凭据使用配置引用。
+4. 最终归档的执行清单 `delivery.json` 上限为 2 MiB。解释性材料可移到参考资料，实际需要的配置、接口、鉴权和数据安全声明留在契约，确认插件报告校验通过后再总结改造。
 
 ## 平台资源选择
 

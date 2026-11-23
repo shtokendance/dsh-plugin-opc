@@ -238,9 +238,10 @@ export async function worker(input: AppDocument, signal?: AbortSignal): Promise<
         windowsHide: true,
       })
       let stdout = '', stderr = '', exceeded = false
+      const outputLimit = ['assemble_proposal', 'validate', 'bundle'].includes(input.action) ? 64_000_000 : 8_000_000
       child.stdout.setEncoding('utf8')
       child.stderr.setEncoding('utf8')
-      child.stdout.on('data', data => { stdout += data; if (stdout.length > 8_000_000) { exceeded = true; child.kill() } })
+      child.stdout.on('data', data => { stdout += data; if (stdout.length > outputLimit) { exceeded = true; child.kill() } })
       child.stderr.on('data', data => { if (stderr.length < 2000) stderr += data })
       child.on('error', error => {
         if (error.message.includes('ENOENT')) resetPythonResolutionCache()
@@ -2691,6 +2692,18 @@ export class AppDelivery {
     if (job.configFingerprint !== remote.config_fingerprint) throw new Error('应用配置已变化，请重新验证业务')
     if (!allowDisabled && await this.isSkillDisabled(scope.directory, job.slug)) throw new Error('应用技能已停用')
     return { job, root, signal: scope.signal, runtimeConfigs: remote.app_config as AppDocument[] | undefined }
+  }
+  async readSkillReference(id: string, expected: string, name: string, start: number, signal: AbortSignal) {
+    const scope = this.scope(expected)
+    const { job, root } = await this.verifiedJob(id, expected)
+    const digest = job.hashes?.['skill.zip']
+    if (!digest) throw new Error('当前技能没有已验证的技能包')
+    const versionRoot = join(scope.directory, 'versions', job.slug, `v${job.version}`)
+    const cachedVersion = existsSync(join(versionRoot, 'skill.zip'))
+    if (!cachedVersion && !job.revision) throw new Error('当前技能没有可读取的技能包')
+    return worker({ action: 'read_skill_reference', root: cachedVersion ? versionRoot : root,
+      revision: cachedVersion ? undefined : job.revision, name, start, expected_sha256: digest },
+    AbortSignal.any([scope.signal, signal]))
   }
   private async readVersionCredentials(job: DeliveryJob, expected: string, runtimeConfigs?: AppDocument[], operation?: string, signal?: AbortSignal) {
     if (!job.version && !job.requestId) return {}
