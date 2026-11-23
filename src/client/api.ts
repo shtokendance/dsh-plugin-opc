@@ -1,3 +1,5 @@
+import type { DeploymentAttemptProgress } from '../deployment-attempt.ts'
+
 /** JSON business payloads use the same public methods as the Host Remote service. */
 export interface AppModelGroup {
   id: string
@@ -69,6 +71,7 @@ export interface AppStorageOverview {
 }
 
 export interface AppVersionItem {
+  config_revision?: string
   id: string
   app_id: string
   slug: string
@@ -134,6 +137,8 @@ export interface AppDeploymentStartupCheck {
 }
 
 export interface AppDeliveryJob {
+  deploymentProgress?: DeploymentAttemptProgress
+  deploymentCheck?: 'domain'
   archivedRevision?: string
   assessmentPending?: boolean
   assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
@@ -255,9 +260,12 @@ export interface OpcApi {
   appPrepare(id: string, hash: string, context: string): Promise<string>
   appReopenReview?(id: string, context: string): Promise<string>
   appReopenDeployment(id: string, context: string): Promise<string>
+  appCancelDeployment?(id: string, requestId: string, context: string): Promise<string>
   appCancelAnalysis?(id: string, context: string): Promise<void>
   appConfigDraft?(id: string, context: string): Promise<string>
   appSaveConfigDraft?(id: string, body: string, context: string): Promise<void>
+  appWatchConfigChat?(id: string, artifact: string, session: string, context: string, signal: AbortSignal): AsyncIterable<string>
+  appReplyConfigChat?(id: string, request: string, body: string, context: string): Promise<void>
   appLocalArtifact?(id: string, filename: string, context: string): Promise<string>
   appSaveLocalArtifact?(id: string, filename: string, context: string): Promise<string>
   appHandoff?(id: string, context: string): Promise<string>
@@ -276,6 +284,8 @@ export interface OpcApi {
   appSaveDownload(slug: string, selection: string, context: string): Promise<string>
   appStorage?(slug: string, context: string): Promise<string>
   appRecheck?(slug: string, context: string): Promise<string>
+  appRuntimeStatus?(slug: string, context: string): Promise<string>
+  appRuntimeChange?(slug: string, commandJson: string, context: string): Promise<string>
   appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>
   appRollback?(slug: string, payloadJson: string, context: string): Promise<string>
   state(): Promise<string>

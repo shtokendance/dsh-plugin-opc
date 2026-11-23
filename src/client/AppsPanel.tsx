@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { followsDeploymentAttempt, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
 import type {
   AppConfigItem,
   AppDeliveryJob,
@@ -10,6 +11,7 @@ import type {
   OpcApi,
   ResourceSummary,
 } from './api.ts'
+import type { ConfigChatAction, ConfigChatFrame, ConfigChatResult, ConfigChatRow } from '../config-chat.ts'
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
 import {
   getConfigPublishIssues,
@@ -30,8 +32,58 @@ import { appsCss } from './appsStyles.ts'
 type ViewMode = 'list' | 'wizard' | 'detail'
 type WizardStep = 1 | 2 | 3 | 4
 type ConfigSubTab = 'configs' | 'skill' | 'dockerfile' | 'mounts'
+type RuntimeOperation = {
+  id: string
+  kind: 'restart' | 'config' | 'restore' | 'baseline'
+  state: 'pending' | 'restarting' | 'checking' | 'restoring' | 'unknown' | 'recovery_unknown' | 'failed' | 'restored' | 'succeeded'
+  message: string
+  config_number?: number
+  config_revision?: string
+  changed_keys?: string
+  created_by?: string
+  created_at?: string
+}
+type RuntimeManagementStatus = {
+  operation: RuntimeOperation | null
+  revisions: RuntimeOperation[]
+  config_revision: string
+  config_number: number
+  editable_keys: string[]
+}
+type RuntimeApp = Pick<DeployedApp, 'slug' | 'name' | 'current_version'>
+type RuntimeCommand = {
+  kind: 'restart' | 'config' | 'restore' | 'recheck'
+  operation_id?: string
+  base_version?: number
+  base_config_revision?: string
+  changes?: Record<string, string>
+}
+function runtimeOperationBusy(operation?: RuntimeOperation | null) {
+  return Boolean(operation && ['pending', 'restarting', 'checking', 'restoring'].includes(operation.state))
+}
+function runtimeOperationNeedsCheck(operation?: RuntimeOperation | null) {
+  return Boolean(operation && (operation.state === 'unknown' || operation.state === 'recovery_unknown' || (operation.state === 'failed' && operation.kind === 'restart')))
+}
+
 type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
+
+type ConfigChatEdit = { before: AppConfigItem; after: AppConfigItem }
+
+function configChatRow(item: AppConfigItem, resources: ResourceSummary[], mounts: AppStorageMountDetail[]): ConfigChatRow {
+  const resource = resources.find(resource => resource.id === item.resource_id)
+  const preview = resource?.env_preview?.[item.resource_key || item.key]
+  const value = item.resource_id
+    ? preview && preview !== '[REDACTED]' ? preview : item.effective_value ?? ''
+    : item.value || (item.value_source !== 'generated' && item.value_source !== 'configured' ? item.app_default || '' : '')
+  let blocked: string | undefined
+  if (item.key === 'PORT' || ['HOST', 'BIND_HOST', 'LISTEN_HOST'].includes(item.key)) blocked = '监听地址和端口由改造方案确定，请返回核对方案'
+  else if (item.resource_id) blocked = '已绑定平台资源，请返回核对方案后变更'
+  else if (mounts.some(mount => value === mount.container_path || value.startsWith(mount.container_path + '/'))) {
+    blocked = '此值指向持久化目录，请返回核对方案后变更'
+  }
+  return { key: item.key, value, description: item.description, source: resource?.name || item.resource_id || item.value_source, blocked }
+}
 
 interface OpcRuntimeConfig {
   appDomainRoot: string
@@ -227,8 +279,12 @@ function isVerificationPending(job: AppDeliveryJob) {
     (job.status === 'failed' && job.failureStage === 'verification')
 }
 
+function isUpgradeTargetMissing(job: AppDeliveryJob, apps: DeployedApp[] | undefined) {
+  return job.upgrade === true && apps !== undefined && !apps.some(app => app.slug === job.slug)
+}
+
 function showTaskBanner(job: AppDeliveryJob, apps: DeployedApp[] | undefined) {
-  if (!isResumableJob(job)) return false
+  if (!isResumableJob(job) || isUpgradeTargetMissing(job, apps)) return false
   if (!job.published || !isVerificationPending(job)) return true
   // A previous version running must not hide an unfinished upgrade.
   return apps !== undefined && !apps.some(app => app.status === 'running' && app.slug === job.slug &&
@@ -244,7 +300,73 @@ function findAppJob(jobs: AppDeliveryJob[], app: Pick<DeployedApp, 'slug' | 'cur
   )
 }
 
+const attemptLabels: Record<DeploymentAttemptProgress['phase'], string> = {
+  submitting: '正在提交部署',
+  submission_rejected: '部署未提交',
+  blocked_previous: '上一轮部署仍在处理',
+  unknown: '暂时无法确认部署进度',
+  queued: '等待构建',
+  building: '正在构建镜像',
+  preparing: '正在准备运行环境',
+  migrating: '正在迁移数据',
+  starting: '正在启动应用',
+  checking_domain: '正在检查应用域名',
+  confirming: '正在确认发布结果',
+  succeeded: '部署成功',
+  cancelling: '正在取消并清理',
+  cleaning: '正在清理本次部署',
+  cancelled: '已取消部署',
+  restoring: '正在恢复应用服务',
+  restored: '已恢复上一版本',
+  failed: '部署失败',
+  recovery_required: '需要平台处理后恢复',
+}
+
+function displayedAttempt(job: AppDeliveryJob) {
+  const attempt = job.deploymentProgress
+  if ((job.assessmentPending || (job.status === 'verifying' && job.deploymentCheck !== 'domain')) &&
+      attempt && ['preparing', 'starting'].includes(attempt.phase)) return undefined
+  return attempt
+}
+
+function attemptLabel(job: AppDeliveryJob, phase: DeploymentAttemptProgress['phase'], stalled = false) {
+  if (phase === 'starting') {
+    return stalled ? (job.upgrade ? '新版本启动比预期久' : '应用启动比预期久')
+      : (job.upgrade ? '正在启动新版本' : attemptLabels.starting)
+  }
+  if (phase === 'failed') {
+    switch (job.deploymentProgress?.failure_kind) {
+      case 'build': return '镜像构建失败'
+      case 'startup': return '应用启动失败'
+      case 'domain': return '应用域名无法访问'
+    }
+  }
+  return stalled ? (phase === 'cancelling' ? '正在取消，清理比预期久'
+    : phase === 'cleaning' ? '本次部署清理比预期久'
+    : phase === 'restoring' ? '应用恢复比预期久'
+    : phase === 'checking_domain' ? '应用域名暂未就绪'
+    : phase === 'queued' ? '构建排队比预期久'
+    : phase === 'building' ? '镜像构建比预期久'
+    : phase === 'migrating' ? '数据迁移比预期久'
+    : attemptLabels[phase]) : attemptLabels[phase]
+}
+
+function elapsedAttemptTime(started?: number) {
+  if (!started || started <= 0) return ''
+  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60_000))
+  if (!minutes) return '不到 1 分钟'
+  const hours = Math.floor(minutes / 60)
+  return hours ? `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分钟` : ''}` : `${minutes} 分钟`
+}
+
 function deploymentProgress(job: AppDeliveryJob) {
+  const attempt = displayedAttempt(job)
+  if (attempt) {
+    if (attempt.phase === 'succeeded' && job.status !== 'verified') return { label: attemptLabels.confirming, tone: 'warn' }
+    const tone = attempt.phase === 'succeeded' ? 'ok' : ['failed', 'recovery_required', 'submission_rejected'].includes(attempt.phase)
+      ? 'danger' : followsDeploymentAttempt(attempt) ? 'warn' : 'accent'
+    return { label: attemptLabel(job, attempt.phase, attempt.stalled), tone }
+  }
   if (job.archivedRevision) {
     if (job.status === 'verified') return { label: '部署成功', tone: 'ok' }
     if (job.assessmentPending) return { label: 'AI 验收已暂停', tone: 'danger' }
@@ -354,6 +476,7 @@ function DeploymentLogs({ fetchLogs, live, buildOnly, onCopy, copied }: {
 }
 
 function inferStepForJob(job: AppDeliveryJob): WizardStep {
+  if (job.deploymentProgress && (job.requestId || job.published)) return 4
   switch (job.status) {
     case 'ready':
       return job.deploymentReviewPending ? 2 : 3
@@ -414,6 +537,7 @@ export function AppsPanel({
     jobs: [] as AppDeliveryJob[],
     loaded: false,
   })
+  const knownApps = appDirectoryLoaded ? apps : undefined
   const [resources, setResources] = useState<ResourceSummary[]>([])
   const [opcConfig, setOpcConfig] = useState<OpcRuntimeConfig>(DEFAULT_OPC_CONFIG)
   const [modelGroups, setModelGroups] = useState<AppModelGroup[]>([])
@@ -470,6 +594,15 @@ export function AppsPanel({
   // Step 3 Config & Check State
   const [configSubTab, setConfigSubTab] = useState<ConfigSubTab>('configs')
   const [configDrafts, setConfigDrafts] = useState<AppConfigItem[]>([])
+  const latestConfigDrafts = useRef<AppConfigItem[]>([])
+  const replaceConfigDrafts = useCallback((rows: AppConfigItem[]) => {
+    latestConfigDrafts.current = rows
+    setConfigDrafts(rows)
+  }, [])
+  const draftTransition = useRef(false)
+  const [aiConfigEdits, setAiConfigEdits] = useState<ConfigChatEdit[]>([])
+  const [configChatStatus, setConfigChatStatus] = useState<'connecting' | 'ready' | 'unavailable'>('connecting')
+  const [configChatReconnect, setConfigChatReconnect] = useState(0)
   const [step3Load, setStep3Load] = useState<{ jobId: string; artifactHash?: string; contextId: string; status: 'loading' | 'ready' | 'failed'; error?: string }>()
   const step3Request = useRef(0)
   const currentStep3Load = step3Load?.contextId === contextId && step3Load.jobId === wizardJob?.id &&
@@ -508,10 +641,20 @@ export function AppsPanel({
 
   // Detail View State
   const [detailApp, setDetailApp] = useState<DeployedApp | null>(null)
-  const [detailTab, setDetailTab] = useState<DetailTab>('artifacts')
+  const [detailTab, setDetailTab] = useState<DetailTab>('configs')
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailBusy, setDetailBusy] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [runtimePanel, setRuntimePanel] = useState<{ app: RuntimeApp; confirmRestart: boolean } | null>(null)
+  const [runtimeData, setRuntimeData] = useState<{ slug: string; status: RuntimeManagementStatus } | null>(null)
+  const [runtimeError, setRuntimeError] = useState<{ slug: string; message: string } | null>(null)
+  const [runtimeSubmitting, setRuntimeSubmitting] = useState(false)
+  const [runtimeRefresh, setRuntimeRefresh] = useState(0)
+  const [runtimeDraft, setRuntimeDraft] = useState<Record<string, string>>({})
+  const [showRuntimeHistory, setShowRuntimeHistory] = useState(false)
+  const refreshedRuntimeOperation = useRef<string | null>(null)
+  const runtimeContext = useRef(contextId)
+  runtimeContext.current = contextId
   const [detailNotice, setDetailNotice] = useState<string | null>(null)
   const [detailHealthCheck, setDetailHealthCheck] = useState<(AppHealthCheck & { slug: string }) | null>(null)
   const [versionsError, setVersionsError] = useState<string | null>(null)
@@ -552,14 +695,17 @@ export function AppsPanel({
           api.appOpcConfig?.(contextId).catch(() => '{}') ?? Promise.resolve('{}'),
           api.appModels(contextId).catch(() => '[]'),
         ])
-        const catalogData = parseJson<{ apps?: DeployedApp[] }>(catalogRaw, { apps: [] })
+        const catalogData = parseJson<{ apps?: DeployedApp[] } | null>(catalogRaw, null)
+        if (!Array.isArray(catalogData?.apps) || catalogData.apps.some(app => typeof app?.slug !== 'string')) {
+          throw new Error('未收到有效的企业应用目录')
+        }
         const jobList = parseJson<AppDeliveryJob[]>(jobsRaw, [])
         const resData = parseJson<{ resources?: ResourceSummary[] }>(resourcesRaw, { resources: [] })
         const cfg = parseJson<Partial<OpcRuntimeConfig>>(configRaw, {})
         const models = parseJson<AppModelGroup[]>(modelsRaw, [])
 
         setAppDirectory({
-          apps: Array.isArray(catalogData.apps) ? catalogData.apps : [],
+          apps: catalogData.apps,
           jobs: Array.isArray(jobList) ? jobList : [],
           loaded: true,
         })
@@ -688,7 +834,8 @@ export function AppsPanel({
         setSourceConfiguration(draft?.sourceConfiguration ?? null)
         setPreparedDockerfile({ jobId: job.id, artifactHash: job.artifactHash, content: draft?.dockerfile ?? '' })
         setOriginalConfigs(originals)
-        setConfigDrafts(configs)
+        replaceConfigDrafts(configs)
+        setAiConfigEdits([])
         setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
         setStorageBindings(draft?.storageBindings ?? {})
         setExistingStorage(detail?.storage_mounts ?? [])
@@ -697,12 +844,14 @@ export function AppsPanel({
         if (request === step3Request.current) setStep3Load({ ...target, status: 'failed', error: readErrorMessage(error, '部署内容加载失败') })
       }
     },
-    [api, contextId, opcConfig.defaultPort],
+    [api, contextId, opcConfig.defaultPort, replaceConfigDrafts],
   )
 
   const progressJobId = wizardJob?.id
   const progressRequestKey = `${progressJobId ?? ''}:${wizardJob?.requestId ?? ''}`
   const progressStatus = wizardJob?.status
+  const watchingAttempt = followsDeploymentAttempt(wizardJob?.deploymentProgress)
+  const hasAttemptProgress = Boolean(wizardJob?.deploymentProgress)
   const progressSlug = wizardJob?.slug
   const progressUsesReceipt = Boolean(wizardJob?.archivedRevision)
   const fetchDeploymentLogs = useCallback(
@@ -716,13 +865,13 @@ export function AppsPanel({
 
   useEffect(() => {
     if (viewMode !== 'wizard' || wizardStep !== 4 || !progressJobId || wizardBusy ||
-        !isDeploymentInProgress(progressStatus)) return
+        !(watchingAttempt || isDeploymentInProgress(progressStatus))) return
     let alive = true
     let timer: number
     const poll = async () => {
       let keepPolling = true
       try {
-        const raw = (progressStatus === 'verifying' || progressStatus === 'publishing') && api.appJob
+        const raw = !hasAttemptProgress && (progressStatus === 'verifying' || progressStatus === 'publishing') && api.appJob
           ? await api.appJob(progressJobId, contextId)
           : await (api.appVerifyWithOptions
             ? api.appVerifyWithOptions(progressJobId, JSON.stringify({ automatic: true }), contextId)
@@ -731,7 +880,7 @@ export function AppsPanel({
         const updated = JSON.parse(raw) as AppDeliveryJob
         setWizardError(null)
         setWizardJob(current => current?.id === updated.id ? updated : current)
-        keepPolling = isDeploymentInProgress(updated.status)
+        keepPolling = followsDeploymentAttempt(updated.deploymentProgress) || isDeploymentInProgress(updated.status)
         if (!keepPolling) void loadWorkspaceData(true)
       } catch (error) {
         if (!alive) return
@@ -742,7 +891,7 @@ export function AppsPanel({
     }
     void poll()
     return () => { alive = false; window.clearTimeout(timer) }
-  }, [api, contextId, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep])
+  }, [api, contextId, loadWorkspaceData, progressJobId, progressStatus, viewMode, wizardBusy, wizardStep, watchingAttempt, hasAttemptProgress])
 
   // Load Step 3 draft data when entering Step 3
   useEffect(() => {
@@ -753,7 +902,7 @@ export function AppsPanel({
 
   // Open Detail View & load all 5 tabs data
   const openAppDetail = useCallback(
-    async (slug: string, initialTab: DetailTab = 'artifacts', preserveFeedback = false) => {
+    async (slug: string, initialTab: DetailTab = 'configs', preserveFeedback = false) => {
       const request = ++detailLoad.current
       setDetailHealthCheck(null)
       setViewMode('detail')
@@ -788,6 +937,7 @@ export function AppsPanel({
           {},
         )
         setDetailApp(detail)
+        setRuntimeDraft({})
         setEditPort(String(detail.container_port ?? opcConfig.defaultPort))
         setEditConfigs(Array.isArray(detail.app_config) ? detail.app_config.map(c => ({ ...c })) : [])
         setVersions(Array.isArray(verParsed.versions) ? verParsed.versions : [])
@@ -805,6 +955,78 @@ export function AppsPanel({
     },
     [api, contextId, opcConfig.defaultPort],
   )
+
+  const runtimeSlug = runtimePanel?.app.slug ?? (viewMode === 'detail' && detailApp?.can_manage === true ? detailApp.slug : undefined)
+  const runtimeStatus = runtimeData?.slug === runtimeSlug ? runtimeData?.status : undefined
+  const runtimeOperation = runtimeStatus?.operation
+  const currentRuntimeError = runtimeError?.slug === runtimeSlug ? runtimeError?.message : undefined
+
+  useEffect(() => {
+    if (!runtimeSlug || !api.appRuntimeStatus) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async () => {
+      try {
+        const status = JSON.parse(await api.appRuntimeStatus!(runtimeSlug, contextId)) as RuntimeManagementStatus
+        if (stopped) return
+        setRuntimeError(null)
+        setRuntimeData({ slug: runtimeSlug, status })
+        if (runtimeOperationBusy(status.operation)) timer = setTimeout(refresh, 2000)
+      } catch (error) {
+        if (stopped) return
+        setRuntimeError({ slug: runtimeSlug, message: readErrorMessage(error, '暂时无法读取操作状态') })
+      }
+    }
+    void refresh()
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [api, contextId, runtimeSlug, runtimeRefresh])
+
+  useEffect(() => {
+    setRuntimePanel(null)
+    setRuntimeData(null)
+    setRuntimeError(null)
+    setRuntimeSubmitting(false)
+  }, [contextId])
+
+  useEffect(() => {
+    if (runtimeOperation?.state !== 'succeeded' || runtimeOperation.kind === 'restart' ||
+        viewMode !== 'detail' || detailApp?.slug !== runtimeSlug ||
+        refreshedRuntimeOperation.current === runtimeOperation.id) return
+    refreshedRuntimeOperation.current = runtimeOperation.id
+    if (runtimeStatus?.config_revision !== (versions.find(version => version.is_active)?.config_revision ?? '')) {
+      void openAppDetail(runtimeSlug!, 'configs', true)
+    }
+  }, [runtimeOperation, runtimeStatus, viewMode, detailApp?.slug, runtimeSlug, versions, openAppDetail])
+
+  const openRuntimePanel = (app: RuntimeApp, confirmRestart: boolean) => {
+    setRuntimeError(null)
+    setRuntimePanel({ app, confirmRestart })
+    setRuntimeRefresh(value => value + 1)
+  }
+
+  const submitRuntimeChange = async (app: RuntimeApp, command: RuntimeCommand) => {
+    if (!api.appRuntimeChange || runtimeSubmitting) return
+    setRuntimeSubmitting(true)
+    setRuntimeError(null)
+    setRuntimePanel({ app, confirmRestart: false })
+    try {
+      const operation = JSON.parse(await api.appRuntimeChange(app.slug, JSON.stringify(command), contextId)) as RuntimeOperation
+      if (runtimeContext.current !== contextId) return
+      setRuntimeData(previous => ({
+        slug: app.slug,
+        status: {
+          revisions: [], config_revision: command.base_config_revision ?? '', config_number: 1, editable_keys: [],
+          ...(previous?.slug === app.slug ? previous.status : {}),
+          operation,
+        },
+      }))
+      setRuntimeRefresh(value => value + 1)
+    } catch (error) {
+      if (runtimeContext.current === contextId) setRuntimeError({ slug: app.slug, message: readErrorMessage(error, '操作提交失败') })
+    } finally {
+      if (runtimeContext.current === contextId) setRuntimeSubmitting(false)
+    }
+  }
 
   const refreshDetailLogs = useCallback(async () => {
     if (detailApp?.can_manage !== true) return
@@ -893,11 +1115,13 @@ export function AppsPanel({
     return () => { active = false }
   }, [api, contextId, sessionId])
 
+  const restorableLinkedJob = linkedJob && !isUpgradeTargetMissing(linkedJob, knownApps) ? linkedJob : null
+  const waitingForUpgradeCatalog = restorableLinkedJob?.upgrade === true && !knownApps && loadingList
   useEffect(() => {
-    if (loadingLinkedJob || !linkedJob || restoredLinkedJob.current) return
+    if (loadingLinkedJob || waitingForUpgradeCatalog || !restorableLinkedJob || restoredLinkedJob.current) return
     restoredLinkedJob.current = true
-    void openLinkedJob(linkedJob, false)
-  }, [linkedJob, loadingLinkedJob, openLinkedJob])
+    void openLinkedJob(restorableLinkedJob, false)
+  }, [restorableLinkedJob, waitingForUpgradeCatalog, loadingLinkedJob, openLinkedJob])
 
   useEffect(() => {
     if (viewMode !== 'wizard' || wizardJob?.id !== linkedJob?.id || upgradeTarget || !(wizardJob?.upgrade || wizardJob?.published)) return
@@ -1067,12 +1291,13 @@ export function AppsPanel({
       window.clearTimeout(draftSaveTimerRef.current)
       draftSaveTimerRef.current = null
     }
-    if (wizardJob?.status === 'ready' && wizardStep === 3 && step3Ready) await saveDraft(wizardJob, configDrafts, versionNote, storageBindings)
+    if (wizardJob?.status === 'ready' && wizardStep === 3 && step3Ready) await saveDraft(wizardJob, latestConfigDrafts.current, versionNote, storageBindings)
   }
 
   const leaveWizard = async () => {
     if (wizardBusy) return
     sourceSelection.current++
+    draftTransition.current = true
     setWizardBusy(true)
     try {
       await flushDraft()
@@ -1080,12 +1305,95 @@ export function AppsPanel({
       void loadWorkspaceData(true)
     } catch (error) {
       setWizardError(readErrorMessage(error, '配置草稿保存失败，请重试'))
-    } finally { setWizardBusy(false) }
+    } finally { draftTransition.current = false; setWizardBusy(false) }
   }
 
   const handleStep3ConfigsChange = (nextConfigs: AppConfigItem[]) => {
-    setConfigDrafts(nextConfigs)
+    if (draftTransition.current) return
+    replaceConfigDrafts(nextConfigs)
     if (wizardJob) scheduleDraftSave(wizardJob, nextConfigs, versionNote, storageBindings)
+  }
+
+  const saveChatEdits = async (edits: ConfigChatEdit[]) => {
+    if (!wizardJob || !step3Ready || draftTransition.current || wizardBusy) throw new Error('当前部署草稿暂时不可编辑')
+    const byKey = new Map(edits.map(edit => [edit.after.key, edit.after]))
+    const rows = latestConfigDrafts.current.map(row => byKey.get(row.key) ?? row)
+    if (draftSaveTimerRef.current !== null) window.clearTimeout(draftSaveTimerRef.current)
+    draftSaveTimerRef.current = null
+    replaceConfigDrafts(rows)
+    await saveDraft(wizardJob, rows, versionNote, storageBindings)
+  }
+
+  const runConfigChatAction = useRef<(action: ConfigChatAction) => Promise<ConfigChatResult>>(async () => ({ error: '正在加载配置草稿' }))
+  runConfigChatAction.current = async action => {
+    if (!active || viewMode !== 'wizard' || wizardStep !== 3 || wizardJob?.analysisSessionId !== sessionId ||
+        wizardBusy || draftTransition.current || !step3Ready) throw new Error('当前部署草稿暂时不可编辑')
+    const rows = latestConfigDrafts.current
+    const readRow = (row: AppConfigItem) => configChatRow(row, deploymentResources, [...volumeMounts, ...existingStorage])
+    if (action.type === 'read') return { rows: rows.filter(row => row.key).map(readRow) }
+    const expected = new Map(action.expected.map(row => [row.key, row]))
+    const edits = action.changes.flatMap(({ key, value }) => {
+      const before = rows.find(row => row.key === key)
+      if (!before || JSON.stringify(readRow(before)) !== JSON.stringify(expected.get(key))) {
+        throw new Error(`${key} 已变更，请重新读取右侧配置`)
+      }
+      const blocked = readRow(before).blocked
+      if (blocked) throw new Error(blocked)
+      if (value === before.value) return []
+      return [{ before, after: { ...before, value, value_source: 'manual', has_value: Boolean(value), local_connection_confirmed: false } }]
+    })
+    if (!edits.length) return { changed: [] }
+    setAiConfigEdits(edits)
+    setConfigSubTab('configs')
+    try {
+      await saveChatEdits(edits)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '配置草稿保存失败，请重试'))
+      throw error
+    }
+    return { changed: edits.map(edit => edit.after.key) }
+  }
+
+  const configChatJobId = active && viewMode === 'wizard' && wizardStep === 3 && step3Ready &&
+    wizardJob?.status === 'ready' && wizardJob.analysisSessionId === sessionId ? wizardJob.id : undefined
+  const configChatArtifact = configChatJobId ? wizardJob?.artifactHash : undefined
+  useEffect(() => {
+    if (!configChatJobId || !configChatArtifact || !api.appWatchConfigChat || !api.appReplyConfigChat || !api.appSaveConfigDraft) return
+    const controller = new AbortController()
+    setConfigChatStatus('connecting')
+    void (async () => {
+      try {
+        for await (const raw of api.appWatchConfigChat!(configChatJobId, configChatArtifact, sessionId, contextId, controller.signal)) {
+          if (controller.signal.aborted) return
+          const frame = JSON.parse(raw) as ConfigChatFrame
+          if (frame.type === 'ready') {
+            setConfigChatStatus('ready')
+            continue
+          }
+          let result: ConfigChatResult
+          try { result = await runConfigChatAction.current(frame.action) }
+          catch (error) { result = { error: readErrorMessage(error, '无法处理配置草稿') } }
+          if (controller.signal.aborted) return
+          await api.appReplyConfigChat!(configChatJobId, frame.id, JSON.stringify(result), contextId)
+        }
+      } catch {
+        if (controller.signal.aborted) return
+      }
+      if (!controller.signal.aborted) setConfigChatStatus('unavailable')
+    })()
+    return () => controller.abort()
+  }, [api, configChatJobId, configChatArtifact, configChatReconnect, contextId, sessionId])
+
+  const undoAiConfigEdits = async () => {
+    const undo = aiConfigEdits.filter(edit => latestConfigDrafts.current.includes(edit.after))
+      .map(edit => ({ before: edit.after, after: edit.before }))
+    if (!undo.length) return
+    try {
+      await saveChatEdits(undo)
+      setAiConfigEdits([])
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '撤销后保存草稿失败，请重试'))
+    }
   }
 
   const handleStep3NoteChange = (nextNote: string) => {
@@ -1095,6 +1403,7 @@ export function AppsPanel({
 
   const handleReturnToReview = async () => {
     if (!wizardJob) return
+    draftTransition.current = true
     setWizardBusy(true)
     setWizardError(null)
     try {
@@ -1108,6 +1417,7 @@ export function AppsPanel({
     } catch (error) {
       setWizardError(readErrorMessage(error, '返回方案核对失败'))
     } finally {
+      draftTransition.current = false
       setWizardBusy(false)
     }
   }
@@ -1115,7 +1425,7 @@ export function AppsPanel({
   const handlePublishApp = async () => {
     if (!wizardJob || !step3Ready) return
     setWizardError(null)
-    if (hasConfigIssues) {
+    if (getConfigPublishIssues(latestConfigDrafts.current, wizardJob.port ?? opcConfig.defaultPort, skillDrivenDelivery).size) {
       setConfigSubTab('configs')
       return
     }
@@ -1132,10 +1442,11 @@ export function AppsPanel({
       window.confirm(`确认发布包含数据库迁移。正式复制期间会暂停旧实例写入。\n原库保留，目标库：${migration.target_resource_id ?? ''}\n\n${migration.summary}\n\n恢复方式：${migration.recovery}`)
     if (migration?.strategy === 'postgres_copy' && !migrationApproved) return
 
+    draftTransition.current = true
     setWizardBusy(true)
     try {
       await flushDraft()
-      const cleanConfigs = sanitizeConfigRowsForApi(configDrafts, {
+      const cleanConfigs = sanitizeConfigRowsForApi(latestConfigDrafts.current, {
         forPublish: true,
         lockedPort: wizardJob.port ?? opcConfig.defaultPort,
       })
@@ -1150,8 +1461,10 @@ export function AppsPanel({
         }),
         contextId,
       )
-      const { confirmationToken, artifactHash } = parseJson<{ confirmationToken: string; artifactHash?: string }>(confirmRaw, { confirmationToken: '' })
+      const { confirmationToken, artifactHash, requestId } = parseJson<{ confirmationToken: string; artifactHash?: string; requestId?: string }>(confirmRaw, { confirmationToken: '' })
       if (!confirmationToken) throw new Error('未能获取发布确认凭证')
+      setWizardJob({ ...wizardJob, status: 'publishing', requestId, deploymentProgress: { phase: 'submitting' } })
+      setWizardStep(4)
 
       const publishRaw = await api.appPublish(
         wizardJob.id,
@@ -1167,7 +1480,8 @@ export function AppsPanel({
       )
       const published = parseJson<AppDeliveryJob | null>(publishRaw, null)
       if (published) setWizardJob(published)
-      if (published?.status === 'ready') {
+      if (published?.status === 'ready' && !published.deploymentProgress) {
+        setWizardStep(3)
         setWizardError(published.error || '平台未接受本次发布，请核对配置后重试')
         return
       }
@@ -1178,6 +1492,7 @@ export function AppsPanel({
       setWizardError(readErrorMessage(error, '确认发布应用失败'))
       void refreshWizardJob(wizardJob.id)
     } finally {
+      draftTransition.current = false
       setWizardBusy(false)
     }
   }
@@ -1264,6 +1579,40 @@ export function AppsPanel({
       await resumeWizardJob(reopened, 3)
     } catch (error) {
       setWizardError(readErrorMessage(error, '恢复原交付包失败'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleCheckAttempt = async () => {
+    if (!wizardJob || !api.appVerifyWithOptions) return
+    const { id, requestId } = wizardJob
+    setWizardBusy(true)
+    setWizardError(null)
+    try {
+      const updated = JSON.parse(await api.appVerifyWithOptions(id, JSON.stringify({ checkProgress: true }), contextId)) as AppDeliveryJob
+      if (updated.id !== id || updated.requestId !== requestId) throw new Error('平台返回了其他部署任务')
+      setWizardJob(current => current?.id === id && current.requestId === requestId ? updated : current)
+      if (updated.status === 'verified') void loadWorkspaceData(true)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '暂时无法确认部署进度'))
+    } finally {
+      setWizardBusy(false)
+    }
+  }
+
+  const handleCancelAttempt = async () => {
+    if (!wizardJob?.requestId || !api.appCancelDeployment || !wizardJob.deploymentProgress?.can_cancel) return
+    if (!window.confirm('要取消这一次部署吗？平台会停止本次任务并清理临时资源。')) return
+    const { id, requestId } = wizardJob
+    setWizardBusy(true)
+    setWizardError(null)
+    try {
+      const updated = JSON.parse(await api.appCancelDeployment(id, requestId, contextId)) as AppDeliveryJob
+      if (updated.id !== id || updated.requestId !== requestId) throw new Error('平台返回了其他部署任务')
+      setWizardJob(current => current?.id === id && current.requestId === requestId ? updated : current)
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '暂时无法取消本次部署，请重新检查'))
     } finally {
       setWizardBusy(false)
     }
@@ -1463,12 +1812,12 @@ export function AppsPanel({
     : jobs.find(job => job.id === linkedJob.id) ?? linkedJob)
 
   const resumableJob = useMemo(() => {
-    const candidate = jobs.find(job => showTaskBanner(job, apps))
+    const candidate = jobs.find(job => showTaskBanner(job, knownApps))
     if (!candidate) return null
     const token = `${candidate.id}:${candidate.status}`
     if (dismissedDraftToken === token) return null
     return candidate
-  }, [apps, dismissedDraftToken, jobs])
+  }, [knownApps, dismissedDraftToken, jobs])
 
   const dismissDraftBanner = (job: AppDeliveryJob) => {
     const token = `${job.id}:${job.status}`
@@ -1526,7 +1875,7 @@ export function AppsPanel({
         </div>
       )}
 
-      {linkedListJob && showTaskBanner(linkedListJob, appDirectoryLoaded ? apps : undefined) && (
+      {linkedListJob && showTaskBanner(linkedListJob, knownApps) && (
         <div className="oa-draft-banner">
           <div><strong>{linkedListJob.name}</strong></div>
           <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void openLinkedJob(linkedListJob)}>
@@ -1660,8 +2009,11 @@ export function AppsPanel({
                       </button>
                     </>
                   )}
+                  {!readOnly && (app.current_version ?? 0) > 0 && api.appRuntimeStatus && api.appRuntimeChange && (
+                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => openRuntimePanel(app, true)}>重启应用</button>
+                  )}
                   <button type="button" className="oa-btn oa-btn-xs oa-btn-link oa-app-card-detail"
-                    onClick={() => void openAppDetail(app.slug, isFailed && !readOnly ? 'logs' : 'artifacts')}>
+                    onClick={() => void openAppDetail(app.slug, isFailed && !readOnly ? 'logs' : 'configs')}>
                     {isFailed && !readOnly ? '失败日志' : '详情'}<AppIcon name="chevronRight" size={12} />
                   </button>
                 </div>
@@ -2145,6 +2497,32 @@ export function AppsPanel({
 
               {step3Ready && configSubTab === 'configs' && (
                 <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="运行时环境变量配置">
+                  {api.appWatchConfigChat && wizardJob.analysisSessionId && (
+                    <div className="oa-draft-banner">
+                      <span>{wizardJob.analysisSessionId !== sessionId ? '在原部署会话中请 AI 协助核对配置。'
+                        : configChatStatus === 'ready' ? '可在左侧对话询问配置用途，或让 AI 修改本次草稿。'
+                        : configChatStatus === 'connecting' ? '正在连接左侧部署会话…' : '左侧配置会话暂不可用。'}</span>
+                      {wizardJob.analysisSessionId !== sessionId && prepareAnalysisNavigation &&
+                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => beginAnalysisNavigation()?.(wizardJob)}>打开部署会话</button>}
+                      {wizardJob.analysisSessionId === sessionId && configChatStatus === 'unavailable' &&
+                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => setConfigChatReconnect(value => value + 1)}>重新连接</button>}
+                    </div>
+                  )}
+                  {aiConfigEdits.length > 0 && (
+                    <div className="oa-draft-banner" role="status">
+                      <div style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                        <strong>AI 已修改本次草稿</strong>
+                        {aiConfigEdits.map(edit => (
+                          <div key={edit.after.key} className="oa-hint">
+                            {edit.after.description || edit.after.key} · {configChatRow(edit.before, deploymentResources, volumeMounts).value || '空值'}
+                            {' → '}{configChatRow(edit.after, deploymentResources, volumeMounts).value || '空值'}
+                          </div>
+                        ))}
+                      </div>
+                      <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy || !aiConfigEdits.some(edit => configDrafts.includes(edit.after))}
+                        onClick={() => void undoAiConfigEdits()}>撤销 AI 修改</button>
+                    </div>
+                  )}
                   <AppDeliveryConfig
                     configs={configDrafts}
                     allowNew={wizardJob.proposal?.delivery_format !== 1}
@@ -2153,6 +2531,7 @@ export function AppsPanel({
                     lockedPort={wizardJob.port ?? opcConfig.defaultPort}
                     publishIssues={configIssues}
                     skillDriven={skillDrivenDelivery}
+                    readOnly={wizardBusy}
                     onChange={handleStep3ConfigsChange}
                   />
 
@@ -2333,7 +2712,10 @@ export function AppsPanel({
           {wizardStep === 4 && wizardJob && (() => {
             const progress = deploymentProgress(wizardJob)
             const failed = progress.tone === 'danger'
-            const liveLogs = isDeploymentInProgress(wizardJob.status)
+            const attempt = displayedAttempt(wizardJob)
+            const liveLogs = followsDeploymentAttempt(attempt) || isDeploymentInProgress(wizardJob.status)
+            const elapsed = elapsedAttemptTime(attempt?.phase_started_at)
+            const previous = attempt?.blocking_request_id ? jobs.find(job => job.slug === wizardJob.slug && job.requestId === attempt.blocking_request_id) : undefined
             const recheck = startupRecheck?.key === progressRequestKey ? startupRecheck : undefined
             return (
               <div className="oa-deploy-progress">
@@ -2347,14 +2729,53 @@ export function AppsPanel({
                       <AppIcon name="external" size={13} /> 打开应用
                     </a>
                   )}
+                  {attempt && progress.tone !== 'ok' && (
+                    <div className="oa-deploy-actions">
+                      {!['submitting', 'submission_rejected', 'cancelled', 'restored'].includes(attempt.phase) && api.appVerifyWithOptions && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCheckAttempt()}>重新检查</button>
+                      )}
+                      {attempt.can_cancel && !['unknown', 'cancelling', 'cleaning'].includes(attempt.phase) && api.appCancelDeployment && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCancelAttempt()}>取消本次部署</button>
+                      )}
+                      {attempt.phase === 'blocked_previous' && previous && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void resumeWizardJob(previous, 4)}>查看上一轮部署</button>
+                      )}
+                      {attempt.phase === 'submission_rejected' && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => setWizardStep(3)}>返回第三步</button>
+                      )}
+                      {attempt.retry_safe && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>重试部署</button>
+                      )}
+                      {attempt.retry_safe && (attempt.failure_kind === 'build' || attempt.failure_kind === 'startup') && (
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>让 AI 分析修复问题</button>
+                      )}
+                      {attempt.phase === 'restored' && (
+                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">打开当前版本</a>
+                      )}
+                    </div>
+                  )}
                 </div>
+                {attempt && (
+                  <div className="oa-hint oa-deploy-message">
+                    {attempt.phase === 'unknown' && <div>
+                      正在核对同一笔部署。
+                      {attempt.last_observed_phase && ` 上次确认到「${attemptLabel(wizardJob, attempt.last_observed_phase)}」。`}
+                      {attempt.last_observed_at && ` ${new Date(attempt.last_observed_at).toLocaleTimeString('zh-CN')}`}
+                    </div>}
+                    {attempt.phase === 'blocked_previous' && <div>上一轮结束并完成清理后，即可返回第三步确认本次部署。</div>}
+                    {attempt.stalled && elapsed && <div>已等待 {elapsed}{attempt.phase === 'starting' ? '，应用还没启动完成。' : '。'}</div>}
+                    {attempt.active_version && progress.tone !== 'ok' ? <div>最近上线版本 v{attempt.active_version}</div> : null}
+                    {attempt.phase === 'recovery_required' && <div>平台正在保护应用数据。请复制本次部署日志，交由平台管理员处理。</div>}
+                    {(failed || attempt.phase === 'restored') && wizardJob.error && <div>{wizardJob.error}</div>}
+                  </div>
+                )}
                 {wizardJob.assessment && (
                   <div className="oa-subcard oa-deploy-message">
                     <strong>AI 验收结论</strong>
                     <p>{wizardJob.assessment.report}</p>
                   </div>
                 )}
-                {failed && (
+                {failed && !attempt && (
                   <>
                     <div className="oa-alert oa-alert-danger" role="alert">
                       <AppIcon name="warning" size={16} />
@@ -2520,13 +2941,19 @@ export function AppsPanel({
       (matchingJob?.version === detailApp.current_version && matchingJob?.proposal?.delivery_format === 1)
     const activeLocalJob = matchingJob?.version === detailApp.current_version && matchingJob?.status === 'verified' ? matchingJob : undefined
     const detailTabs = {
-      artifacts: '能力与技能',
       configs: '运行配置',
       storage: '持久化存储',
       versions: `版本历史 (${visibleVersions.length})`,
       logs: '日志与 Dockerfile',
+      artifacts: '能力与技能',
     } satisfies Record<DetailTab, string>
 
+    const runtimeBlocked = runtimeOperationBusy(runtimeOperation) || runtimeOperation?.state === 'unknown' || runtimeOperation?.state === 'recovery_unknown'
+    const runtimeEditable = runtimeStatus && !runtimeBlocked &&
+      activeVersion && activeVersion.version === detailApp.current_version && (activeVersion.config_revision ?? '') === runtimeStatus.config_revision
+    const runtimeChanges = Object.fromEntries(Object.entries(runtimeDraft).filter(([key, value]) =>
+      runtimeStatus?.editable_keys.includes(key) && detailApp.app_config?.find(item => item.key === key)?.value !== value))
+    const runtimeBaseline = { base_version: detailApp.current_version, base_config_revision: runtimeStatus?.config_revision }
     const logView = !readOnly && detailTab === 'logs'
     const detailLog = formatLogOutput(detailLogsData[detailLogsSubTab])
     const logSummary = detailLogsSubTab === 'runtime' ? '容器服务输出（最近 500 行）'
@@ -2553,6 +2980,9 @@ export function AppsPanel({
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {!readOnly && (detailApp.current_version ?? 0) > 0 && api.appRuntimeStatus && api.appRuntimeChange && (
+              <button type="button" className="oa-btn oa-btn-sm" onClick={() => openRuntimePanel(detailApp, true)}>重启应用</button>
+            )}
             <button
               type="button"
               className="oa-btn oa-btn-sm"
@@ -2690,7 +3120,7 @@ export function AppsPanel({
 
           {/* 5 Segmented Detail Tabs */}
           {!readOnly && (
-            <div className="oa-segmented" role="tablist" aria-label="应用详情">
+            <div className="oa-segmented oa-detail-tab-list" role="tablist" aria-label="应用详情">
               {(Object.keys(detailTabs) as DetailTab[]).map((tab, index, tabs) => (
                 <button key={tab} id={`${formId}-tab-${tab}`} type="button" role="tab"
                   aria-selected={detailTab === tab} aria-controls={`${formId}-detail-panel`} tabIndex={detailTab === tab ? 0 : -1}
@@ -2724,7 +3154,48 @@ export function AppsPanel({
           )}
 
           {/* Tab 2: Configs */}
-          {detailTab === 'configs' && (
+          {detailTab === 'configs' && runtimeStatus && api.appRuntimeChange && (
+            <div className="oa-form-card">
+              <div className="oa-runtime-toolbar">
+                <strong>应用 v{detailApp.current_version} · 配置第 {runtimeStatus.config_number} 版</strong>
+                <div className="oa-runtime-actions">
+                  <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>配置历史</button>
+                  <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>让 AI 分析配置更新</button>
+                  <button type="button" className="oa-btn oa-btn-primary" disabled={!runtimeEditable || runtimeSubmitting || !Object.keys(runtimeChanges).length}
+                    onClick={() => void submitRuntimeChange(detailApp, { kind: 'config', ...runtimeBaseline, changes: runtimeChanges })}>保存并重启</button>
+                </div>
+              </div>
+              {runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>查看最近操作状态</button>}
+              {showRuntimeHistory && <div className="oa-runtime-history">
+                {runtimeStatus.revisions.length === 0 && <div className="oa-hint">当前配置为此应用版本的初始配置。</div>}
+                {runtimeStatus.revisions.map(revision => {
+                  const active = revision.state === 'succeeded' && revision.config_revision === runtimeStatus.config_revision
+                  return <div className="oa-runtime-toolbar" key={revision.id}>
+                    <div>
+                      <strong>配置第 {revision.config_number} 版{active ? ' · 正在使用' : ''}</strong>
+                      <div className="oa-hint">{revision.changed_keys || '初始配置'}{revision.created_at ? ' · ' + new Date(revision.created_at).toLocaleString('zh-CN') : ''}</div>
+                      <div className="oa-hint">{revision.created_by} {revision.message}</div>
+                    </div>
+                    {revision.state === 'succeeded' && !active && <button type="button" className="oa-btn oa-btn-xs" disabled={!runtimeEditable || runtimeSubmitting}
+                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'restore', ...runtimeBaseline, operation_id: revision.id })}>恢复并重启</button>}
+                  </div>
+                })}
+              </div>}
+              {!detailApp.app_config?.length && <div className="oa-hint">当前应用版本没有声明运行配置项。</div>}
+              {detailApp.app_config?.map(item => {
+                const editable = runtimeStatus.editable_keys.includes(item.key)
+                return <label className="oa-runtime-config-item" key={item.key}>
+                  <span><code>{item.key}</code> {item.description}</span>
+                  <input className="oa-input oa-mono" aria-label={`${item.key} 配置值`}
+                    readOnly={!editable || !runtimeEditable || runtimeSubmitting}
+                    value={runtimeDraft[item.key] ?? item.effective_value ?? item.value ?? ''}
+                    onChange={event => setRuntimeDraft(draft => ({ ...draft, [item.key]: event.target.value }))} />
+                </label>
+              })}
+            </div>
+          )}
+
+          {detailTab === 'configs' && !runtimeStatus && (
             <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                 <div>
@@ -3077,11 +3548,46 @@ export function AppsPanel({
   return (
     <div className={`opc-apps-root${(viewMode === 'wizard' && wizardStep === 4) || (viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs') ? ' oa-apps-log-view' : ''}`}>
       <style>{appsCss}</style>
-      {viewMode === 'list' && (loadingLinkedJob || linkedJob && !restoredLinkedJob.current
+      {viewMode === 'list' && (loadingLinkedJob || restorableLinkedJob && !restoredLinkedJob.current
         ? <p role="status">正在查找当前会话的应用任务…</p>
         : renderAppListView())}
       {viewMode === 'wizard' && renderWizardView()}
       {viewMode === 'detail' && renderDetailView()}
+      {runtimePanel && (
+        <div className="oa-runtime-backdrop">
+          <section className="oa-form-card oa-runtime-panel" role="dialog" aria-modal="true" aria-labelledby={`${formId}-runtime-title`}
+            onKeyDown={event => { if (event.key === 'Escape') setRuntimePanel(null) }}>
+            <div className="oa-runtime-toolbar">
+              <strong id={`${formId}-runtime-title`}>{runtimePanel.app.name} · 运行状态</strong>
+              <button type="button" autoFocus className="oa-btn oa-btn-xs" onClick={() => setRuntimePanel(null)}>关闭状态</button>
+            </div>
+            {runtimeSubmitting && <div role="status"><span className="oa-dot oa-pulse" /> 正在提交操作…</div>}
+            {!runtimeSubmitting && !runtimeStatus && !currentRuntimeError && <div role="status"><span className="oa-dot oa-pulse" /> 正在读取操作状态…</div>}
+            {!runtimeSubmitting && runtimeOperation && <div role="status" className={`oa-alert ${runtimeOperation.state === 'succeeded' ? 'oa-alert-ok' : 'oa-alert-warn'}`}>
+              {runtimeOperationBusy(runtimeOperation) && <span className="oa-dot oa-pulse" />}
+              {runtimeOperation.message}
+            </div>}
+            {currentRuntimeError && <div role="alert" className="oa-alert oa-alert-danger">{currentRuntimeError}</div>}
+            {runtimePanel.confirmRestart && runtimeStatus && !runtimeOperationBusy(runtimeOperation) &&
+              !runtimeOperationNeedsCheck(runtimeOperation) && <div className="oa-hint">重启期间，应用访问可能短暂中断。</div>}
+            <div className="oa-runtime-actions">
+              {runtimePanel.confirmRestart && runtimeStatus && !runtimeOperationBusy(runtimeOperation) &&
+                runtimeOperation?.state !== 'unknown' && runtimeOperation?.state !== 'recovery_unknown' && (
+                <button type="button" className="oa-btn oa-btn-primary" disabled={runtimeSubmitting}
+                  onClick={() => void submitRuntimeChange(runtimePanel.app, { kind: 'restart' })}>确认重启</button>
+              )}
+              {runtimeOperation && runtimeOperationNeedsCheck(runtimeOperation) && <button type="button" className="oa-btn" disabled={runtimeSubmitting}
+                onClick={() => void submitRuntimeChange(runtimePanel.app, { kind: 'recheck', operation_id: runtimeOperation.id })}>重新检查</button>}
+              {currentRuntimeError && <button type="button" className="oa-btn" onClick={() => setRuntimeRefresh(value => value + 1)}>刷新状态</button>}
+              {runtimeOperation && <button type="button" className="oa-btn" onClick={() => {
+                const slug = runtimePanel.app.slug
+                setRuntimePanel(null)
+                void openAppDetail(slug, 'logs')
+              }}>查看日志</button>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   )
 }

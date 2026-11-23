@@ -152,11 +152,23 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appReopenDeployment(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.reopenDeployment(id, expectedContextId)) }
   @Remote
+  async appCancelDeployment(id: string, requestId: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.cancelDeployment(id, requestId, expectedContextId))
+  }
+  @Remote
   async appCancelAnalysis(id: string, expectedContextId: string): Promise<void> { await this.delivery.cancelAnalysis(id, expectedContextId) }
   @Remote
   async appConfigDraft(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.configDraft(id, expectedContextId)) }
   @Remote
   async appSaveConfigDraft(id: string, body: string, expectedContextId: string): Promise<void> { await this.delivery.saveConfigDraft(id, JSON.parse(body), expectedContextId) }
+  @Remote({ mode: 'stream' })
+  async *appWatchConfigChat(id: string, artifact: string, session: string, expectedContextId: string, signal: AbortSignal): AsyncIterable<string> {
+    yield* this.delivery.watchConfigChat(id, artifact, session, expectedContextId, signal)
+  }
+  @Remote
+  async appReplyConfigChat(id: string, request: string, body: string, expectedContextId: string): Promise<void> {
+    await this.delivery.replyConfigChat(id, request, body, expectedContextId)
+  }
   @Remote
   async appLocalArtifact(id: string, filename: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.localArtifact(id, filename, expectedContextId)) }
   @Remote
@@ -226,6 +238,14 @@ export class OpcRemoteService extends TypertRemoteService {
   }
   @Remote
   async appRecheck(slug: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.recheck(slug, expectedContextId)) }
+  @Remote
+  async appRuntimeStatus(slug: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.runtimeManagement(slug, expectedContextId))
+  }
+  @Remote
+  async appRuntimeChange(slug: string, commandJson: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.runtimeManagement(slug, expectedContextId, JSON.parse(commandJson)))
+  }
   @Remote
   async appUpdateConfig(slug: string, bodyJson: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.updateConfig(slug, JSON.parse(bodyJson), expectedContextId)) }
   @Remote

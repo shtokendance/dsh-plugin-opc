@@ -460,6 +460,45 @@ export const appsCss = `
   max-width: none;
   margin: 0;
 }
+.oa-detail-tab-list {
+  margin-bottom: -14px;
+  padding-bottom: 0;
+  border-radius: 10px 10px 0 0;
+}
+.oa-detail-tab-list .oa-segmented-btn.active {
+  position: relative;
+  z-index: 1;
+  border-bottom-color: var(--oa-panel) !important;
+  border-radius: 7px 7px 0 0;
+  box-shadow: none;
+}
+.oa-detail-tab-panel {
+  background: var(--oa-panel);
+  border-radius: 0 0 12px 12px;
+}
+.oa-runtime-toolbar, .oa-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.oa-runtime-toolbar { justify-content: space-between; }
+.oa-runtime-config-item, .oa-runtime-history {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--oa-line);
+  padding-top: 12px;
+}
+.oa-runtime-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgb(15 23 42 / 28%);
+  padding: 16px;
+}
+.oa-runtime-panel { max-width: 460px; }
 .oa-source-form {
   display: flex;
   flex-direction: column;
