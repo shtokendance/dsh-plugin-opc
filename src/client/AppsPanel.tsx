@@ -227,8 +227,12 @@ function isVerificationPending(job: AppDeliveryJob) {
     (job.status === 'failed' && job.failureStage === 'verification')
 }
 
+function isUpgradeTargetMissing(job: AppDeliveryJob, apps: DeployedApp[] | undefined) {
+  return job.upgrade === true && apps !== undefined && !apps.some(app => app.slug === job.slug)
+}
+
 function showTaskBanner(job: AppDeliveryJob, apps: DeployedApp[] | undefined) {
-  if (!isResumableJob(job)) return false
+  if (!isResumableJob(job) || isUpgradeTargetMissing(job, apps)) return false
   if (!job.published || !isVerificationPending(job)) return true
   // A previous version running must not hide an unfinished upgrade.
   return apps !== undefined && !apps.some(app => app.status === 'running' && app.slug === job.slug &&
@@ -414,6 +418,7 @@ export function AppsPanel({
     jobs: [] as AppDeliveryJob[],
     loaded: false,
   })
+  const knownApps = appDirectoryLoaded ? apps : undefined
   const [resources, setResources] = useState<ResourceSummary[]>([])
   const [opcConfig, setOpcConfig] = useState<OpcRuntimeConfig>(DEFAULT_OPC_CONFIG)
   const [modelGroups, setModelGroups] = useState<AppModelGroup[]>([])
@@ -552,14 +557,17 @@ export function AppsPanel({
           api.appOpcConfig?.(contextId).catch(() => '{}') ?? Promise.resolve('{}'),
           api.appModels(contextId).catch(() => '[]'),
         ])
-        const catalogData = parseJson<{ apps?: DeployedApp[] }>(catalogRaw, { apps: [] })
+        const catalogData = parseJson<{ apps?: DeployedApp[] } | null>(catalogRaw, null)
+        if (!Array.isArray(catalogData?.apps) || catalogData.apps.some(app => typeof app?.slug !== 'string')) {
+          throw new Error('未收到有效的企业应用目录')
+        }
         const jobList = parseJson<AppDeliveryJob[]>(jobsRaw, [])
         const resData = parseJson<{ resources?: ResourceSummary[] }>(resourcesRaw, { resources: [] })
         const cfg = parseJson<Partial<OpcRuntimeConfig>>(configRaw, {})
         const models = parseJson<AppModelGroup[]>(modelsRaw, [])
 
         setAppDirectory({
-          apps: Array.isArray(catalogData.apps) ? catalogData.apps : [],
+          apps: catalogData.apps,
           jobs: Array.isArray(jobList) ? jobList : [],
           loaded: true,
         })
@@ -893,11 +901,13 @@ export function AppsPanel({
     return () => { active = false }
   }, [api, contextId, sessionId])
 
+  const restorableLinkedJob = linkedJob && !isUpgradeTargetMissing(linkedJob, knownApps) ? linkedJob : null
+  const waitingForUpgradeCatalog = restorableLinkedJob?.upgrade === true && !knownApps && loadingList
   useEffect(() => {
-    if (loadingLinkedJob || !linkedJob || restoredLinkedJob.current) return
+    if (loadingLinkedJob || waitingForUpgradeCatalog || !restorableLinkedJob || restoredLinkedJob.current) return
     restoredLinkedJob.current = true
-    void openLinkedJob(linkedJob, false)
-  }, [linkedJob, loadingLinkedJob, openLinkedJob])
+    void openLinkedJob(restorableLinkedJob, false)
+  }, [restorableLinkedJob, waitingForUpgradeCatalog, loadingLinkedJob, openLinkedJob])
 
   useEffect(() => {
     if (viewMode !== 'wizard' || wizardJob?.id !== linkedJob?.id || upgradeTarget || !(wizardJob?.upgrade || wizardJob?.published)) return
@@ -1463,12 +1473,12 @@ export function AppsPanel({
     : jobs.find(job => job.id === linkedJob.id) ?? linkedJob)
 
   const resumableJob = useMemo(() => {
-    const candidate = jobs.find(job => showTaskBanner(job, apps))
+    const candidate = jobs.find(job => showTaskBanner(job, knownApps))
     if (!candidate) return null
     const token = `${candidate.id}:${candidate.status}`
     if (dismissedDraftToken === token) return null
     return candidate
-  }, [apps, dismissedDraftToken, jobs])
+  }, [knownApps, dismissedDraftToken, jobs])
 
   const dismissDraftBanner = (job: AppDeliveryJob) => {
     const token = `${job.id}:${job.status}`
@@ -1526,7 +1536,7 @@ export function AppsPanel({
         </div>
       )}
 
-      {linkedListJob && showTaskBanner(linkedListJob, appDirectoryLoaded ? apps : undefined) && (
+      {linkedListJob && showTaskBanner(linkedListJob, knownApps) && (
         <div className="oa-draft-banner">
           <div><strong>{linkedListJob.name}</strong></div>
           <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void openLinkedJob(linkedListJob)}>
@@ -3077,7 +3087,7 @@ export function AppsPanel({
   return (
     <div className={`opc-apps-root${(viewMode === 'wizard' && wizardStep === 4) || (viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs') ? ' oa-apps-log-view' : ''}`}>
       <style>{appsCss}</style>
-      {viewMode === 'list' && (loadingLinkedJob || linkedJob && !restoredLinkedJob.current
+      {viewMode === 'list' && (loadingLinkedJob || restorableLinkedJob && !restoredLinkedJob.current
         ? <p role="status">正在查找当前会话的应用任务…</p>
         : renderAppListView())}
       {viewMode === 'wizard' && renderWizardView()}
