@@ -4,13 +4,14 @@ import { AuthManager, type StoredGrant } from '../src/host/auth.ts'
 import { PlatformHttp } from '../src/host/http.ts'
 import { McpBridge } from '../src/host/mcp.ts'
 
-async function setup() {
+async function setup(resourceErrorCode?: string) {
   const calls: { path: string; body: Record<string, unknown> }[] = []
   const grant: StoredGrant = { refreshToken: 'refresh', platformBaseUrl: 'https://platform.example/', lastContext: { issuer: 'https://platform.example', subject: 'a', tenant: 'a', spaces: ['a', 'b'], generation: 1 } }
   const http = new PlatformHttp('https://platform.example', 1000, async (url, init) => {
     const path = new URL(String(url)).pathname, body = JSON.parse(String(init?.body ?? '{}'))
     calls.push({ path, body })
     if (path.endsWith('/refresh')) return Response.json({ access_token: 'access', refresh_token: 'new', expires_in: 900, subject: 'a', spaces: ['a', 'b'], tenant: 'a' })
+    if (resourceErrorCode) return Response.json({ error: { code: resourceErrorCode } }, { status: 403 })
     if (path.endsWith('/invoke')) return Response.json({ success: true, code: 'MCP_APPROVAL_REQUIRED', data: { invocation_id: 'inv1', status: 'waiting_approval', args_digest: 'digest', policy_version: 'v1' } }, { status: 202 })
     if (path.endsWith('/decision')) return Response.json({ success: true, data: { invocation: { invocation_id: 'inv1', status: 'executing' } } })
     return Response.json({ success: true, data: { invocation_id: 'inv1', status: 'succeeded', result: { answer: 42 } } })
@@ -19,6 +20,19 @@ async function setup() {
   await auth.restore()
   return { auth, calls, mcp: new McpBridge(auth, { pollMs: 1, timeoutMs: 1000 }) }
 }
+
+test('a system administrator resource denial explains which account to use', async () => {
+  const { auth, mcp } = await setup('SYSTEM_ADMIN_ACCOUNT_UNSUPPORTED')
+  try {
+    await assert.rejects(mcp.invoke({ serviceId: 's', toolName: 'read' }, async () => 'unavailable'), {
+      code: 'SYSTEM_ADMIN_ACCOUNT_UNSUPPORTED',
+      message: /全局管理员.*日常账号/,
+    })
+  } finally {
+    await auth.dispose()
+  }
+})
+
 test('approval sends authoritative digest and policy then polls result', async () => {
   const { auth, calls, mcp } = await setup()
   assert.deepEqual(await mcp.invoke({ serviceId: 's', toolName: 'write' }, async () => 'allowed-once'), { answer: 42 })

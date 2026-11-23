@@ -12,8 +12,10 @@ export interface EnterpriseContext {
 }
 
 export class OpcError extends Error {
-  constructor(public readonly code: string, message: string = code) {
-    super(message)
+  constructor(public readonly code: string, message?: string) {
+    super(message ?? (code === 'SYSTEM_ADMIN_ACCOUNT_UNSUPPORTED'
+      ? '当前账号是知识平台的全局管理员，请使用已加入该空间的日常账号登录 OPC。'
+      : code))
     this.name = 'OpcError'
   }
 }
