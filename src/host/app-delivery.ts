@@ -544,6 +544,14 @@ export class AppDelivery {
     if (job.status === 'verified') view.userDisabled = await this.isSkillDisabled(scope.directory, job.slug)
     return view
   }
+  async getDeploymentFollowup(id: string, expected: string) {
+    const scope = this.scope(expected)
+    const { job } = await this.open(scope.directory, id)
+    scope.assertCurrent()
+    const state = job.status === 'ready' && job.superseded && job.published ? 'superseded' : job.status
+    if (!['verified', 'awaiting_page_verification', 'superseded'].includes(state)) return undefined
+    return { name: job.name, url: job.url, version: job.version, state }
+  }
   async getJobByAnalysisSession(sessionId: string, expected: string) {
     const scope = this.scope(expected)
     if (!/^[a-f0-9-]{36}$/.test(sessionId)) return null

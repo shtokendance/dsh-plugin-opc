@@ -98,6 +98,7 @@ interface AnalysisRound {
 interface AnalysisSession {
   handle?: AgentHandle
   round?: AnalysisRound
+  followupPrompt?: string
 }
 
 interface DeliveryObservation {
@@ -456,19 +457,44 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       signal: abort,
       setup(child) {
         child.tools.restrict({ allow: [] })
+        const deliveryPrompt = skill + '\n' + loadBundledSkillText('references/delivery-files.md') + '\n' + loadBundledSkillText('references/assessment.md')
+        const followupChecks = new WeakMap<AbortSignal, Promise<boolean>>()
+        const isDeploymentFollowup = (turnSignal: AbortSignal) => {
+          if (live.round) return Promise.resolve(false)
+          let check = followupChecks.get(turnSignal)
+          if (!check) {
+            check = delivery.getDeploymentFollowup(job.id, appCtxId).then(deployed => {
+              turnSignal.throwIfAborted()
+              if (live.round) return false
+              live.followupPrompt = deployed ? [
+                '你正在原部署会话中提供部署后答疑。根据本会话的部署记录和应用说明，直接回答用户的问题。',
+                '用普通用户能理解的话说明登录入口、配置项用途、在哪里操作以及怎样确认结果。对用户需要自行完成的操作提供步骤。信息不足时说明哪些内容还需要核实。',
+                '部署记录中的 verified 表示本次发布流程已完成，具体检查结果以会话记录为准。awaiting_page_verification 表示已部署但仍待页面验收，superseded 表示这是已被其他版本替换的历史部署。',
+                `本会话关联的部署记录：${JSON.stringify(deployed)}`,
+              ].join('\n') : undefined
+              return Boolean(deployed)
+            })
+            followupChecks.set(turnSignal, check)
+          }
+          return check
+        }
         child.systemPrompt.section({ name: 'opc-delivery', order: 1,
-          text: skill + '\n' + loadBundledSkillText('references/delivery-files.md') + '\n' + loadBundledSkillText('references/assessment.md'),
+          text: () => live.followupPrompt ?? deliveryPrompt,
           complete: true, interpolate: false })
         for (const [name, tool] of round.tools) {
           child.tools.register({ ...tool, execute: (...args) => {
             const current = live.round?.tools.get(name)
             if (!current) throw new Error('请先继续当前应用准备')
             return current.execute(...args)
-          } })
+          } }, { when: async ({ signal }) => !await isDeploymentFollowup(signal) })
         }
         child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
           const decision = await next()
           if (decision.kind !== 'enter' || !decision.messages.length) return decision
+          if (!live.round && decision.messages.some(message => message.source.kind === 'user' && 'rpcId' in message.source)
+            && await isDeploymentFollowup(turnSignal) && !live.round) {
+            return decision
+          }
           const messages = []
           for (const message of decision.messages) {
             if (message.source.kind !== 'user' || !('rpcId' in message.source)) {
@@ -493,6 +519,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         })
       },
     }
+    live.followupPrompt = undefined
     live.round = round
     sessions.set(job.id, live)
     let analysis: AgentHandle
