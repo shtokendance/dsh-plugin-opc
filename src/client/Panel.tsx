@@ -5,6 +5,8 @@ import { AppsPanel } from './AppsPanel.tsx'
 import { AppIcon } from './AppIcon.tsx'
 import type { PrepareAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { OpcSettingsPanel } from './OpcSettingsPanel.tsx'
+import { McpServiceDetail, mcpDetailStyles } from './McpServiceDetail.tsx'
+import { DEFAULT_PAGE_SIZE, Pagination, paginateItems, paginationStyles } from './Pagination.tsx'
 import { WorkbenchHome, WorkbenchNavigation, type PanelKind } from './Workbench.tsx'
 import { workbenchStyles } from './workbenchStyles.ts'
 
@@ -252,6 +254,63 @@ const css = `
 .card-actions button {
   font-size: 12px;
   padding: 5px 10px;
+}
+.mcp-card {
+  padding: 12px 14px;
+  gap: 8px;
+  justify-content: flex-start;
+}
+.mcp-card .card-header {
+  margin-bottom: 0;
+  align-items: center;
+}
+.mcp-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.mcp-card-desc {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mcp-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid #f1f5f9;
+}
+.mcp-card-actions button {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+.mcp-list-notice {
+  background: #eff6ff;
+  border-left: 3px solid #2563eb;
+  padding: 8px 12px;
+  margin: 0 0 10px;
+  border-radius: 0 6px 6px 0;
+  font-size: 12px;
+  color: #334155;
+}
+.mcp-list-section .s2-command-bar {
+  margin-bottom: 8px;
+}
+.mcp-list-section .s2-pills-row {
+  margin-bottom: 10px;
+  padding-bottom: 2px;
+}
+.mcp-list-section .cards-grid {
+  margin-top: 0;
 }
 .doc-box {
   background: #f8fafc;
@@ -862,6 +921,20 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   const [hasSearchedDoc, setHasSearchedDoc] = useState(false)
   const [mcpSearch, setMcpSearch] = useState('')
   const [mcpFilter, setMcpFilter] = useState<'all' | 'connected' | 'unmounted'>('all')
+  const [selectedMcpServiceKey, setSelectedMcpServiceKey] = useState<string | null>(null)
+  const [listPage, setListPage] = useState(1)
+  const [listPageSizes, setListPageSizes] = useState<Record<'knowledge' | 'skills' | 'mcp', number>>({
+    knowledge: DEFAULT_PAGE_SIZE,
+    skills: DEFAULT_PAGE_SIZE,
+    mcp: DEFAULT_PAGE_SIZE,
+  })
+  const listPageSize = kind === 'knowledge' || kind === 'skills' || kind === 'mcp' ? listPageSizes[kind] : DEFAULT_PAGE_SIZE
+  const updateListPageSize = (size: number) => {
+    if (kind === 'knowledge' || kind === 'skills' || kind === 'mcp') {
+      setListPageSizes(prev => ({ ...prev, [kind]: size }))
+    }
+    setListPage(1)
+  }
   const docInputRef = useRef<HTMLInputElement>(null)
   const topSearchCardRef = useRef<HTMLDivElement>(null)
   const pinDetail = state.pinnedScopeDetails?.[sessionId]
@@ -918,7 +991,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   }, [api, kind, q])
 
   useEffect(() => {
-    epoch.current++; setItems([]); setKnowledgeFilter('all'); setIncludesSharedKnowledge(null); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setFilter('all'); setBusy(false); setError('')
+    epoch.current++; setItems([]); setKnowledgeFilter('all'); setIncludesSharedKnowledge(null); setHits([]); setDoc(''); setServices([]); setKb(''); setDocQuery(''); setHasSearchedDoc(false); setMcpSearch(''); setMcpFilter('all'); setSelectedMcpServiceKey(null); setListPage(1); setFilter('all'); setBusy(false); setError('')
     if (state.signedIn) void run(load)
   }, [state.context?.contextId, sessionId, kind])
 
@@ -953,7 +1026,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   const action = (fn: () => Promise<void>) => () => void run(fn)
 
   return <section className="opc-panel">
-    <style>{css + workbenchStyles}</style>
+    <style>{css + workbenchStyles + paginationStyles + mcpDetailStyles}</style>
     {/* Title Bar with Integrated Auth, Space Switcher, Refresh, Settings, and Logout */}
     <header className="opc-header-bar">
       <WorkbenchNavigation kind={kind} onSelect={selectPage} />
@@ -1133,7 +1206,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         {kbSearchMode === 'kb' && (
           <form
             className="s2-panel-catalog"
-            onSubmit={e => { e.preventDefault(); void run(load) }}
+            onSubmit={e => { e.preventDefault(); setListPage(1); void run(load) }}
           >
             <input
               aria-label="筛选知识库"
@@ -1147,7 +1220,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               <button
                 type="button"
                 className="btn-sm"
-                onClick={() => { setQ(''); void run(() => load('')) }}
+                onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}
               >
                 清除
               </button>
@@ -1235,7 +1308,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           <div className="kb-section-title">
             <span>📚 知识库列表</span>
             <span className="badge">{knowledgeItems.length}</span>
-            {includesSharedKnowledge && <select aria-label="知识库来源" value={knowledgeFilter} onChange={e => setKnowledgeFilter(e.target.value as typeof knowledgeFilter)}>
+            {includesSharedKnowledge && <select aria-label="知识库来源" value={knowledgeFilter} onChange={e => { setKnowledgeFilter(e.target.value as typeof knowledgeFilter); setListPage(1) }}>
               <option value="all">全部可用</option>
               <option value="owned">自有</option>
               <option value="shared">共享给我</option>
@@ -1244,7 +1317,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           {q ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span className="badge badge-warn">已按“{q}”过滤</span>
-              <button className="btn-sm" onClick={() => { setQ(''); void run(() => load('')) }}>清除过滤</button>
+              <button className="btn-sm" onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}>清除过滤</button>
             </div>
           ) : (
             <span style={{ fontSize: 11, color: '#94a3b8' }}>点击卡片「检索此库」可直接定位搜索</span>
@@ -1253,54 +1326,66 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
 
         {includesSharedKnowledge === false && <div className="notice">当前平台版本仅提供本空间知识库目录。</div>}
         {items.length > 0 && knowledgeItems.length === 0 && <div className="notice">此来源下没有可用知识库。</div>}
-        <div className="cards-grid">
-          {knowledgeItems.map(item => {
-            const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
-            return (
-            <div key={`${item.tenant_id}:${item.knowledge_base_id}`} className="resource-card">
-              <div>
-                <div className="card-header">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                    <div className="card-icon" style={{ background: '#f8fafc', color: '#334155' }}>📖</div>
-                    <h3 className="card-title">{item.name}</h3>
+        {(() => {
+          const { pageItems, currentPage } = paginateItems(knowledgeItems, listPage, listPageSize)
+          return <>
+            <div className="cards-grid">
+              {pageItems.map(item => {
+                const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
+                return (
+                <article key={`${item.tenant_id}:${item.knowledge_base_id}`} className="resource-card">
+                  <div>
+                    <div className="card-header">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                        <div className="card-icon" style={{ background: '#f8fafc', color: '#334155' }}>📖</div>
+                        <h3 className="card-title">{item.name}</h3>
+                      </div>
+                      <span className={`badge ${item.availability === 'available' ? 'badge-ok' : ''}`}>
+                        {item.availability === 'available' ? '已就绪' : '未就绪'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
+                      <span className="badge">
+                        {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && item.permission === 'viewer' ? ' · 只读' : ''}
+                      </span>
+                    </div>
+                    <p className="card-desc">{item.description || '暂无知识库描述'}</p>
                   </div>
-                  <span className={`badge ${item.availability === 'available' ? 'badge-ok' : ''}`}>
-                    {item.availability === 'available' ? '已就绪' : '未就绪'}
-                  </span>
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
-                  <span className="badge">
-                    {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && item.permission === 'viewer' ? ' · 只读' : ''}
-                  </span>
-                </div>
-                <p className="card-desc">{item.description || '暂无知识库描述'}</p>
-              </div>
-              <div className="card-actions">
-                <button
-                  className="primary"
-                  disabled={busy || item.availability !== 'available'}
-                  onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId, item.tenant_id) })}
-                >
-                  限定问答范围
-                </button>
-                <button
-                  style={{ background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0' }}
-                  onClick={() => {
-                    setKb(`${item.tenant_id}::${item.knowledge_base_id!}`)
-                    setKbSearchMode('doc')
-                    setTimeout(() => {
-                      docInputRef.current?.focus()
-                      docInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                    }, 50)
-                  }}
-                >
-                  检索此库
-                </button>
-              </div>
+                  <div className="card-actions">
+                    <button
+                      className="primary"
+                      disabled={busy || item.availability !== 'available'}
+                      onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId, item.tenant_id) })}
+                    >
+                      限定问答范围
+                    </button>
+                    <button
+                      style={{ background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0' }}
+                      onClick={() => {
+                        setKb(`${item.tenant_id}::${item.knowledge_base_id!}`)
+                        setKbSearchMode('doc')
+                        setTimeout(() => {
+                          docInputRef.current?.focus()
+                          docInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                        }, 50)
+                      }}
+                    >
+                      检索此库
+                    </button>
+                  </div>
+                </article>
+                )
+              })}
             </div>
-            )
-          })}
-        </div>
+            <Pagination
+              totalItems={knowledgeItems.length}
+              page={currentPage}
+              pageSize={listPageSize}
+              onPageChange={setListPage}
+              onPageSizeChange={updateListPageSize}
+            />
+          </>
+        })()}
       </>}
 
       {/* Skills View - 方案二：独立指令栏与分类Pills */}
@@ -1312,12 +1397,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           if (filter === 'new') return !item.installed
           return true
         })
+        const { pageItems, currentPage } = paginateItems(filteredItems, listPage, listPageSize)
 
         return <>
-          {/* 指令栏 */}
           <form
             className="s2-command-bar"
-            onSubmit={e => { e.preventDefault(); void run(load) }}
+            onSubmit={e => { e.preventDefault(); setListPage(1); void run(load) }}
           >
             <span className="s2-command-icon"><AppIcon name="search" size={15} /></span>
             <input
@@ -1331,7 +1416,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               <button
                 type="button"
                 className="s2-command-clear"
-                onClick={() => { setQ(''); void run(() => load('')) }}
+                onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}
                 title="清除"
               >
                 ✕
@@ -1340,27 +1425,26 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             <button className="s2-command-btn" disabled={busy}>立即检索</button>
           </form>
 
-          {/* 快捷分类 Pills */}
           <div className="s2-pills-row">
             <span className="s2-pills-label">🏷️ 快捷标签：</span>
             <button
               type="button"
               className={`s2-pill ${filter === 'all' ? 'active' : ''}`}
-              onClick={() => setFilter('all')}
+              onClick={() => { setFilter('all'); setListPage(1) }}
             >
               全部 ({items.length})
             </button>
             <button
               type="button"
               className={`s2-pill ${filter === 'installed' ? 'active' : ''}`}
-              onClick={() => setFilter('installed')}
+              onClick={() => { setFilter('installed'); setListPage(1) }}
             >
               已安装 ({installedCount})
             </button>
             <button
               type="button"
               className={`s2-pill ${filter === 'new' ? 'active' : ''}`}
-              onClick={() => setFilter('new')}
+              onClick={() => { setFilter('new'); setListPage(1) }}
             >
               未安装 ({uninstalledCount})
             </button>
@@ -1377,10 +1461,10 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           </div>
 
           <div className="cards-grid">
-            {filteredItems.map(item => {
+            {pageItems.map(item => {
               const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
               return (
-              <div key={`${item.tenant_id}:${item.catalog_id}`} className="resource-card">
+              <article key={`${item.tenant_id}:${item.catalog_id}`} className="resource-card">
                 <div>
                   <div className="card-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -1427,15 +1511,58 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     </button>
                   </>}
                 </div>
-              </div>
+              </article>
               )
             })}
           </div>
+          <Pagination
+            totalItems={filteredItems.length}
+            page={currentPage}
+            pageSize={listPageSize}
+            onPageChange={setListPage}
+            onPageSizeChange={updateListPageSize}
+          />
         </>
       })()}
 
-      {/* MCP Services View - 方案二：独立指令栏与分类Pills */}
       {kind === 'mcp' && (() => {
+        const selectedService = selectedMcpServiceKey
+          ? services.find(service => `${String(service.tenant_id ?? '')}:${String(service.service_id)}` === selectedMcpServiceKey) ?? null
+          : null
+
+        if (selectedService) {
+          const serviceId = String(selectedService.service_id)
+          const serviceTenant = String(selectedService.tenant_id ?? '')
+          const info = resolveSpaceInfo(
+            serviceTenant,
+            typeof selectedService.tenant_name === 'string' ? selectedService.tenant_name : undefined,
+            typeof selectedService.source_tenant_id === 'string' ? selectedService.source_tenant_id : undefined,
+            typeof selectedService.source_tenant_name === 'string' ? selectedService.source_tenant_name : undefined,
+          )
+          const spaceLabel = info.ownerName
+            ? `${info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}${info.isShared && selectedService.permission === 'viewer' ? ' · 只读' : ''}`
+            : ''
+          const mounted = Boolean(state.mountedServices?.includes(serviceId))
+          return (
+            <McpServiceDetail
+              api={api}
+              service={selectedService}
+              contextId={context.contextId}
+              tenantId={serviceTenant}
+              spaceLabel={spaceLabel}
+              connection={state.mcpConnections?.[serviceId]}
+              mountAvailable={Boolean(state.mountAvailable)}
+              mounted={mounted}
+              busy={busy}
+              onToggleMount={action(() => mounted
+                ? api.unmountMcpService(serviceId, context.contextId)
+                : api.mountMcpService(serviceId, context.contextId, serviceTenant),
+              )}
+              onBack={() => setSelectedMcpServiceKey(null)}
+            />
+          )
+        }
+
         const connectedCount = services.filter(s => state.mountedServices?.includes(String(s.service_id))).length
         const unmountedCount = services.length - connectedCount
         const filteredServices = services.filter(service => {
@@ -1455,13 +1582,13 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           })
           return name.includes(term) || desc.includes(term) || spaceText.includes(term) || toolMatches
         })
+        const { pageItems, currentPage } = paginateItems(filteredServices, listPage, listPageSize)
 
-        return <>
-          <p className="notice">
-            AI 可按权限调用以下企业服务（已为您自动挂载并保持连接）。企微登录后直接可用，无需每次手动确认审批。
+        return <div className="mcp-list-section">
+          <p className="mcp-list-notice">
+            AI 可按权限调用以下企业服务（已自动挂载并保持连接），点击「工具与调试」可查看工具定义并在线调试。
           </p>
 
-          {/* 指令栏 */}
           <div className="s2-command-bar">
             <span className="s2-command-icon"><AppIcon name="search" size={15} /></span>
             <input
@@ -1469,13 +1596,13 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               className="s2-command-input"
               placeholder="输入关键词查找企业 MCP 服务或工具名称..."
               value={mcpSearch}
-              onChange={e => setMcpSearch(e.target.value)}
+              onChange={e => { setMcpSearch(e.target.value); setListPage(1) }}
             />
             {mcpSearch && (
               <button
                 type="button"
                 className="s2-command-clear"
-                onClick={() => setMcpSearch('')}
+                onClick={() => { setMcpSearch(''); setListPage(1) }}
                 title="清除"
               >
                 ✕
@@ -1484,41 +1611,45 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             <button
               type="button"
               className="s2-command-btn"
-              onClick={() => {}}
+              onClick={() => setListPage(1)}
             >
               立即检索
             </button>
           </div>
 
-          {/* 快捷分类 Pills */}
           <div className="s2-pills-row">
             <span className="s2-pills-label">🏷️ 快捷标签：</span>
             <button
               type="button"
               className={`s2-pill ${mcpFilter === 'all' ? 'active' : ''}`}
-              onClick={() => setMcpFilter('all')}
+              onClick={() => { setMcpFilter('all'); setListPage(1) }}
             >
               全部 ({services.length})
             </button>
             <button
               type="button"
               className={`s2-pill ${mcpFilter === 'connected' ? 'active' : ''}`}
-              onClick={() => setMcpFilter('connected')}
+              onClick={() => { setMcpFilter('connected'); setListPage(1) }}
             >
               已连接 ({connectedCount})
             </button>
             <button
               type="button"
               className={`s2-pill ${mcpFilter === 'unmounted' ? 'active' : ''}`}
-              onClick={() => setMcpFilter('unmounted')}
+              onClick={() => { setMcpFilter('unmounted'); setListPage(1) }}
             >
               未挂载 ({unmountedCount})
             </button>
           </div>
 
           <div className="cards-grid">
-            {filteredServices.map(service => {
+            {pageItems.map(service => {
+              const serviceId = String(service.service_id)
               const serviceTenant = String(service.tenant_id ?? '')
+              const serviceKey = `${serviceTenant}:${serviceId}`
+              const toolCount = Array.isArray(service.tools) ? service.tools.length : 0
+              const description = String(service.description ?? '').trim()
+              const mounted = Boolean(state.mountedServices?.includes(serviceId))
               const info = resolveSpaceInfo(
                 serviceTenant,
                 typeof service.tenant_name === 'string' ? service.tenant_name : undefined,
@@ -1526,62 +1657,61 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                 typeof service.source_tenant_name === 'string' ? service.source_tenant_name : undefined,
               )
               return (
-              <div key={`${serviceTenant}:${String(service.service_id)}`} className="resource-card">
-              <div>
-                <div className="card-header">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div className="card-icon" style={{ background: '#faf5ff', borderColor: '#e9d5ff', color: '#9333ea' }}>🔌</div>
-                    <h3 className="card-title">{String(service.name ?? service.service_id)}</h3>
-                  </div>
-                  {state.mcpConnections?.[String(service.service_id)] && (
-                    <span className={`badge ${state.mcpConnections[String(service.service_id)].state === 'connected' ? 'badge-ok' : ''}`}>
-                      {state.mcpConnections[String(service.service_id)].state === 'connected' ? `已连接 (${state.mcpConnections[String(service.service_id)].toolCount})` : state.mcpConnections[String(service.service_id)].state}
-                    </span>
-                  )}
-                </div>
-                {info.ownerName && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
-                    <span className="badge">
-                      {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && service.permission === 'viewer' ? ' · 只读' : ''}
-                    </span>
-                  </div>
-                )}
-                <p className="card-desc">{String(service.description ?? '')}</p>
-              </div>
-              <div className="card-actions">
-                {state.mountAvailable && (
-                  <button
-                    disabled={busy}
-                    style={state.mountedServices?.includes(String(service.service_id)) ? {} : { background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
-                    onClick={action(() => state.mountedServices?.includes(String(service.service_id))
-                      ? api.unmountMcpService(String(service.service_id), context.contextId)
-                      : api.mountMcpService(String(service.service_id), context.contextId, serviceTenant)
-                    )}
-                  >
-                    {state.mountedServices?.includes(String(service.service_id)) ? '取消挂载' : '挂载到 DSH'}
-                  </button>
-                )}
-              </div>
-              <details style={{ marginTop: 10 }}>
-                <summary style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>查看可用工具与调试 ({(Array.isArray(service.tools) ? service.tools : []).length})</summary>
-                <div style={{ marginTop: 8 }}>
-                  {(Array.isArray(service.tools) ? service.tools : []).map((tool, i) => (
-                    <div key={i} style={{ borderTop: '1px solid #f1f5f9', paddingTop: 8, marginTop: 8 }}>
-                      <strong>{typeof tool === 'string' ? tool : tool.name}</strong>
-                      {typeof tool !== 'string' && <>
-                        <p style={{ margin: '2px 0 6px', fontSize: 12, color: '#64748b' }}>{tool.description}</p>
-                        {tool.risk && <span className="badge" style={{ marginBottom: 6 }}>{tool.risk === 'read' ? '只读' : tool.risk}{tool.require_approval ? ' · 需审批' : ''}</span>}
-                      </>}
-                      <McpDebug api={api} serviceId={String(service.service_id)} toolName={typeof tool === 'string' ? tool : tool.name} contextId={context.contextId} tenantId={serviceTenant}/>
+                <article key={serviceKey} className="resource-card mcp-card">
+                  <div className="card-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <div className="card-icon" style={{ background: '#faf5ff', borderColor: '#e9d5ff', color: '#9333ea' }}>🔌</div>
+                      <h3 className="card-title">{String(service.name ?? service.service_id)}</h3>
                     </div>
-                  ))}
-                </div>
-              </details>
-            </div>
+                    {state.mcpConnections?.[serviceId] && (
+                      <span className={`badge ${state.mcpConnections[serviceId].state === 'connected' ? 'badge-ok' : ''}`}>
+                        {state.mcpConnections[serviceId].state === 'connected' ? `已连接 (${state.mcpConnections[serviceId].toolCount})` : state.mcpConnections[serviceId].state}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mcp-card-meta">
+                    {info.ownerName && (
+                      <span className="badge">
+                        {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && service.permission === 'viewer' ? ' · 只读' : ''}
+                      </span>
+                    )}
+                    <span className="badge">{toolCount} 个工具</span>
+                  </div>
+                  {description && <p className="mcp-card-desc">{description}</p>}
+                  <div className="mcp-card-actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => setSelectedMcpServiceKey(serviceKey)}
+                    >
+                      工具与调试 ({toolCount})
+                    </button>
+                    {state.mountAvailable && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        style={mounted ? {} : { background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
+                        onClick={action(() => mounted
+                          ? api.unmountMcpService(serviceId, context.contextId)
+                          : api.mountMcpService(serviceId, context.contextId, serviceTenant),
+                        )}
+                      >
+                        {mounted ? '取消挂载' : '挂载到 DSH'}
+                      </button>
+                    )}
+                  </div>
+                </article>
               )
             })}
           </div>
-        </>
+          <Pagination
+            totalItems={filteredServices.length}
+            page={currentPage}
+            pageSize={listPageSize}
+            onPageChange={setListPage}
+            onPageSizeChange={updateListPageSize}
+          />
+        </div>
       })()}
 
       {kind !== 'home' && kind !== 'apps' && !busy && (kind === 'mcp' ? services.length === 0 : items.length === 0) && (
@@ -1595,14 +1725,4 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
     {busy && <div style={{ padding: '6px 16px', background: '#eff6ff', fontSize: 12, color: '#1d4ed8', borderTop: '1px solid #dbeafe' }}>正在同步最新状态…</div>}
     {error && <div role="alert" className="error" style={{ margin: 0, borderRadius: 0 }}>{error}</div>}
   </section>
-}
-
-function McpDebug({ api, serviceId, toolName, contextId, tenantId }: { api: OpcApi; serviceId: string; toolName: string; contextId: string; tenantId: string }) {
-  const [args, setArgs] = useState('{}'), [result, setResult] = useState(''), [pending, setPending] = useState(false)
-  const generation = useRef(0)
-  useEffect(() => { generation.current++; setResult(''); setPending(false); return () => { generation.current++ } }, [contextId])
-  return <details style={{ marginTop: 6 }}><summary style={{ fontSize: 12, color: '#2563eb', cursor: 'pointer' }}>在线调试调用</summary><textarea style={{ width: '100%', minHeight: 60, marginTop: 6, fontSize: 12 }} aria-label={`${toolName} JSON 参数`} value={args} onChange={e => setArgs(e.target.value)}/><button style={{ marginTop: 6 }} disabled={pending} onClick={() => {
-    const current = generation.current; setPending(true); setResult('')
-    void api.invokeMcpTool(serviceId, toolName, args, contextId, tenantId).then(value => { if (current === generation.current) setResult(value) }, error => { if (current === generation.current) setResult(String(error)) }).finally(() => { if (current === generation.current) setPending(false) })
-  }}>{pending ? '执行中…' : '调用'}</button>{result && <pre style={{ marginTop: 6, fontSize: 11, background: '#f1f5f9', padding: 8, borderRadius: 4, overflowX: 'auto' }}>{result}</pre>}</details>
 }
