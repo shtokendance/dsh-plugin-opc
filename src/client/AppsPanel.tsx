@@ -950,14 +950,12 @@ export function AppsPanel({
         const detail = JSON.parse(await api.appDetails(slug, contextId)) as DeployedApp | null
         if (request !== detailLoad.current) return
         if (!detail) throw new Error('未能读取应用详情')
-        const canManage = detail.can_manage === true
-        const [verRaw, stgRaw, logRaw] = canManage ? await Promise.allSettled([
+        const [verRaw, stgRaw, logRaw] = await Promise.allSettled([
           api.appVersions?.(slug, contextId) ?? Promise.resolve('{"versions":[]}'),
           api.appStorage?.(slug, contextId).catch(() => 'null') ?? Promise.resolve('null'),
           api.appLogs?.(slug, contextId) ?? Promise.resolve('{}'),
-        ]) : []
+        ])
         if (request !== detailLoad.current) return
-        if (!canManage) setDetailTab('artifacts')
         if (verRaw?.status === 'rejected') setVersionsError(readErrorMessage(verRaw.reason, '版本历史加载失败'))
         if (logRaw?.status === 'rejected') setLogsError(readErrorMessage(logRaw.reason, '日志加载失败'))
         const verParsed = parseJson<{ versions?: AppVersionItem[] }>(verRaw?.status === 'fulfilled' ? verRaw.value : null, { versions: [] })
@@ -1741,6 +1739,30 @@ export function AppsPanel({
       else if (!inDetail) setBannerError(msg)
     } finally {
       if (inDetail) setDetailBusy(false)
+    }
+  }
+
+  const handleSyncSkill = async (slug: string) => {
+    const request = detailLoad.current
+    setDetailBusy(true)
+    setDetailError(null)
+    setDetailNotice(null)
+    try {
+      if (!api.appSyncSkill) throw new Error('当前插件版本不支持手动同步技能到 OPC 线上平台')
+      const res = parseJson<{ ok?: boolean; catalog_skill_id?: string; skill_synced?: boolean }>(
+        await api.appSyncSkill(slug, contextId),
+        {},
+      )
+      if (request !== detailLoad.current) return
+      setDetailApp(current => current?.slug === slug
+        ? { ...current, skill_synced: res.skill_synced ?? true, catalog_skill_id: res.catalog_skill_id ?? current.catalog_skill_id }
+        : current)
+      setDetailNotice(t("apps.skillSyncedSuccess"))
+      void loadWorkspaceData(true)
+    } catch (error) {
+      if (request === detailLoad.current) setDetailError(readErrorMessage(error, '同步技能到 OPC 线上平台失败'))
+    } finally {
+      setDetailBusy(false)
     }
   }
 
@@ -3042,7 +3064,7 @@ export function AppsPanel({
     const runtimeConfigs = runtimeOriginals.map(item =>
       Object.hasOwn(runtimeChanges, item.key) ? { ...item, value: runtimeChanges[item.key], value_source: 'manual' } : item)
     const runtimeBaseline = { base_version: detailApp.current_version, base_config_revision: onlineRuntime?.config_revision }
-    const logView = !readOnly && detailTab === 'logs'
+    const logView = detailTab === 'logs'
     const detailLog = formatLogOutput(detailLogsData[detailLogsSubTab])
     const logSummary = detailLogsSubTab === 'runtime' ? t("apps.containerOutputLast500Lines")
       : detailLogsSubTab === 'build' ? t("apps.buildAndDeployLogs") : t("apps.archivedDockerfile")
@@ -3150,8 +3172,8 @@ export function AppsPanel({
                   <div style={{ marginTop: 2 }}>{healthFailureDetail(detailApp.error_message) || t("apps.pleaseRecheckStatusOrInspectServer")}</div>
                 </div>
               </div>
-              {!readOnly && <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                {api.appRecheck && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {!readOnly && api.appRecheck && (
                   <button type="button" className="oa-btn oa-btn-xs" disabled={detailBusy} onClick={() => void handleRecheckApp(detailApp.slug, true)}>
                     {t("apps.recheck_2")}
                   </button>
@@ -3159,7 +3181,7 @@ export function AppsPanel({
                 <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailTab('logs')}>
                   {t("apps.viewLogs")}
                 </button>
-              </div>}
+              </div>
             </div>
           )}
 
@@ -3190,28 +3212,26 @@ export function AppsPanel({
           </div>
 
           {/* 5 Segmented Detail Tabs */}
-          {!readOnly && (
-            <div className="oa-segmented oa-detail-tab-list" role="tablist" aria-label="应用详情">
-              {(Object.keys(detailTabs) as DetailTab[]).map((tab, index, tabs) => (
-                <button key={tab} id={`${formId}-tab-${tab}`} type="button" role="tab"
-                  aria-selected={detailTab === tab} aria-controls={`${formId}-detail-panel`} tabIndex={detailTab === tab ? 0 : -1}
-                  className={`oa-segmented-btn ${detailTab === tab ? 'active' : ''}`} onClick={() => setDetailTab(tab)}
-                  onKeyDown={event => {
-                    const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
-                      : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
-                      : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : undefined
-                    if (next === undefined) return
-                    event.preventDefault()
-                    setDetailTab(tabs[next])
-                    document.getElementById(`${formId}-tab-${tabs[next]}`)?.focus()
-                  }}>
-                  {detailTabs[tab]}
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="oa-segmented oa-detail-tab-list" role="tablist" aria-label="应用详情">
+            {(Object.keys(detailTabs) as DetailTab[]).map((tab, index, tabs) => (
+              <button key={tab} id={`${formId}-tab-${tab}`} type="button" role="tab"
+                aria-selected={detailTab === tab} aria-controls={`${formId}-detail-panel`} tabIndex={detailTab === tab ? 0 : -1}
+                className={`oa-segmented-btn ${detailTab === tab ? 'active' : ''}`} onClick={() => setDetailTab(tab)}
+                onKeyDown={event => {
+                  const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
+                    : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
+                    : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : undefined
+                  if (next === undefined) return
+                  event.preventDefault()
+                  setDetailTab(tabs[next])
+                  document.getElementById(`${formId}-tab-${tabs[next]}`)?.focus()
+                }}>
+                {detailTabs[tab]}
+              </button>
+            ))}
+          </div>
 
-          {!readOnly && <div id={`${formId}-detail-panel`} role="tabpanel" aria-labelledby={`${formId}-tab-${detailTab}`} tabIndex={0}
+          <div id={`${formId}-detail-panel`} role="tabpanel" aria-labelledby={`${formId}-tab-${detailTab}`} tabIndex={0}
             className={logView ? 'oa-detail-tab-panel oa-detail-log-panel' : 'oa-detail-tab-panel'}>
           {detailTab === 'artifacts' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -3232,13 +3252,15 @@ export function AppsPanel({
                       : t("apps.skillSyncsAutomaticallyAfterPageVerificati")}
                   </div>
                 </div>
-                {matchingJob && !readOnly && matchingJob.status === 'awaiting_page_verification' && (
+                {!readOnly && detailApp.skill_synced === false && api.appSyncSkill && (
                   <button
                     type="button"
                     className="oa-btn oa-btn-sm oa-btn-primary"
-                    onClick={() => void resumeWizardJob(matchingJob, 4)}
+                    disabled={detailBusy}
+                    onClick={() => void handleSyncSkill(detailApp.slug)}
                   >
-                    {t("apps.verifyPageAndEnableSkill")}
+                    <AppIcon name="sparkle" size={13} />
+                    <span>{detailBusy ? t("apps.syncingToOpcPlatform") : t("apps.syncToOpcPlatform")}</span>
                   </button>
                 )}
               </div>
@@ -3247,6 +3269,7 @@ export function AppsPanel({
                 contextId={contextId}
                 slug={detailApp.slug}
                 version={detailApp.current_version}
+                readOnly={readOnly}
                 onOpenVerification={job => void resumeWizardJob(job, 4)}
               />
             </div>
@@ -3266,7 +3289,7 @@ export function AppsPanel({
               }}>{t("apps.reload_2")}</button>
             )}
           />
-          {detailTab === 'configs' && api.appRuntimeStatus && !runtimeStatus && !currentRuntimeError && (
+          {detailTab === 'configs' && !readOnly && api.appRuntimeStatus && !runtimeStatus && !currentRuntimeError && (
             <div className="oa-alert" role="status"><span className="oa-dot oa-pulse" /> {t("apps.loadingRuntimeConfig")}</div>
           )}
           {detailTab === 'configs' && (
@@ -3275,14 +3298,16 @@ export function AppsPanel({
                 <div>
                   <strong>{t("apps.liveRuntimeConfig")}</strong>
                   <div className="oa-hint">
-                    {onlineRuntime
+                    {readOnly
+                      ? t("apps.readOnlyViewHint")
+                      : onlineRuntime
                       ? t("apps.appVConfigRev", { version: detailApp.current_version ?? '', num: onlineRuntime.config_number ?? '' })
                       : requiresAIUpdate
                         ? t("apps.aiAnalyzesConfigChangesInThe")
                         : t("apps.savingRestartsTheContainerToApply")}
                   </div>
                 </div>
-                {onlineRuntime ? (
+                {!readOnly && (onlineRuntime ? (
                   <div className="oa-runtime-actions">
                     <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>{t("apps.configHistory")}</button>
                     <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>{t("apps.aiAnalyzeConfigUpdate")}</button>
@@ -3298,9 +3323,9 @@ export function AppsPanel({
                   <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy} onClick={() => void handleSaveDetailConfig()}>
                     {detailBusy ? t("apps.savingAndRestarting") : t("apps.saveConfigAndRestart")}
                   </button>
-                )}
+                ))}
               </div>
-              {onlineRuntime && runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>{t("apps.viewRecentOperationStatus")}</button>}
+              {!readOnly && onlineRuntime && runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>{t("apps.viewRecentOperationStatus")}</button>}
               {onlineRuntime && showRuntimeHistory && <div className="oa-runtime-history">
                 {onlineRuntime.revisions.length === 0 && <div className="oa-hint">{t("apps.currentConfigIsTheInitialConfig")}</div>}
                 {onlineRuntime.revisions.map(revision => {
@@ -3366,7 +3391,7 @@ export function AppsPanel({
                     <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? storageOverview.total_human : '—'}</div>
                   </div>
                 </div>
-                {storageOverview && storageOverview.mounts_count > 0 && (
+                {!readOnly && storageOverview && storageOverview.mounts_count > 0 && (
                   <button
                     type="button"
                     className="oa-btn oa-btn-sm"
@@ -3423,14 +3448,18 @@ export function AppsPanel({
                             <div style={{ textAlign: 'right' }}>{m.file_count ?? 0}</div>
                             <div style={{ textAlign: 'right', fontWeight: 500 }}>{m.size_human ?? formatFileSize(m.size_bytes)}</div>
                             <div style={{ textAlign: 'right' }}>
-                              <button
-                                type="button"
-                                className="oa-btn oa-btn-xs"
-                                onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, t("apps.volumeBackup", { name: m.name }))}
-                              >
-                                <AppIcon name="download" size={11} />
-                                <span>{t("apps.download")}</span>
-                              </button>
+                              {!readOnly ? (
+                                <button
+                                  type="button"
+                                  className="oa-btn oa-btn-xs"
+                                  onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, t("apps.volumeBackup", { name: m.name }))}
+                                >
+                                  <AppIcon name="download" size={11} />
+                                  <span>{t("apps.download")}</span>
+                                </button>
+                              ) : (
+                                <span className="oa-hint">—</span>
+                              )}
                             </div>
                           </div>
                         )
@@ -3447,7 +3476,7 @@ export function AppsPanel({
             <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="oa-subcard-head" style={{ marginBottom: 0 }}>
                 <span>交付版本与制品归档</span>
-                <span className="oa-hint">可下载源码包和技能包，也可以用历史源码发起更新</span>
+                <span className="oa-hint">{readOnly ? t("apps.readOnlyViewHint") : '可下载源码包和技能包，也可以用历史源码发起更新'}</span>
               </div>
 
               {rollbackTarget && (
@@ -3527,7 +3556,7 @@ export function AppsPanel({
 
                       {ver.version_note && <div style={{ fontSize: 12.5, color: '#334155', marginBottom: 8 }}>{ver.version_note}</div>}
 
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {!readOnly && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                         {ver.app_tar_key && (
                           <button
                             type="button"
@@ -3590,7 +3619,7 @@ export function AppsPanel({
                             {t("apps.confirmedConfig")}
                           </button>
                         )}
-                      </div>
+                      </div>}
                     </div>
                   ))}
                 </div>
@@ -3659,7 +3688,7 @@ export function AppsPanel({
             </div>
           )}
 
-          </div>}
+          </div>
 
         </div>
       </div>
@@ -3667,7 +3696,7 @@ export function AppsPanel({
   }
 
   return (
-    <div className={`opc-apps-root${(viewMode === 'wizard' && wizardStep === 4) || (viewMode === 'detail' && detailApp?.can_manage === true && detailTab === 'logs') ? ' oa-apps-log-view' : ''}`}>
+    <div className={`opc-apps-root${(viewMode === 'wizard' && wizardStep === 4) || (viewMode === 'detail' && detailTab === 'logs') ? ' oa-apps-log-view' : ''}`}>
       <style>{appsCss + paginationStyles}</style>
       {viewMode === 'list' && (loadingLinkedJob || restorableLinkedJob && !restoredLinkedJob.current
         ? <p role="status">正在查找当前会话的应用任务…</p>
