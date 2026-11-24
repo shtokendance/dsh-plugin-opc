@@ -204,10 +204,18 @@ test('MCP page navigates to dedicated tools & debug view and all 4 list pages su
     await page.getByRole('heading', { name: '可用工具' }).waitFor()
     await page.getByRole('heading', { name: '工具调试' }).waitFor()
     await page.getByText('按订单号查询采购单详情').first().waitFor()
+    assert.deepEqual(
+      JSON.parse(await page.getByLabel('query_order JSON 参数').inputValue()),
+      { order_id: '' },
+    )
 
     await page.getByRole('button', { name: /approve_order/ }).click()
     await page.getByText('审批通过指定采购单').first().waitFor()
     const argsInput = page.getByLabel('approve_order JSON 参数')
+    assert.deepEqual(
+      JSON.parse(await argsInput.inputValue()),
+      { order_id: '', comment: '' },
+    )
     await argsInput.fill('{"order_id":"PO-100","comment":"ok"}')
     await page.getByRole('button', { name: '调用工具' }).click()
     await page.locator('.mcp-debug-output').getByText('"PO-100"').waitFor()
@@ -230,6 +238,13 @@ test('MCP page navigates to dedicated tools & debug view and all 4 list pages su
     await page.getByRole('button', { name: '下一页' }).click()
     await page.getByRole('heading', { name: '企业应用-7' }).waitFor()
     assert.equal(await page.getByRole('heading', { name: '企业应用-8' }).count(), 1)
+
+    await page.getByRole('button', { name: /切换 OPC 页面/ }).click()
+    await page.getByRole('button', { name: '首页' }).click()
+    await page.getByRole('button', { name: /展开图文指南/ }).click()
+    const tabLabels = await page.getByRole('tab').allTextContents()
+    assert.deepEqual(tabLabels, ['知识库用法', '技能用法', 'MCP 用法', '应用交付 4 步走', '常见问题'])
+    assert.equal(await page.getByRole('tab', { name: '知识库用法' }).getAttribute('aria-selected'), 'true')
   } finally {
     await browser.close()
   }

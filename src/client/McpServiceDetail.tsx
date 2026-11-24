@@ -64,15 +64,19 @@ function readSchemaProperties(schema?: Record<string, unknown>): SchemaProperty[
   })
 }
 
-function buildSchemaTemplate(schema?: Record<string, unknown>): string {
+function buildSchemaObject(schema?: Record<string, unknown>, depth = 0): Record<string, unknown> {
   const properties = readSchemaProperties(schema)
-  if (properties.length === 0) return '{}'
+  if (properties.length === 0) return {}
   const template: Record<string, unknown> = {}
   const rawProperties = (schema?.properties ?? {}) as Record<string, Record<string, unknown>>
   for (const prop of properties) {
     const spec = rawProperties[prop.name] ?? {}
-    if ('default' in spec) {
+    if (spec.default !== undefined) {
       template[prop.name] = spec.default
+    } else if (Array.isArray(spec.examples) && spec.examples.length > 0) {
+      template[prop.name] = spec.examples[0]
+    } else if (spec.example !== undefined) {
+      template[prop.name] = spec.example
     } else if (Array.isArray(spec.enum) && spec.enum.length > 0) {
       template[prop.name] = spec.enum[0]
     } else if (prop.type.includes('number') || prop.type.includes('integer')) {
@@ -82,11 +86,19 @@ function buildSchemaTemplate(schema?: Record<string, unknown>): string {
     } else if (prop.type.includes('array')) {
       template[prop.name] = []
     } else if (prop.type.includes('object')) {
-      template[prop.name] = {}
+      template[prop.name] = depth < 3 && spec.properties && typeof spec.properties === 'object' && !Array.isArray(spec.properties)
+        ? buildSchemaObject(spec, depth + 1)
+        : {}
     } else {
       template[prop.name] = ''
     }
   }
+  return template
+}
+
+export function buildSchemaTemplate(schema?: Record<string, unknown>): string {
+  const template = buildSchemaObject(schema)
+  if (Object.keys(template).length === 0) return '{}'
   return JSON.stringify(template, null, 2)
 }
 
@@ -397,6 +409,7 @@ export function McpServiceDetail({
     setValidationError('')
     setCopied(false)
     setToolFilter('')
+    setArgsByTool({})
     setSelectedToolName(tools[0]?.name ?? '')
     return () => { generation.current++ }
   }, [contextId, serviceId, tenantId])
@@ -407,7 +420,11 @@ export function McpServiceDetail({
     }
   }, [selectedTool, selectedToolName])
 
-  const currentArgs = selectedTool ? (argsByTool[selectedTool.name] ?? '{}') : '{}'
+  const defaultArgs = useMemo(
+    () => buildSchemaTemplate(selectedTool?.inputSchema),
+    [selectedTool?.inputSchema],
+  )
+  const currentArgs = selectedTool ? (argsByTool[selectedTool.name] ?? defaultArgs) : '{}'
   const schemaProperties = useMemo(
     () => readSchemaProperties(selectedTool?.inputSchema),
     [selectedTool?.inputSchema],
@@ -595,7 +612,7 @@ export function McpServiceDetail({
                       className="btn-sm"
                       onClick={() => updateCurrentArgs(buildSchemaTemplate(selectedTool.inputSchema))}
                     >
-                      填充示例参数
+                      恢复默认参数
                     </button>
                   </div>
                   <div className="mcp-schema-list">
