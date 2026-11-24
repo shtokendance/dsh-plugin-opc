@@ -3276,7 +3276,7 @@ export function AppsPanel({
                   <strong>{t("apps.liveRuntimeConfig")}</strong>
                   <div className="oa-hint">
                     {onlineRuntime
-                      ? t("apps.appVConfigRev", { version: detailApp.current_version, num: onlineRuntime.config_number })
+                      ? t("apps.appVConfigRev", { version: detailApp.current_version ?? '', num: onlineRuntime.config_number ?? '' })
                       : requiresAIUpdate
                         ? t("apps.aiAnalyzesConfigChangesInThe")
                         : t("apps.savingRestartsTheContainerToApply")}
@@ -3307,7 +3307,7 @@ export function AppsPanel({
                   const active = revision.state === 'succeeded' && revision.config_revision === onlineRuntime.config_revision
                   return <div className="oa-runtime-toolbar" key={revision.id}>
                     <div>
-                      <strong>{t("apps.configRev", { num: revision.config_number })}{active ? t("apps.active") : ''}</strong>
+                      <strong>{t("apps.configRev", { num: revision.config_number ?? '' })}{active ? t("apps.active") : ''}</strong>
                       <div className="oa-hint">{revision.changed_keys || t("apps.initialConfig")}{revision.created_at ? ' · ' + new Date(revision.created_at).toLocaleString(getIntlLocale(locale)) : ''}</div>
                       <div className="oa-hint">{revision.created_by} {revision.message}</div>
                     </div>
@@ -3497,7 +3497,7 @@ export function AppsPanel({
                           <strong style={{ fontSize: 13.5, color: '#0f172a' }}>v{ver.version}</strong>
                           {currentVersion(ver) && <span className="oa-pill oa-pill-ok">{t("apps.running_2")}</span>}
                           {ver.status === 'failed' && <span className="oa-pill oa-pill-danger">{t("apps.failedNotLive")}</span>}
-                          {ver.status && ver.status !== 'failed' && !currentVersion(ver) && <span className="oa-pill">{jobStatusTone(ver.status, locale).text}</span>}
+                          {ver.status && ver.status !== 'failed' && !currentVersion(ver) && <span className="oa-pill">{jobStatusTone(ver.status, undefined, locale).text}</span>}
                           <span className="oa-hint">{formatDateTime(ver.created_at)}</span>
                           {ver.deployed_by && <span className="oa-hint">{t("apps.by")}{ver.deployed_by}</span>}
                         </div>
