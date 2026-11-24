@@ -143,6 +143,15 @@ export function loopbackConnection(key: string, value: string): boolean {
   return /(?:^|:\/\/|@|tcp\(|(?:host|server)\s*=)(?:localhost|127\.\d+\.\d+\.\d+|\[::1\])(?=[:/,;)]|$)/i.test(value.trim())
 }
 
+export function normalizeLocalSourcePath(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  const trimmed = raw.trim()
+  if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+    return trimmed.slice(1, -1).trim()
+  }
+  return trimmed
+}
+
 function isExampleConfigPath(relPath: string): boolean {
   const normalized = relPath.replace(/\\/g, '/')
   const base = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase()
@@ -836,8 +845,9 @@ export class AppDelivery {
           if (bytes.length > 64 * 1024 * 1024) throw new Error('ZIP 不能超过 64 MiB')
           source = join(root, 'uploaded.zip'); await writeFile(source, bytes, { mode: 0o600 })
         } else {
-          if (typeof input.source !== 'string' || !isAbsolute(input.source)) throw new Error('请选择 ZIP 或填写本机源码目录的完整路径')
-          source = input.source
+          const normalizedSource = normalizeLocalSourcePath(input.source)
+          if (!normalizedSource || !isAbsolute(normalizedSource)) throw new Error('请选择 ZIP 或填写本机源码目录的完整路径')
+          source = normalizedSource
           const entry = await lstat(source)
           if (entry.isSymbolicLink() || (!entry.isDirectory() && (!entry.isFile() || !/\.zip$/i.test(source)))) {
             throw new Error('请输入本机源码文件夹或 ZIP 的完整路径')

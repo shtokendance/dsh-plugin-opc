@@ -457,6 +457,8 @@ def resolve_and_enrich_proposal(
     change_errors: list[str] = []
     for idx, change in enumerate(proposal.get("changes", [])):
         try:
+            if isinstance(change, dict) and isinstance(change.get("path"), str):
+                change = {**change, "path": d.normalize_relative_path(change["path"])}
             if isinstance(change, dict) and "content" not in change:
                 cid = change.get("id") or change.get("path")
                 if cid and cid in draft_files:
@@ -490,6 +492,11 @@ def resolve_and_enrich_proposal(
     discovery_report = None
     transformation_report = None
     contract = proposal.get("contract")
+    if isinstance(contract, dict) and isinstance(contract.get("build_context"), list):
+        contract["build_context"] = [
+            d.normalize_relative_path(entry) if isinstance(entry, str) else entry
+            for entry in contract["build_context"]
+        ]
     if not (proposal.get("unresolved") or (isinstance(contract, dict) and contract.get("unresolved"))):
         runtime = contract.get("runtime") if isinstance(contract, dict) else None
         runtime_port = runtime.get("port") if isinstance(runtime, dict) else None
@@ -1036,7 +1043,7 @@ def main(body):
         return result
     if action == "read":
         source_dir = root / "review/source"
-        path = body["path"]
+        path = d.normalize_relative_path(body["path"])
         p = d.relative(source_dir, path)
         change = None
         if body.get("proposed"):
@@ -1080,6 +1087,7 @@ def main(body):
                 content = source.read(12_000)
                 has_more = bool(source.read(1))
             return {"path": name, "text": content, "next_start": start + 1 if has_more else None}
+        name = d.normalize_relative_path(name)
         d.relative(root, name)
         archive = root / revision / "bundle/app.tar"
         with tarfile.open(archive) as tar:
@@ -1125,7 +1133,7 @@ def main(body):
     if action == "propose_file":
         change = {
             "id": str(body.get("id") or body.get("path") or ""),
-            "path": str(body.get("path") or ""),
+            "path": d.normalize_relative_path(str(body.get("path") or "")),
             "reason": str(body.get("reason") or "容器化与部署适配"),
             "content": body.get("content"),
             "executable": bool(body.get("executable", False)),

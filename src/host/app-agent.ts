@@ -475,11 +475,12 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
         if (args.action === 'version_file') {
           const active = await readActiveVersion()
           if (!args.path) throw new Error('请提供上一版交付文件路径')
-          const file = await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/app.tar`, appCtxId, { query: { file: args.path } })
+          const normalizedPath = args.path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
+          const file = await delivery.platform(`/${job.slug}/versions/${active.version}/artifacts/app.tar`, appCtxId, { query: { file: normalizedPath } })
           if (typeof file?.text !== 'string') throw new Error('平台尚未提供上一版交付文件读取接口')
           const text = file.text
           const start = Math.max(0, (args.start ?? 1) - 1)
-          return JSON.stringify({ path: args.path, text: text.split('\n').slice(start, start + 200).join('\n') })
+          return JSON.stringify({ path: normalizedPath, text: text.split('\n').slice(start, start + 200).join('\n') })
         }
         if (args.action === 'database_schema') {
           await readActiveVersion()
