@@ -90,10 +90,22 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def normalize_relative_path(name):
+    if not isinstance(name, str):
+        return name
+    normalized = name.replace("\\", "/")
+    while normalized.startswith("./") and len(normalized) > 2:
+        normalized = normalized[2:]
+    if normalized == "./":
+        return "."
+    return normalized
+
+
 def relative(root, name):
-    require(isinstance(name, str) and name and "\\" not in name, "invalid relative path")
-    p = PurePosixPath(name)
-    require(not p.is_absolute() and ".." not in p.parts and not re.match(r"^[A-Za-z]:", name), "unsafe relative path")
+    require(isinstance(name, str) and name and "\0" not in name, "invalid relative path")
+    normalized = normalize_relative_path(name)
+    p = PurePosixPath(normalized)
+    require(not p.is_absolute() and ".." not in p.parts and not re.match(r"^[A-Za-z]:", normalized), "unsafe relative path")
     result = root / p
     require(result.resolve().is_relative_to(root.resolve()), "path escapes source directory")
     cursor = root
@@ -203,10 +215,10 @@ def zip_member_path(member):
         # zipfile has already decoded unflagged names as CP437. Keep that
         # decoding when the original bytes do not form valid UTF-8.
         try:
-            return name.encode("cp437").decode("utf-8")
+            name = name.encode("cp437").decode("utf-8")
         except UnicodeError:
             pass
-    return name
+    return name.replace("\\", "/")
 
 
 def prepare(args):
@@ -272,7 +284,7 @@ def prepare(args):
                 if any(p in EXCLUDED for p in PurePosixPath(name).parts):
                     continue
                 target = relative(source, name)
-                if member.is_dir():
+                if member.is_dir() or name.endswith("/"):
                     target.mkdir(parents=True, exist_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
