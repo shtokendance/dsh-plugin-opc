@@ -314,6 +314,26 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appDelete(slug: string, purgeVolumes: boolean, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.deleteApp(slug, purgeVolumes, expectedContextId)) }
   @Remote
+  async appDeleteWithOptions(slug: string, optionsJson: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.deleteApp(slug, JSON.parse(optionsJson), expectedContextId))
+  }
+  @Remote
+  async appCreateVolumeBackup(slug: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.createVolumeBackup(slug, expectedContextId))
+  }
+  @Remote
+  async appVolumeBackupsList(expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.listVolumeBackups(expectedContextId))
+  }
+  @Remote
+  async appSaveVolumeBackupDownload(id: string, filename: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.saveVolumeBackupDownload(id, filename, expectedContextId))
+  }
+  @Remote
+  async appDeleteVolumeBackup(id: string, expectedContextId: string): Promise<string> {
+    return JSON.stringify(await this.delivery.deleteVolumeBackup(id, expectedContextId))
+  }
+  @Remote
   async appRollback(slug: string, payloadJson: string, expectedContextId: string): Promise<string> {
     const parsed = JSON.parse(payloadJson)
     return JSON.stringify(await this.delivery.rollback(slug, Number(parsed.targetVersion ?? parsed.target_version ?? 0), String(parsed.reason ?? ''), expectedContextId))

@@ -714,7 +714,7 @@ export class AppDelivery {
     }
   }
   async platform(path: string, expected: string, options: { method?: string; body?: unknown; form?: FormData; query?: Record<string, string>; download?: boolean; stream?: boolean; signal?: AbortSignal } = {}): Promise<any> {
-    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|deliveries|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json|delivery\.json|confirmed-deployment\.json))?|deliveries(?:\/[a-f0-9-]+\/artifacts\/(?:app\.tar|skill\.zip|delivery\.json))?|database-schema|storage(?:\/backup)?|recheck|verify|rollback|migrate-data|config|config-values|runtime-management|requests\/[A-Za-z0-9_-]+(?:\/(?:assessment|rehearsal|probe|cancel))?))?)?$/.test(path)) throw new Error('不支持的应用操作')
+    if (!/^\/(?:check-slug|resources|dockerfile-templates|publish|deliveries|backups(?:\/[A-Za-z0-9_-]+(?:\/download)?)?|[a-z][a-z0-9-]*(?:\/(?:logs|versions(?:\/[0-9]+\/artifacts\/(?:app\.tar|skill\.zip|Dockerfile|manifest\.json|delivery\.json|confirmed-deployment\.json))?|deliveries(?:\/[a-f0-9-]+\/artifacts\/(?:app\.tar|skill\.zip|delivery\.json))?|database-schema|storage(?:\/backups?)?|recheck|verify|rollback|migrate-data|config|config-values|runtime-management|requests\/[A-Za-z0-9_-]+(?:\/(?:assessment|rehearsal|probe|cancel))?))?)?$/.test(path)) throw new Error('不支持的应用操作')
     const scope = this.scope(expected)
     const token = await this.core.auth.token(); scope.assertCurrent()
     const url = new URL('/integration/v1/apps' + (path === '/' ? '' : path), this.core.auth.http.base)
@@ -723,7 +723,7 @@ export class AppDelivery {
       headers: { Authorization: `Bearer ${token}`, ...(options.form ? {} : { 'Content-Type': 'application/json' }) },
       body: options.form ?? (options.body ? JSON.stringify(options.body) : undefined), redirect: 'error',
       signal: AbortSignal.any([scope.signal, ...(options.signal ? [options.signal] : []), AbortSignal.timeout(
-        path.endsWith('/rollback') ? 660_000 : path.endsWith('/storage/backup') ? 300_000 : options.form ? 180_000 : 30_000,
+        path.endsWith('/rollback') ? 660_000 : (path.endsWith('/storage/backup') || path.endsWith('/storage/backups')) ? 600_000 : options.form ? 180_000 : 30_000,
       )]) })
     scope.assertCurrent()
     if (response.ok && options.stream) return response
@@ -2314,7 +2314,7 @@ export class AppDelivery {
   private downloadTarget(slug: string, selection: AppDocument) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     if (selection.storage === true || typeof selection.mount === 'string' && selection.mount) {
-      return { path: `/${slug}/storage/backup`, filename: `${slug}-storage-backup.tar`,
+      return { path: `/${slug}/storage/backup`, filename: `${slug}-storage-backup.tar.gz`,
         query: selection.mount ? { mount: String(selection.mount) } : undefined }
     }
     const { version, artifact } = selection
@@ -2436,9 +2436,59 @@ export class AppDelivery {
     this.core.emit('skills-changed')
     return result
   }
-  async deleteApp(slug: string, purgeVolumes: boolean, expected: string) {
+  async createVolumeBackup(slug: string, expected: string) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
-    return this.platform(`/${slug}`, expected, { method: 'DELETE', query: purgeVolumes ? { purge_volumes: 'true' } : undefined })
+    return this.platform(`/${slug}/storage/backups`, expected, { method: 'POST', body: {} })
+  }
+  async listVolumeBackups(expected: string, all = false) {
+    return this.platform('/backups', expected, all ? { query: { all: 'true' } } : {})
+  }
+  async saveVolumeBackupDownload(id: string, filename: string, expected: string, downloads = join(homedir(), 'Downloads')) {
+    const cleanId = String(id || '').trim()
+    if (!cleanId) throw new Error('无效备份 ID')
+    const scope = this.scope(expected)
+    const safeName = (String(filename || '').trim() || `app-backup-${cleanId}.tar.gz`).replace(/[/\\]/g, '_')
+    await mkdir(downloads, { recursive: true, mode: 0o700 })
+    const temp = join(downloads, `.opc-${randomUUID()}.download`)
+    const response: Response = await this.platform(`/backups/${encodeURIComponent(cleanId)}/download`, expected, { stream: true })
+    if (!response.body) throw new Error('平台未返回备份文件内容')
+    try {
+      let bytes = 0
+      const counter = new Transform({ transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.length
+        callback(null, chunk)
+      } })
+      await pipeline(response.body, counter, createWriteStream(temp, { flags: 'wx', mode: 0o600 }), { signal: scope.signal })
+      if (!bytes) throw new Error('平台返回备份文件为空')
+      scope.assertCurrent()
+      const preferred = join(downloads, safeName)
+      let dest = preferred
+      try { await link(temp, dest) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        dest = join(downloads, `${randomUUID().slice(0, 8)}-${safeName}`)
+        await link(temp, dest)
+      }
+      return { path: dest, filename: safeName }
+    } finally { await rm(temp, { force: true }) }
+  }
+  async deleteVolumeBackup(id: string, expected: string) {
+    const cleanId = String(id || '').trim()
+    if (!cleanId) throw new Error('无效备份 ID')
+    return this.platform(`/backups/${encodeURIComponent(cleanId)}`, expected, { method: 'DELETE' })
+  }
+  async deleteApp(slug: string, optionsOrPurge: boolean | { purgeVolumes?: boolean; exportMode?: string; backupId?: string }, expected: string) {
+    if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
+    const opts = typeof optionsOrPurge === 'boolean'
+      ? { purgeVolumes: optionsOrPurge }
+      : (optionsOrPurge ?? {})
+    const query: Record<string, string> = {}
+    if (opts.purgeVolumes) query.purge_volumes = 'true'
+    if (opts.exportMode) query.export_mode = opts.exportMode
+    if (opts.backupId) query.backup_id = opts.backupId
+    return this.platform(`/${slug}`, expected, {
+      method: 'DELETE',
+      query: Object.keys(query).length ? query : undefined,
+    })
   }
   async rollback(slug: string, targetVersion: number, reason: string, expected: string) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug) || !Number.isInteger(targetVersion) || targetVersion <= 0) throw new Error('回滚参数无效')

@@ -1238,4 +1238,115 @@ export const appsCss = `
   color: var(--oa-muted);
   word-break: break-all;
 }
+.oa-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.oa-modal-card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--oa-panel);
+  border: 1px solid var(--oa-line);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.22);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.oa-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--oa-line);
+  background: var(--oa-paper);
+}
+.oa-modal-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.oa-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--oa-line);
+  background: var(--oa-paper);
+}
+.oa-table-box {
+  border: 1px solid var(--oa-line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--oa-panel);
+}
+.oa-table-head {
+  padding: 8px 12px;
+  background: var(--oa-paper);
+  border-bottom: 1px solid var(--oa-line);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--oa-muted);
+}
+.oa-table-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--oa-line);
+  font-size: 12px;
+}
+.oa-table-row:last-child {
+  border-bottom: none;
+}
+.oa-storage-table-head,
+.oa-storage-table-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) minmax(140px, 1.5fr) 76px 68px 80px 84px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  font-size: 12px;
+}
+.oa-storage-table-head {
+  background: var(--oa-paper);
+  border-bottom: 1px solid var(--oa-line);
+  font-weight: 600;
+  color: var(--oa-muted);
+}
+.oa-storage-table-row {
+  border-bottom: 1px solid var(--oa-line);
+}
+.oa-storage-table-row:last-child {
+  border-bottom: none;
+}
+.oa-radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--oa-line);
+  background: var(--oa-paper);
+  cursor: pointer;
+}
+.oa-radio-card.selected {
+  border-color: var(--oa-accent);
+  background: var(--oa-accent-soft);
+}
+.oa-radio-card.danger.selected {
+  border-color: var(--oa-danger);
+  background: var(--oa-danger-soft);
+}
+.oa-text-danger {
+  color: var(--oa-danger);
+}
 `
