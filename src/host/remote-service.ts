@@ -52,25 +52,32 @@ export async function checkNpmPackageUpdate(
   fetchFn: typeof fetch = fetch,
   registries: readonly string[] = NPM_UPDATE_REGISTRIES,
 ): Promise<{ currentVersion: string; latestVersion: string; hasUpdate: boolean }> {
-  for (const url of registries) {
-    try {
+  const results = await Promise.allSettled(
+    registries.map(async (url) => {
       const response = await fetchFn(url, {
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(4000),
       })
-      if (!response.ok) continue
+      if (!response.ok) return ''
       const data = await response.json() as { version?: unknown }
-      const latestVersion = typeof data?.version === 'string' ? data.version.trim() : ''
-      if (!latestVersion) continue
-      return {
-        currentVersion,
-        latestVersion,
-        hasUpdate: isNewerSemver(latestVersion, currentVersion),
-      }
-    } catch {
+      return typeof data?.version === 'string' ? data.version.trim() : ''
+    }),
+  )
+  let latestVersion = ''
+  for (const item of results) {
+    if (item.status !== 'fulfilled' || !item.value) continue
+    if (!latestVersion || isNewerSemver(item.value, latestVersion)) {
+      latestVersion = item.value
     }
   }
-  return { currentVersion, latestVersion: '', hasUpdate: false }
+  if (!latestVersion) {
+    return { currentVersion, latestVersion: '', hasUpdate: false }
+  }
+  return {
+    currentVersion,
+    latestVersion,
+    hasUpdate: isNewerSemver(latestVersion, currentVersion),
+  }
 }
 
 const execFileAsync = promisify(execFile)
@@ -386,13 +393,15 @@ export class OpcRemoteService extends TypertRemoteService {
   async checkPluginUpdate(): Promise<string> {
     const fromSrc = fileURLToPath(new URL('../../package.json', import.meta.url))
     const fromLib = fileURLToPath(new URL('../package.json', import.meta.url))
-    const target = import.meta.url.endsWith('/lib/index.js') ? fromLib : fromSrc
+    const candidates = import.meta.url.includes('/lib/') ? [fromLib, fromSrc] : [fromSrc, fromLib]
     let currentVersion = ''
-    try {
-      const pkg = JSON.parse(await readFile(target, 'utf8')) as { version?: string }
-      currentVersion = typeof pkg.version === 'string' ? pkg.version.trim() : ''
-    } catch {
-      currentVersion = ''
+    for (const target of candidates) {
+      try {
+        const pkg = JSON.parse(await readFile(target, 'utf8')) as { version?: string }
+        currentVersion = typeof pkg.version === 'string' ? pkg.version.trim() : ''
+        if (currentVersion) break
+      } catch {
+      }
     }
     if (!currentVersion) return JSON.stringify({ currentVersion: '', latestVersion: '', hasUpdate: false })
     return JSON.stringify(await checkNpmPackageUpdate(currentVersion))
