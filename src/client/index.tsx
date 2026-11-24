@@ -45,10 +45,10 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.plugin({ name: 'opc-enterprise-panels', inject: ['remote.opc', 'slots', 'sidebarRightTabs'], apply: registerPanels })
 }
 function registerPanels(ctx: Context): void {
-  const localeRuntime = (ctx as unknown as { locale?: DshLocaleRuntime }).locale
+  const localeRuntime = ctx.get('locale' as never) as DshLocaleRuntime | undefined
   if (localeRuntime) bindDshLocaleRuntime(localeRuntime)
-  ctx.inject(['locale'] as never, (child: unknown) => {
-    const loc = (child as { locale?: DshLocaleRuntime }).locale
+  ctx.inject(['locale'] as never, (child: Context) => {
+    const loc = child.get('locale' as never) as DshLocaleRuntime | undefined
     if (loc) bindDshLocaleRuntime(loc)
   })
   const wire = ctx.remote.opc
