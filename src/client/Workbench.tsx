@@ -279,13 +279,24 @@ const FAQ_ITEMS = [
   { q: '右侧边栏找不到 OPC 工作台入口', a: '在「插件 → 已安装插件」确认开关已打开，进入新会话再打开右侧栏；仍找不到可完整退出重启 DSH。' },
 ] as const
 
-export function WorkbenchHome({ onSelect, api }: { onSelect: (kind: ModuleKind) => void; api?: OpcApi }) {
+type UpdateInfo = { currentVersion: string; latestVersion: string; hasUpdate: boolean }
+
+let dismissedUpdateVersion = ''
+
+export function WorkbenchHome({ onSelect, api, visible = true, onOpenPluginDetail }: {
+  onSelect: (kind: ModuleKind) => void
+  api?: OpcApi
+  visible?: boolean
+  onOpenPluginDetail?: () => boolean
+}) {
   const heading = useId()
   const guideHeading = useId()
   const [guideOpen, setGuideOpen] = useState(false)
   const [guideTab, setGuideTab] = useState<HomeGuideTab>('apps')
   const [modalModule, setModalModule] = useState<ModuleKind | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; cap: string } | null>(null)
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
+  const [updateFallback, setUpdateFallback] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [images, setImages] = useState<Record<string, string>>({})
   const loadingImages = useRef(new Set<string>())
@@ -294,6 +305,24 @@ export function WorkbenchHome({ onSelect, api }: { onSelect: (kind: ModuleKind) 
   useEffect(() => () => {
     if (copyTimer.current) clearTimeout(copyTimer.current)
   }, [])
+
+  useEffect(() => {
+    if (!visible || !api?.checkPluginUpdate) return
+    let cancelled = false
+    void api.checkPluginUpdate().then(raw => {
+      if (cancelled) return
+      const parsed = JSON.parse(raw) as Partial<UpdateInfo>
+      if (parsed.hasUpdate && parsed.latestVersion && parsed.latestVersion !== dismissedUpdateVersion) {
+        setUpdateFallback(false)
+        setUpdateInfo({
+          currentVersion: parsed.currentVersion || PLUGIN_VERSION,
+          latestVersion: parsed.latestVersion,
+          hasUpdate: true,
+        })
+      }
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [api, visible])
 
   useEffect(() => {
     if (!api?.getGuideImage) return
@@ -313,15 +342,32 @@ export function WorkbenchHome({ onSelect, api }: { onSelect: (kind: ModuleKind) 
   }, [api, guideOpen, guideTab, modalModule, images])
 
   useEffect(() => {
-    if (!modalModule && !lightbox) return
+    if (!modalModule && !lightbox && !updateInfo) return
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (lightbox) setLightbox(null)
-      else setModalModule(null)
+      else if (modalModule) setModalModule(null)
+      else if (updateInfo) {
+        dismissedUpdateVersion = updateInfo.latestVersion
+        setUpdateInfo(null)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [modalModule, lightbox])
+  }, [modalModule, lightbox, updateInfo])
+
+  const dismissUpdateModal = () => {
+    if (updateInfo) dismissedUpdateVersion = updateInfo.latestVersion
+    setUpdateInfo(null)
+  }
+
+  const goToPluginUpdate = () => {
+    if (onOpenPluginDetail?.()) {
+      setUpdateInfo(null)
+      return
+    }
+    setUpdateFallback(true)
+  }
 
   const copyCommand = async (id: string, text: string) => {
     try {
@@ -540,6 +586,34 @@ export function WorkbenchHome({ onSelect, api }: { onSelect: (kind: ModuleKind) 
             <div className="opc-guide-lightbox-bar">
               <span>{lightbox.cap}</span>
               <button type="button" onClick={() => setLightbox(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {updateInfo && (
+        <div className="opc-guide-modal-backdrop" role="dialog" aria-modal="true" onClick={e => { if (e.target === e.currentTarget) dismissUpdateModal() }}>
+          <div className="opc-update-modal">
+            <div className="opc-guide-modal-head">
+              <strong>发现 OPC 插件新版本</strong>
+              <button type="button" className="opc-guide-modal-close" aria-label="关闭" onClick={dismissUpdateModal}>✕</button>
+            </div>
+            <div className="opc-update-versions">
+              {updateInfo.currentVersion && <span className="opc-update-ver-curr">当前 v{updateInfo.currentVersion}</span>}
+              <span aria-hidden="true">→</span>
+              <span className="opc-update-ver-next">最新 v{updateInfo.latestVersion}</span>
+            </div>
+            <p className="opc-update-desc">
+              新版本已发布到 npm，建议前往插件详情页更新，以获取最新功能与问题修复。
+            </p>
+            {updateFallback && (
+              <p className="opc-update-fallback" role="status">
+                请在左侧「插件」列表中找到 <code>dsh-plugin-opc</code> 进入详情页更新。
+              </p>
+            )}
+            <div className="opc-update-actions">
+              <button type="button" className="opc-update-btn-secondary" onClick={dismissUpdateModal}>稍后再说</button>
+              <button type="button" className="opc-update-btn-primary" onClick={goToPluginUpdate}>去更新</button>
             </div>
           </div>
         </div>

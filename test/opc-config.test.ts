@@ -9,6 +9,7 @@ import { AppDelivery } from '../src/host/app-delivery.ts'
 import { contextId } from '../src/host/context.ts'
 import { OpcCore } from '../src/host/core.ts'
 import { PlatformHttp } from '../src/host/http.ts'
+import { checkNpmPackageUpdate, isNewerSemver } from '../src/host/remote-service.ts'
 import {
   DEFAULT_APP_DEFAULT_PORT,
   DEFAULT_APP_DOMAIN_ROOT,
@@ -235,4 +236,30 @@ test('Updating OPC config hot-reloads unified platform gateway, auth session, an
     gwB.server.close()
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('isNewerSemver and checkNpmPackageUpdate detect updates with registry fallback', async () => {
+  assert.equal(isNewerSemver('0.1.58', '0.1.57'), true)
+  assert.equal(isNewerSemver('0.2.0', '0.1.99'), true)
+  assert.equal(isNewerSemver('1.0.0', '0.99.99'), true)
+  assert.equal(isNewerSemver('0.1.57', '0.1.57'), false)
+  assert.equal(isNewerSemver('0.1.56', '0.1.57'), false)
+  assert.equal(isNewerSemver('0.1.58', '0.1.58-rc.1'), true)
+  assert.equal(isNewerSemver('0.1.58-rc.1', '0.1.58'), false)
+
+  const hits: string[] = []
+  const update = await checkNpmPackageUpdate('0.1.57', async url => {
+    const key = String(url)
+    hits.push(key)
+    if (key.includes('mirror')) return new Response('error', { status: 502 })
+    return new Response(JSON.stringify({ version: '0.1.58' }), { status: 200 })
+  }, ['https://mirror.invalid/latest', 'https://official.invalid/latest'])
+
+  assert.deepEqual(hits, ['https://mirror.invalid/latest', 'https://official.invalid/latest'])
+  assert.deepEqual(update, { currentVersion: '0.1.57', latestVersion: '0.1.58', hasUpdate: true })
+
+  const offline = await checkNpmPackageUpdate('0.1.57', async () => {
+    throw new Error('offline')
+  }, ['https://mirror.invalid/latest'])
+  assert.deepEqual(offline, { currentVersion: '0.1.57', latestVersion: '', hasUpdate: false })
 })
