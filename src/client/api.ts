@@ -70,6 +70,35 @@ export interface AppStorageOverview {
   mounts: AppStorageMountDetail[]
 }
 
+export interface AppVolumeBackupMount {
+  container_path: string
+  archive_path: string
+  file_count: number
+  size_bytes: number
+  size_human: string
+}
+
+export interface AppVolumeBackupItem {
+  id: string
+  app_slug: string
+  app_name: string
+  app_version: number
+  owner_id: string
+  filename: string
+  size_bytes: number
+  size_human: string
+  file_count: number
+  sha256: string
+  status: string
+  app_deleted: boolean
+  downloaded: boolean
+  downloaded_at?: string
+  expires_at: string
+  remain_days: number
+  created_at: string
+  mounts: AppVolumeBackupMount[]
+}
+
 export interface AppVersionItem {
   config_revision?: string
   id: string
@@ -288,6 +317,11 @@ export interface OpcApi {
   appRuntimeChange?(slug: string, commandJson: string, context: string): Promise<string>
   appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>
   appRollback?(slug: string, payloadJson: string, context: string): Promise<string>
+  appDeleteWithOptions?(slug: string, optionsJson: string, context: string): Promise<string>
+  appCreateVolumeBackup?(slug: string, context: string): Promise<string>
+  appVolumeBackupsList?(context: string): Promise<string>
+  appSaveVolumeBackupDownload?(id: string, filename: string, context: string): Promise<string>
+  appDeleteVolumeBackup?(id: string, context: string): Promise<string>
   state(): Promise<string>
   watchState(signal: AbortSignal): AsyncIterable<string>
   startLogin(): Promise<string>

@@ -7,12 +7,15 @@ import type {
   AppStorageOverview,
   AppStorageMountDetail,
   AppVersionItem,
+  AppVolumeBackupItem,
   DeployedApp,
   OpcApi,
   ResourceSummary,
 } from './api.ts'
 import type { ConfigChatAction, ConfigChatFrame, ConfigChatResult, ConfigChatRow } from '../config-chat.ts'
+import { AppDeleteModal } from './AppDeleteModal.tsx'
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
+import { DeletedAppBackupsView } from './DeletedAppBackupsView.tsx'
 import {
   getConfigPublishIssues,
   mergeJobConfigs,
@@ -30,7 +33,7 @@ import { toAppSlug } from './appSlug.ts'
 import { appsCss } from './appsStyles.ts'
 import { DEFAULT_PAGE_SIZE, Pagination, paginateItems, paginationStyles } from './Pagination.tsx'
 
-type ViewMode = 'list' | 'wizard' | 'detail'
+type ViewMode = 'list' | 'wizard' | 'detail' | 'backups'
 type WizardStep = 1 | 2 | 3 | 4
 type ConfigSubTab = 'configs' | 'skill' | 'dockerfile' | 'mounts'
 type RuntimeOperation = {
@@ -667,6 +670,9 @@ export function AppsPanel({
   const formId = useId()
   const [versions, setVersions] = useState<AppVersionItem[]>([])
   const [storageOverview, setStorageOverview] = useState<AppStorageOverview | null>(null)
+  const [volumeBackups, setVolumeBackups] = useState<AppVolumeBackupItem[]>([])
+  const [loadingBackups, setLoadingBackups] = useState(false)
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [editPort, setEditPort] = useState<string>('8080')
   const [editConfigs, setEditConfigs] = useState<AppConfigItem[]>([])
   const [detailLogsSubTab, setDetailLogsSubTab] = useState<LogSubTab>('runtime')
@@ -688,16 +694,31 @@ export function AppsPanel({
     }
   }, [])
 
+  const loadVolumeBackups = useCallback(async () => {
+    if (!api.appVolumeBackupsList) return
+    setLoadingBackups(true)
+    try {
+      const raw = await api.appVolumeBackupsList(contextId)
+      const parsed = parseJson<{ backups?: AppVolumeBackupItem[] }>(raw, {})
+      setVolumeBackups(Array.isArray(parsed.backups) ? parsed.backups : [])
+    } catch {
+      setVolumeBackups([])
+    } finally {
+      setLoadingBackups(false)
+    }
+  }, [api, contextId])
+
   const loadWorkspaceData = useCallback(
     async (silent = false) => {
       if (!silent) setLoadingList(true)
       try {
-        const [catalogRaw, jobsRaw, resourcesRaw, configRaw, modelsRaw] = await Promise.all([
+        const [catalogRaw, jobsRaw, resourcesRaw, configRaw, modelsRaw, backupsRaw] = await Promise.all([
           api.appCatalog(contextId),
           api.appList(contextId).catch(() => '[]'),
           api.appResources(contextId).catch(() => '{"resources":[]}'),
           api.appOpcConfig?.(contextId).catch(() => '{}') ?? Promise.resolve('{}'),
           api.appModels(contextId).catch(() => '[]'),
+          api.appVolumeBackupsList?.(contextId).catch(() => '{"backups":[]}') ?? Promise.resolve('{"backups":[]}'),
         ])
         const catalogData = parseJson<{ apps?: DeployedApp[] } | null>(catalogRaw, null)
         if (!Array.isArray(catalogData?.apps) || catalogData.apps.some(app => typeof app?.slug !== 'string')) {
@@ -707,6 +728,7 @@ export function AppsPanel({
         const resData = parseJson<{ resources?: ResourceSummary[] }>(resourcesRaw, { resources: [] })
         const cfg = parseJson<Partial<OpcRuntimeConfig>>(configRaw, {})
         const models = parseJson<AppModelGroup[]>(modelsRaw, [])
+        const backupsData = parseJson<{ backups?: AppVolumeBackupItem[] }>(backupsRaw, { backups: [] })
 
         setAppDirectory({
           apps: catalogData.apps,
@@ -714,6 +736,7 @@ export function AppsPanel({
           loaded: true,
         })
         setResources(Array.isArray(resData.resources) ? resData.resources : [])
+        setVolumeBackups(Array.isArray(backupsData.backups) ? backupsData.backups : [])
         setOpcConfig({
           appDomainRoot: cfg.appDomainRoot || DEFAULT_OPC_CONFIG.appDomainRoot,
           defaultPort:
@@ -1867,6 +1890,13 @@ export function AppsPanel({
           <p className="oa-subtitle">企微登录即可部署。应用列表对所有已登录用户开放。</p>
         </div>
         <div className="oa-app-list-toolbar">
+          {api.appVolumeBackupsList && (
+            <button type="button" className="oa-btn" onClick={() => { void loadVolumeBackups(); setViewMode('backups') }}>
+              <AppIcon name="archive" size={14} />
+              <span>数据备份</span>
+              {volumeBackups.length > 0 && <span className="oa-pill oa-pill-accent">{volumeBackups.length}</span>}
+            </button>
+          )}
           <button type="button" className="oa-btn" disabled={loadingList} onClick={() => void loadWorkspaceData(false)}>
             <AppIcon name="refresh" size={14} className={loadingList ? 'oa-spin' : ''} />
             <span>刷新</span>
@@ -3049,6 +3079,12 @@ export function AppsPanel({
                 <span>发布新版本</span>
               </button>
             )}
+            {!readOnly && api.appDeleteWithOptions && (
+              <button type="button" className="oa-btn oa-btn-sm oa-btn-danger" onClick={() => setDeleteModalOpen(true)}>
+                <AppIcon name="trash" size={13} />
+                <span>删除应用</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -3105,67 +3141,29 @@ export function AppsPanel({
             </div>
           )}
 
-          {/* Quick Overview Cards */}
-          <div className="oa-grid-2">
-            <div className="oa-form-card">
-              <div className="oa-subcard-head">
-                <span>服务访问与运行环境</span>
-                {detailApp.app_url && (
-                  <a href={detailApp.app_url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-xs">
-                    <AppIcon name="external" size={12} />
-                    <span>打开应用</span>
-                  </a>
-                )}
+          <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
+                <span className="oa-mono" style={{ fontSize: 12.5, color: '#0f172a' }}>{detailApp.app_url}</span>
+                <button type="button" className="oa-btn oa-btn-xs" onClick={() => void copyText('detail-url', detailApp.app_url)}>
+                  <AppIcon name={copiedKey === 'detail-url' ? 'check' : 'copy'} size={11} />
+                </button>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12.5, color: '#334155' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ color: '#64748b' }}>访问地址：</span>
-                  <span className="oa-mono">{detailApp.app_url}</span>
-                  <button type="button" className="oa-btn oa-btn-xs" onClick={() => void copyText('detail-url', detailApp.app_url)}>
-                    <AppIcon name={copiedKey === 'detail-url' ? 'check' : 'copy'} size={11} />
-                  </button>
-                </div>
-                <div>
-                  <span style={{ color: '#64748b' }}>容器端口：</span>
-                  <span className="oa-mono">{detailApp.container_port ?? opcConfig.defaultPort}</span>
-                  <span style={{ color: '#64748b', marginLeft: 14 }}>语言运行时：</span>
-                  <span>
-                    {detailApp.language || '未知'} {detailApp.runtime_version || ''}
-                  </span>
-                </div>
-                <div style={{ color: '#64748b', fontSize: 12 }}>
-                  创建时间：{formatDateTime(detailApp.created_at)} · 更新：{formatDateTime(detailApp.updated_at)}
-                </div>
-              </div>
+              {detailApp.app_url && (
+                <a href={detailApp.app_url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-xs">
+                  <AppIcon name="external" size={12} />
+                  <span>打开应用</span>
+                </a>
+              )}
             </div>
-
-            <div className="oa-form-card">
-              <div className="oa-subcard-head">
-                <span>智能体技能与业务描述</span>
-                {detailApp.skill_synced !== undefined && (
-                  <span className={`oa-pill ${detailApp.skill_synced ? 'oa-pill-ok' : 'oa-pill-warn'}`}>
-                    {detailApp.skill_synced ? '技能已同步' : '待同步'}
-                  </span>
-                )}
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12.5, color: '#334155' }}>
-                <div>
-                  <span style={{ color: '#64748b' }}>技能标识：</span>
-                  <span className="oa-code">{detailApp.skill_name || `app-${detailApp.slug}`}</span>
-                </div>
-                <div style={{ color: '#475569' }}>{detailApp.description || '暂无应用描述'}</div>
-                {matchingJob && !readOnly && matchingJob.status === 'awaiting_page_verification' && (
-                  <div style={{ marginTop: 4 }}>
-                    <button
-                      type="button"
-                      className="oa-btn oa-btn-xs oa-btn-primary"
-                      onClick={() => void resumeWizardJob(matchingJob, 4)}
-                    >
-                      前往确认页面并启用技能
-                    </button>
-                  </div>
-                )}
-              </div>
+            <div style={{ fontSize: 13, lineHeight: 1.6, color: '#334155' }}>
+              {detailApp.description || '暂无应用描述'}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px 18px', paddingTop: 8, borderTop: '1px solid #e2e8f0', fontSize: 12, color: '#64748b' }}>
+              <span>端口：<strong className="oa-mono" style={{ color: '#0f172a' }}>{detailApp.container_port ?? opcConfig.defaultPort}</strong></span>
+              <span>运行时：<strong style={{ color: '#0f172a' }}>{detailApp.language || '未知'} {detailApp.runtime_version || ''}</strong></span>
+              <span>创建：{formatDateTime(detailApp.created_at)}</span>
+              <span>更新：{formatDateTime(detailApp.updated_at)}</span>
             </div>
           </div>
 
@@ -3193,15 +3191,43 @@ export function AppsPanel({
 
           {!readOnly && <div id={`${formId}-detail-panel`} role="tabpanel" aria-labelledby={`${formId}-tab-${detailTab}`} tabIndex={0}
             className={logView ? 'oa-detail-tab-panel oa-detail-log-panel' : 'oa-detail-tab-panel'}>
-          {/* Tab 1: Artifacts & Skill */}
           {detailTab === 'artifacts' && (
-            <AppDeliveryArtifacts
-              api={api}
-              contextId={contextId}
-              slug={detailApp.slug}
-              version={detailApp.current_version}
-              onOpenVerification={job => void resumeWizardJob(job, 4)}
-            />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div className="oa-form-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <strong style={{ fontSize: 14, color: '#0f172a' }}>智能体技能</strong>
+                    <span className="oa-code">{detailApp.skill_name || `app-${detailApp.slug}`}</span>
+                    {detailApp.skill_synced !== undefined && (
+                      <span className={`oa-pill ${detailApp.skill_synced ? 'oa-pill-ok' : 'oa-pill-warn'}`}>
+                        {detailApp.skill_synced ? '技能已同步' : '待同步'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="oa-hint">
+                    {detailApp.skill_synced
+                      ? '已安装至本地工作台，可在对话中直接调用该应用能力。'
+                      : '应用页面确认完成后即可自动同步同名本地技能。'}
+                  </div>
+                </div>
+                {matchingJob && !readOnly && matchingJob.status === 'awaiting_page_verification' && (
+                  <button
+                    type="button"
+                    className="oa-btn oa-btn-sm oa-btn-primary"
+                    onClick={() => void resumeWizardJob(matchingJob, 4)}
+                  >
+                    前往确认页面并启用技能
+                  </button>
+                )}
+              </div>
+              <AppDeliveryArtifacts
+                api={api}
+                contextId={contextId}
+                slug={detailApp.slug}
+                version={detailApp.current_version}
+                onOpenVerification={job => void resumeWizardJob(job, 4)}
+              />
+            </div>
           )}
 
           {/* Tab 2: Configs */}
@@ -3301,22 +3327,31 @@ export function AppsPanel({
             </div>
           )}
 
-          {/* Tab 3: Persistent Storage */}
           {detailTab === 'storage' && (
             <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-                <div>
-                  <strong style={{ fontSize: 14, color: '#0f172a' }}>持久化数据卷与文件备份</strong>
-                  <div className="oa-hint">应用数据库、上传附件及业务持久化目录将在版本升级与重启时保留。</div>
+                <div className="oa-grid-3" style={{ flex: 1, minWidth: 300 }}>
+                  <div className="oa-subcard">
+                    <div className="oa-hint">持久化挂载点</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? `${storageOverview.mounts_count} 个` : '—'}</div>
+                  </div>
+                  <div className="oa-subcard">
+                    <div className="oa-hint">文件总数</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? storageOverview.total_files : '—'}</div>
+                  </div>
+                  <div className="oa-subcard">
+                    <div className="oa-hint">总占用空间</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? storageOverview.total_human : '—'}</div>
+                  </div>
                 </div>
-                {storageOverview && storageOverview.source !== 'swarm' && storageOverview.mounts_count > 0 && (
+                {storageOverview && storageOverview.mounts_count > 0 && (
                   <button
                     type="button"
                     className="oa-btn oa-btn-sm"
                     onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true }, '全部存储卷备份')}
                   >
                     <AppIcon name="archive" size={13} />
-                    <span>下载全部存储备份</span>
+                    <span>导出全部挂载卷</span>
                   </button>
                 )}
               </div>
@@ -3331,63 +3366,53 @@ export function AppsPanel({
                       <div className="oa-hint">资源 {storageOverview.object_storage.resource_id} · Bucket <code>{storageOverview.object_storage.bucket}</code></div>
                     </div>
                   )}
-                  <div className="oa-grid-3">
-                    <div className="oa-subcard">
-                      <div className="oa-hint">挂载卷数量</div>
-                      <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview.mounts_count}</div>
-                    </div>
-                    <div className="oa-subcard">
-                      <div className="oa-hint">存储文件总数</div>
-                      <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview.source === 'swarm' ? '—' : storageOverview.total_files}</div>
-                    </div>
-                    <div className="oa-subcard">
-                      <div className="oa-hint">已占用空间</div>
-                      <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview.total_human}</div>
-                    </div>
-                  </div>
 
                   {storageOverview.mounts.length === 0 ? (
                     <div className="oa-hint">此应用没有目录挂载。</div>
                   ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      {storageOverview.mounts.map(m => (
-                        <div key={m.name} className="oa-subcard">
-                          <div className="oa-subcard-head">
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              <strong style={{ color: '#0f172a' }}>{m.name}</strong>
-                              <span className="oa-code">{m.container_path}</span>
-                              {m.seed_protected && <span className="oa-pill oa-pill-ok">初始种子受保护</span>}
-                              {m.status && <span className="oa-pill">{m.status}</span>}
+                    <div className="oa-table-box">
+                      <div className="oa-storage-table-head">
+                        <span>容器挂载路径</span>
+                        <span>用途</span>
+                        <span style={{ textAlign: 'center' }}>状态</span>
+                        <span style={{ textAlign: 'right' }}>文件数</span>
+                        <span style={{ textAlign: 'right' }}>大小</span>
+                        <span style={{ textAlign: 'right' }}>操作</span>
+                      </div>
+                      {storageOverview.mounts.map(m => {
+                        const statusText = m.status === 'mounted' ? '已挂载' : m.status === 'pending' ? '准备中' : m.status === 'mismatch' ? '不匹配' : m.status === 'missing' ? '未挂载' : (m.status || '-')
+                        const statusClass = m.status === 'mounted' ? 'oa-pill-ok' : m.status === 'pending' ? 'oa-pill-warn' : m.status === 'mismatch' || m.status === 'missing' ? 'oa-pill-danger' : ''
+                        return (
+                          <div key={m.name} className="oa-storage-table-row">
+                            <div style={{ minWidth: 0 }}>
+                              <div className="oa-mono" style={{ fontWeight: 600, color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.container_path}>
+                                {m.container_path}
+                              </div>
+                              <div className="oa-hint oa-mono" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.storage_location || m.host_path || m.volume_name || ''}>
+                                {m.resource_id ? `${m.resource_id} · ` : ''}{m.name}
+                              </div>
                             </div>
-                            {storageOverview.source !== 'swarm' && (
+                            <div className="oa-hint" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.purpose || ''}>
+                              {m.purpose || '-'}
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                              <span className={`oa-pill ${statusClass}`}>{statusText}</span>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>{m.file_count ?? 0}</div>
+                            <div style={{ textAlign: 'right', fontWeight: 500 }}>{m.size_human ?? formatFileSize(m.size_bytes)}</div>
+                            <div style={{ textAlign: 'right' }}>
                               <button
                                 type="button"
                                 className="oa-btn oa-btn-xs"
                                 onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, `卷 ${m.name} 备份`)}
                               >
-                                下载此卷备份
+                                <AppIcon name="download" size={11} />
+                                <span>下载</span>
                               </button>
-                            )}
-                          </div>
-                          <div className="oa-hint">
-                            大小：{m.size_human ?? formatFileSize(m.size_bytes)}
-                            {storageOverview.source === 'swarm' ? '' : ` · 文件数：${m.file_count ?? 0}`}
-                            {m.resource_id ? ` · 资源：${m.resource_id}` : ''}
-                            {m.storage_location ? ` · OSS：${m.storage_location}`
-                              : m.host_path ? ` · 路径：${m.host_path}` : m.volume_name ? ` · 卷：${m.volume_name}` : ''}
-                            {m.purpose ? ` · 用途：${m.purpose}` : ''}
-                          </div>
-                          {m.sample_files && m.sample_files.length > 0 && (
-                            <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                              {m.sample_files.slice(0, 6).map(sf => (
-                                <span key={sf} className="oa-code">
-                                  {sf}
-                                </span>
-                              ))}
                             </div>
-                          )}
-                        </div>
-                      ))}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </>
@@ -3614,6 +3639,36 @@ export function AppsPanel({
         : renderAppListView())}
       {viewMode === 'wizard' && renderWizardView()}
       {viewMode === 'detail' && renderDetailView()}
+      {viewMode === 'backups' && (
+        <DeletedAppBackupsView
+          api={api}
+          contextId={contextId}
+          backups={volumeBackups}
+          loading={loadingBackups}
+          onBack={() => setViewMode('list')}
+          onRefresh={loadVolumeBackups}
+        />
+      )}
+      {deleteModalOpen && detailApp && (
+        <AppDeleteModal
+          api={api}
+          contextId={contextId}
+          app={detailApp}
+          storageOverview={storageOverview}
+          onClose={() => setDeleteModalOpen(false)}
+          onDeleted={({ name, backup }) => {
+            setDeleteModalOpen(false)
+            setDetailApp(null)
+            setViewMode('list')
+            setBannerNotice(
+              backup
+                ? `应用「${name}」已彻底删除，挂载卷归档已保留在「数据备份」中（30 天）。`
+                : `应用「${name}」已彻底删除。`
+            )
+            void loadWorkspaceData(true)
+          }}
+        />
+      )}
       {runtimePanel && (
         <div className="oa-runtime-backdrop">
           <section className="oa-form-card oa-runtime-panel" role="dialog" aria-modal="true" aria-labelledby={`${formId}-runtime-title`}
