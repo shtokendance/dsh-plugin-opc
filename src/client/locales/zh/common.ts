@@ -11,6 +11,7 @@ export const common = {
   "common.notice.warning": "警告提示",
   "common.notice.notice": "提示信息",
   "common.notice.error": "错误提示",
+  "common.notice.success": "操作成功",
   "common.pagination.pagination": "列表分页",
   "common.pagination.itemsPage": "共 {total} 项 · 第 {page} / {pages} 页",
   "common.pagination.itemsPerPage": "每页显示条数",

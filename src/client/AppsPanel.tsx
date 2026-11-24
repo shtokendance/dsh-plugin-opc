@@ -1940,15 +1940,12 @@ export function AppsPanel({
         onClose={() => setBannerError(null)}
       />
 
-      {bannerNotice && (
-        <div role="status" className="oa-alert oa-alert-ok">
-          <AppIcon name="check" size={16} />
-          <div style={{ flex: 1 }}>{bannerNotice}</div>
-          <button type="button" className="oa-btn oa-btn-xs" onClick={() => setBannerNotice(null)}>
-            {t("common.close")}
-          </button>
-        </div>
-      )}
+      <NoticeModal
+        open={Boolean(bannerNotice)}
+        variant="success"
+        message={bannerNotice || ''}
+        onClose={() => setBannerNotice(null)}
+      />
 
       {linkedListJob && showTaskBanner(linkedListJob, knownApps) && (
         <div className="oa-draft-banner">
@@ -2182,15 +2179,12 @@ export function AppsPanel({
             onClose={() => setWizardError(null)}
           />
 
-          {wizardNotice && (
-            <div role="status" className="oa-alert oa-alert-ok">
-              <AppIcon name="check" size={16} />
-              <div style={{ flex: 1 }}>{wizardNotice}</div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setWizardNotice(null)}>
-                关闭
-              </button>
-            </div>
-          )}
+          <NoticeModal
+            open={Boolean(wizardNotice)}
+            variant="success"
+            message={wizardNotice || ''}
+            onClose={() => setWizardNotice(null)}
+          />
 
           {/* STEP 1 */}
           {wizardStep === 1 && (
@@ -3125,23 +3119,19 @@ export function AppsPanel({
             onClose={() => setDetailError(null)}
           />
 
-          {detailNotice && (
-            <div role="status" className="oa-alert oa-alert-ok">
-              <AppIcon name="check" size={16} />
-              <div style={{ flex: 1 }}>{detailNotice}</div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailNotice(null)}>
-                {t("common.close")}
-              </button>
-            </div>
-          )}
+          <NoticeModal
+            open={Boolean(detailNotice)}
+            variant="success"
+            message={detailNotice || ''}
+            onClose={() => setDetailNotice(null)}
+          />
 
-          {lastHealthCheck?.ok && !unhealthy && (
-            <div className="oa-health-result oa-alert oa-alert-ok" role="status">
-              <AppIcon name="check" size={16} />
-              <div>{lastHealthCheck.message}</div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailHealthCheck(null)}>{t("common.close")}</button>
-            </div>
-          )}
+          <NoticeModal
+            open={Boolean(lastHealthCheck?.ok && !unhealthy)}
+            variant="success"
+            message={lastHealthCheck?.message || ''}
+            onClose={() => setDetailHealthCheck(null)}
+          />
 
           <NoticeModal
             open={Boolean(lastHealthCheck?.ok === false)}

@@ -337,11 +337,12 @@ export function OpcSettingsPanel({
         message={error}
         onClose={() => setError('')}
       />
-      {notice && (
-        <div className={notice.kind === 'ok' ? 'opc-settings-banner-ok' : 'opc-settings-banner-info'}>
-          {notice.text}
-        </div>
-      )}
+      <NoticeModal
+        open={Boolean(notice)}
+        variant={notice?.kind === 'ok' ? 'success' : 'info'}
+        message={notice?.text || ''}
+        onClose={() => setNotice(null)}
+      />
 
       <section className="opc-settings-card">
         <div className="opc-settings-card-head">
