@@ -3,6 +3,7 @@ import { labels, OpcIcon } from './branding.tsx'
 import React, { useEffect } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -12,7 +13,7 @@ import type { OpcApi } from './api.ts'
 import { registerAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { modules, readWorkbenchPage, workbenchKind, workbenchTitle, type ModuleKind } from './Workbench.tsx'
 
-type WorkbenchBodyProps = Pick<React.ComponentProps<typeof Panel>, 'api' | 'sessionId' | 'prepareAnalysisNavigation'> &
+type WorkbenchBodyProps = Pick<React.ComponentProps<typeof Panel>, 'api' | 'sessionId' | 'prepareAnalysisNavigation' | 'onOpenPluginDetail'> &
   PropsRuntime<'sidebar.right.pane.tab'>
 
 function WorkbenchBody({ useTabInfo, ...props }: WorkbenchBodyProps) {
@@ -112,8 +113,20 @@ function registerPanels(ctx: Context): void {
     listMcpServices: () => unwrap(wire.listMcpServices()),
     invokeMcpTool: (...args) => unwrap(wire.invokeMcpTool(...args)),
     decideDebugInvocation: (...args) => unwrap(wire.decideDebugInvocation(...args)),
+    getGuideImage: (...args) => unwrap(wire.getGuideImage!(...args)),
+    checkPluginUpdate: () => unwrap(wire.checkPluginUpdate!()),
   }
   ctx.inject(['inputTriggers'], child => registerMentions(child, api))
+  let openPluginDetail: (() => void) | undefined
+  ctx.inject(['pluginNavigation'], child => {
+    openPluginDetail = () => child.pluginNavigation.openBundle('dsh-plugin-opc')
+    return () => { openPluginDetail = undefined }
+  })
+  const onOpenPluginDetail = () => {
+    if (!openPluginDetail) return false
+    openPluginDetail()
+    return true
+  }
   const prepareAnalysisNavigation = registerAnalysisNavigation(ctx, api)
   const id = 'dsh-plugin-opc/workbench'
   ctx.effect(() => ctx.sidebarRightTabs.register({
@@ -125,7 +138,7 @@ function registerPanels(ctx: Context): void {
   )))
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: id,
-    inject: sessionId => ({ api, sessionId: String(sessionId), prepareAnalysisNavigation }),
+    inject: sessionId => ({ api, sessionId: String(sessionId), prepareAnalysisNavigation, onOpenPluginDetail }),
   }, WorkbenchBody)))
   for (const { kind } of modules) {
     const legacyId = `dsh-plugin-opc/${kind}`

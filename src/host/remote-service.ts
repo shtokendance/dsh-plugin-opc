@@ -23,6 +23,56 @@ const GUIDE_IMAGE_ALLOWLIST = new Set([
   '25-app-login-page.jpg',
 ])
 
+const NPM_UPDATE_REGISTRIES = [
+  'https://registry.npmmirror.com/dsh-plugin-opc/latest',
+  'https://registry.npmjs.org/dsh-plugin-opc/latest',
+] as const
+
+export function isNewerSemver(latest: string, current: string): boolean {
+  const parse = (raw: string) => {
+    const cleaned = raw.trim().replace(/^v/i, '')
+    const [core, pre = ''] = cleaned.split('-', 2)
+    const parts = core.split('.').map(part => Number.parseInt(part, 10))
+    if (parts.length < 3 || parts.some(n => !Number.isFinite(n) || n < 0)) return null
+    return { major: parts[0], minor: parts[1], patch: parts[2], pre }
+  }
+  const next = parse(latest)
+  const curr = parse(current)
+  if (!next || !curr) return false
+  if (next.major !== curr.major) return next.major > curr.major
+  if (next.minor !== curr.minor) return next.minor > curr.minor
+  if (next.patch !== curr.patch) return next.patch > curr.patch
+  if (!next.pre && curr.pre) return true
+  if (next.pre && !curr.pre) return false
+  return next.pre > curr.pre
+}
+
+export async function checkNpmPackageUpdate(
+  currentVersion: string,
+  fetchFn: typeof fetch = fetch,
+  registries: readonly string[] = NPM_UPDATE_REGISTRIES,
+): Promise<{ currentVersion: string; latestVersion: string; hasUpdate: boolean }> {
+  for (const url of registries) {
+    try {
+      const response = await fetchFn(url, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(4000),
+      })
+      if (!response.ok) continue
+      const data = await response.json() as { version?: unknown }
+      const latestVersion = typeof data?.version === 'string' ? data.version.trim() : ''
+      if (!latestVersion) continue
+      return {
+        currentVersion,
+        latestVersion,
+        hasUpdate: isNewerSemver(latestVersion, currentVersion),
+      }
+    } catch {
+    }
+  }
+  return { currentVersion, latestVersion: '', hasUpdate: false }
+}
+
 const execFileAsync = promisify(execFile)
 
 export type PickSourceFolderResult = { path?: string; cancelled?: boolean; unsupported?: boolean }
@@ -311,6 +361,21 @@ export class OpcRemoteService extends TypertRemoteService {
     } catch {
       return ''
     }
+  }
+  @Remote
+  async checkPluginUpdate(): Promise<string> {
+    const fromSrc = fileURLToPath(new URL('../../package.json', import.meta.url))
+    const fromLib = fileURLToPath(new URL('../package.json', import.meta.url))
+    const target = import.meta.url.endsWith('/lib/index.js') ? fromLib : fromSrc
+    let currentVersion = ''
+    try {
+      const pkg = JSON.parse(await readFile(target, 'utf8')) as { version?: string }
+      currentVersion = typeof pkg.version === 'string' ? pkg.version.trim() : ''
+    } catch {
+      currentVersion = ''
+    }
+    if (!currentVersion) return JSON.stringify({ currentVersion: '', latestVersion: '', hasUpdate: false })
+    return JSON.stringify(await checkNpmPackageUpdate(currentVersion))
   }
   @Remote
   async state(): Promise<string> {

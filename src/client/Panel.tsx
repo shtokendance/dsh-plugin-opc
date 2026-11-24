@@ -886,13 +886,14 @@ const css = `
 }
 `
 
-export function Panel({ api, sessionId, requestedPage, navigationRevision, visible = true, prepareAnalysisNavigation }: {
+export function Panel({ api, sessionId, requestedPage, navigationRevision, visible = true, prepareAnalysisNavigation, onOpenPluginDetail }: {
   api: OpcApi
   sessionId: string
   requestedPage?: PanelKind
   navigationRevision: number
   visible?: boolean
   prepareAnalysisNavigation?: PrepareAnalysisNavigation
+  onOpenPluginDetail?: () => boolean
 }) {
   const [kind, setKind] = useState<PanelKind>(requestedPage ?? 'home')
   const [appsOpened, setAppsOpened] = useState(requestedPage === 'apps')
@@ -1100,7 +1101,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
       </div>}
       {state.loginError && <p role="alert" className="error">{state.loginError.message}</p>}
     </div> : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
-      {kind === 'home' && <WorkbenchHome onSelect={selectPage} api={api} />}
+      {kind === 'home' && <WorkbenchHome onSelect={selectPage} api={api} visible={visible} onOpenPluginDetail={onOpenPluginDetail} />}
       {/* Apps View */}
       {appsOpened && appContextId && (
         <div className="opc-workbench-apps" hidden={kind !== 'apps'}>
