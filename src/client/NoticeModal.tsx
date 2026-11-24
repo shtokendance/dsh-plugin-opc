@@ -17,7 +17,7 @@ export function NoticeModal({
   onClose: () => void
   actions?: React.ReactNode
 }) {
-  const { tr } = useI18n()
+  const { t } = useI18n()
 
   useEffect(() => {
     if (!open) return
@@ -32,10 +32,10 @@ export function NoticeModal({
 
   const defaultTitle =
     variant === 'warning'
-      ? tr('警告提示', 'Warning')
+      ? t("common.notice.warning")
       : variant === 'info'
-        ? tr('提示信息', 'Notice')
-        : tr('错误提示', 'Error')
+        ? t("common.notice.notice")
+        : t("common.notice.error")
 
   const accentColor =
     variant === 'warning' ? '#d97706' : variant === 'info' ? '#2563eb' : '#dc2626'
@@ -91,7 +91,7 @@ export function NoticeModal({
           <button
             type="button"
             onClick={onClose}
-            aria-label={tr('关闭', 'Close')}
+            aria-label={t("common.close")}
             style={{
               padding: '4px 10px',
               borderRadius: 6,
@@ -102,7 +102,7 @@ export function NoticeModal({
               cursor: 'pointer',
             }}
           >
-            {tr('关闭', 'Close')}
+            {t("common.close")}
           </button>
         </div>
 
@@ -147,7 +147,7 @@ export function NoticeModal({
               cursor: 'pointer',
             }}
           >
-            {tr('关闭', 'Close')}
+            {t("common.close")}
           </button>
         </div>
       </div>

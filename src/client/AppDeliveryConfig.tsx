@@ -6,79 +6,47 @@ import {
   needsContainerBindWarning,
   type ConfigPublishIssue,
 } from './app-config-helpers.ts'
-import { translatePair, useI18n, type ClientLocale } from './i18n.tsx'
+import { translate, useI18n, type ClientLocale, type MessageKey } from './i18n.tsx'
 
 export { isContainerDefaultConfig, needsConnectionDecision, needsContainerBindWarning }
 
-const namesZh: Record<string, string> = {
-  DB_DSN: '业务数据库连接',
-  DATABASE_URL: '业务数据库连接',
-  CONNECTION_STRING: '数据库连接',
-  PGHOST: 'PostgreSQL 数据库地址',
-  PGPORT: 'PostgreSQL 端口',
-  PGUSER: 'PostgreSQL 用户名',
-  PGPASSWORD: 'PostgreSQL 密码',
-  PGDATABASE: 'PostgreSQL 数据库名',
-  REDIS_URL: 'Redis 缓存连接',
-  REDIS_HOST: 'Redis 缓存地址',
-  REDIS_PORT: 'Redis 缓存端口',
-  MONGODB_URI: 'MongoDB 数据库连接',
-  MONGODB_URL: 'MongoDB 数据库连接',
-  S3_ENDPOINT: '对象存储服务地址',
-  S3_BUCKET: '对象存储桶名称',
-  S3_ACCESS_KEY: '对象存储访问账号',
-  S3_SECRET_KEY: '对象存储访问密钥',
-  ALY_ACCESS_KEY_ID: '阿里云访问账号',
-  ALY_ACCESS_KEY_SECRET: '阿里云访问密钥',
-  ALY_ORG_ID: '阿里云组织',
-  ALY_REGION_ID: '阿里云区域',
-  ALY_ENDPOINT: '阿里云服务地址',
-  HOST: '服务监听地址',
-  BIND_HOST: '服务绑定地址',
-  LISTEN_HOST: '服务监听地址',
-  PORT: '应用运行端口',
-  NODE_ENV: '运行环境模式',
-  PUBLIC_ORIGIN: '公网访问域名',
-  ALLOW_PUBLIC_REGISTRATION: '开放公开注册开关',
-}
-
-const namesEn: Record<string, string> = {
-  DB_DSN: 'Database Connection',
-  DATABASE_URL: 'Database Connection',
-  CONNECTION_STRING: 'Database Connection',
-  PGHOST: 'PostgreSQL Host',
-  PGPORT: 'PostgreSQL Port',
-  PGUSER: 'PostgreSQL User',
-  PGPASSWORD: 'PostgreSQL Password',
-  PGDATABASE: 'PostgreSQL Database',
-  REDIS_URL: 'Redis Connection',
-  REDIS_HOST: 'Redis Host',
-  REDIS_PORT: 'Redis Port',
-  MONGODB_URI: 'MongoDB Connection',
-  MONGODB_URL: 'MongoDB Connection',
-  S3_ENDPOINT: 'Object Storage Endpoint',
-  S3_BUCKET: 'Object Storage Bucket',
-  S3_ACCESS_KEY: 'Object Storage Access Key',
-  S3_SECRET_KEY: 'Object Storage Secret Key',
-  ALY_ACCESS_KEY_ID: 'Alibaba Cloud AccessKey ID',
-  ALY_ACCESS_KEY_SECRET: 'Alibaba Cloud AccessKey Secret',
-  ALY_ORG_ID: 'Alibaba Cloud Organization',
-  ALY_REGION_ID: 'Alibaba Cloud Region',
-  ALY_ENDPOINT: 'Alibaba Cloud Endpoint',
-  HOST: 'Listen Host',
-  BIND_HOST: 'Bind Host',
-  LISTEN_HOST: 'Listen Host',
-  PORT: 'Application Port',
-  NODE_ENV: 'Runtime Mode',
-  PUBLIC_ORIGIN: 'Public Origin',
-  ALLOW_PUBLIC_REGISTRATION: 'Public Registration Switch',
+const ENV_NAME_KEYS: Record<string, MessageKey> = {
+  DB_DSN: 'apps.config.env.DB_DSN',
+  DATABASE_URL: 'apps.config.env.DATABASE_URL',
+  CONNECTION_STRING: 'apps.config.env.CONNECTION_STRING',
+  PGHOST: 'apps.config.env.PGHOST',
+  PGPORT: 'apps.config.env.PGPORT',
+  PGUSER: 'apps.config.env.PGUSER',
+  PGPASSWORD: 'apps.config.env.PGPASSWORD',
+  PGDATABASE: 'apps.config.env.PGDATABASE',
+  REDIS_URL: 'apps.config.env.REDIS_URL',
+  REDIS_HOST: 'apps.config.env.REDIS_HOST',
+  REDIS_PORT: 'apps.config.env.REDIS_PORT',
+  MONGODB_URI: 'apps.config.env.MONGODB_URI',
+  MONGODB_URL: 'apps.config.env.MONGODB_URL',
+  S3_ENDPOINT: 'apps.config.env.S3_ENDPOINT',
+  S3_BUCKET: 'apps.config.env.S3_BUCKET',
+  S3_ACCESS_KEY: 'apps.config.env.S3_ACCESS_KEY',
+  S3_SECRET_KEY: 'apps.config.env.S3_SECRET_KEY',
+  ALY_ACCESS_KEY_ID: 'apps.config.env.ALY_ACCESS_KEY_ID',
+  ALY_ACCESS_KEY_SECRET: 'apps.config.env.ALY_ACCESS_KEY_SECRET',
+  ALY_ORG_ID: 'apps.config.env.ALY_ORG_ID',
+  ALY_REGION_ID: 'apps.config.env.ALY_REGION_ID',
+  ALY_ENDPOINT: 'apps.config.env.ALY_ENDPOINT',
+  HOST: 'apps.config.env.HOST',
+  BIND_HOST: 'apps.config.env.BIND_HOST',
+  LISTEN_HOST: 'apps.config.env.LISTEN_HOST',
+  PORT: 'apps.config.env.PORT',
+  NODE_ENV: 'apps.config.env.NODE_ENV',
+  PUBLIC_ORIGIN: 'apps.config.env.PUBLIC_ORIGIN',
+  ALLOW_PUBLIC_REGISTRATION: 'apps.config.env.ALLOW_PUBLIC_REGISTRATION',
 }
 
 export const configName = (item: AppConfigItem, locale: ClientLocale = 'zh') =>
-  (locale === 'en' ? namesEn[item.key] : namesZh[item.key]) ||
+  (ENV_NAME_KEYS[item.key] ? translate(locale, ENV_NAME_KEYS[item.key]) : undefined) ||
   item.description?.split(/[。；\n]/)[0] ||
   item.key ||
-  translatePair(locale, '新增配置', 'New Config')
+  translate(locale, "apps.config.newConfig")
 
 function resourceField(item: AppConfigItem, resource: ResourceSummary) {
   if (item.resource_key && resource.env_keys?.includes(item.resource_key)) return item.resource_key
@@ -113,25 +81,13 @@ function matches(item: AppConfigItem, resource: ResourceSummary) {
 function resourceMigrationNote(resource: ResourceSummary, locale: ClientLocale) {
   const type = (resource.type || '').toLowerCase()
   if (/postgres|mysql|mariadb|sqlserver|mssql|mongo/.test(type)) {
-    return translatePair(
-      locale,
-      '💡 迁移提醒：切换后将连接所选数据库，本机存量数据不会自动迁移；需核对目标表结构，初始化或迁移数据需另行确认。',
-      'Migration note: switching connects to the selected database without automatically migrating local data; verify target schemas and handle initialization separately.',
-    )
+    return translate(locale, "apps.config.migrationNoteSwitchingConnectsToThe")
   }
   if (/redis|memcache/.test(type)) {
-    return translatePair(
-      locale,
-      '请先确认用途：可重建缓存通常无需迁移；登录会话与业务状态需另行处理，不能直接丢弃。',
-      'Confirm usage first: rebuildable caches usually do not need migration, while login sessions and business state must be handled separately.',
-    )
+    return translate(locale, "apps.config.confirmUsageFirstRebuildableCachesUsually")
   }
   if (/s3|minio|oss|cos|storage/.test(type)) {
-    return translatePair(
-      locale,
-      '💡 迁移提醒：切换后新上传文件将持久保存在服务器存储桶中。',
-      'Migration note: newly uploaded files will be persisted in the server storage bucket after switching.',
-    )
+    return translate(locale, "apps.config.migrationNoteNewlyUploadedFilesWill")
   }
   return ''
 }
@@ -139,17 +95,17 @@ function resourceMigrationNote(resource: ResourceSummary, locale: ClientLocale) 
 function defaultDisplayValue(item: AppConfigItem, original: AppConfigItem | undefined, lockedPort: number | undefined, locale: ClientLocale): string {
   if (lockedPort !== undefined && item.key === 'PORT') {
     if (original?.original_value) return original.original_value
-    if (original?.app_default) return translatePair(locale, `源码默认：${original.app_default}`, `Source default: ${original.app_default}`)
-    return translatePair(locale, `与容器端口 ${lockedPort} 一致`, `Matches container port ${lockedPort}`)
+    if (original?.app_default) return translate(locale, "apps.config.sourceDefault", { value: original.app_default })
+    return translate(locale, "apps.config.matchesContainerPort", { port: lockedPort })
   }
-  if (!original) return translatePair(locale, '用户新增（无原应用默认值）', 'Custom (no app default)')
-  if (original.resource_id) return translatePair(locale, '由所选资源提供', 'Provided by selected resource')
-  if (original.value_source === 'generated') return translatePair(locale, '由系统生成', 'Generated by system')
+  if (!original) return translate(locale, "apps.config.customNoAppDefault")
+  if (original.resource_id) return translate(locale, "apps.config.providedBySelectedResource")
+  if (original.value_source === 'generated') return translate(locale, "apps.config.generatedBySystem")
   const origText = original.original_value ?? original.value ?? ''
   if (origText) return origText
-  if (original.app_default) return translatePair(locale, `源码默认：${original.app_default}`, `Source default: ${original.app_default}`)
-  if (original.value_source === 'configured' && original.has_value) return translatePair(locale, '（沿用当前版本）', '(Keep current version)')
-  return translatePair(locale, '无默认值', 'No default')
+  if (original.app_default) return translate(locale, "apps.config.sourceDefault", { value: original.app_default })
+  if (original.value_source === 'configured' && original.has_value) return translate(locale, "apps.config.keepCurrentVersion")
+  return translate(locale, "apps.config.noDefault")
 }
 
 export function AppDeliveryConfig({
@@ -177,7 +133,7 @@ export function AppDeliveryConfig({
   runtimeEditableKeys?: ReadonlySet<string>
   onChange: (items: AppConfigItem[]) => void
 }) {
-  const { locale, tr } = useI18n()
+  const { locale, t } = useI18n()
   const configId = useId()
   const onlineRuntime = runtimeEditableKeys !== undefined
 
@@ -190,11 +146,11 @@ export function AppDeliveryConfig({
   const getStatus = (item: AppConfigItem, original?: AppConfigItem, selected?: ResourceSummary) => {
     const isPortLocked = lockedPort !== undefined && item.key === 'PORT'
     if (isPortLocked) {
-      return { label: tr('已对齐', 'Aligned'), tone: 'oa-pill-ok', changed: false }
+      return { label: t("apps.config.aligned"), tone: 'oa-pill-ok', changed: false }
     }
     if (onlineRuntime && item.resource_id) {
       return {
-        label: tr('平台资源：{name}', 'Platform Resource: {name}', { name: selected?.name || item.source_label || item.resource_id }),
+        label: t("apps.config.platformResource", { name: selected?.name || item.source_label || item.resource_id }),
         tone: 'oa-pill-accent',
         changed: false,
       }
@@ -202,50 +158,50 @@ export function AppDeliveryConfig({
     if (onlineRuntime && original) {
       const changed = item.value !== original.value
       if (!item.value && item.required && (changed || !original.has_value)) {
-        return { label: tr('待填写', 'Required'), tone: 'oa-pill-warn', changed }
+        return { label: t("apps.config.required"), tone: 'oa-pill-warn', changed }
       }
-      if (changed) return { label: item.value ? tr('已修改', 'Modified') : tr('已清空', 'Cleared'), tone: 'oa-pill-accent', changed }
-      if (item.value || original.has_value) return { label: tr('沿用原值', 'Keep Original'), tone: 'oa-pill-ok', changed }
-      return { label: tr('未设置', 'Unset'), tone: '', changed }
+      if (changed) return { label: item.value ? t("apps.config.modified") : t("apps.config.cleared"), tone: 'oa-pill-accent', changed }
+      if (item.value || original.has_value) return { label: t("apps.config.keepOriginal"), tone: 'oa-pill-ok', changed }
+      return { label: t("apps.config.unset"), tone: '', changed }
     }
     if (selected) {
-      return { label: tr('平台资源：{name}', 'Platform Resource: {name}', { name: selected.name }), tone: 'oa-pill-accent', changed: true }
+      return { label: t("apps.config.platformResource", { name: selected.name }), tone: 'oa-pill-accent', changed: true }
     }
     if (!original) {
       return item.value
-        ? { label: tr('新增自定义', 'Custom'), tone: 'oa-pill-accent', changed: true }
-        : { label: tr('待填写', 'Required'), tone: 'oa-pill-warn', changed: true }
+        ? { label: t("apps.config.custom"), tone: 'oa-pill-accent', changed: true }
+        : { label: t("apps.config.required"), tone: 'oa-pill-warn', changed: true }
     }
     if (item.secret) {
-      if (item.value_source === 'generated' && item.has_value) return { label: tr('已生成', 'Generated'), tone: 'oa-pill-ok', changed: false }
-      if (item.value_source === 'configured' && item.has_value) return { label: tr('沿用当前版本', 'Keep Current'), tone: 'oa-pill-ok', changed: false }
+      if (item.value_source === 'generated' && item.has_value) return { label: t("apps.config.generated"), tone: 'oa-pill-ok', changed: false }
+      if (item.value_source === 'configured' && item.has_value) return { label: t("apps.config.keepCurrent"), tone: 'oa-pill-ok', changed: false }
       const preserved =
         !item.value &&
         ((item.value_source === 'original' && Boolean(original.has_original_value || original.has_value)) ||
           (item.value_source !== 'manual' && Boolean(original.has_value)))
-      if (item.value) return { label: tr('已修改', 'Modified'), tone: 'oa-pill-accent', changed: true }
-      if (preserved) return { label: tr('沿用原值', 'Keep Original'), tone: 'oa-pill-ok', changed: false }
-      if (item.required) return { label: tr('待填写', 'Required'), tone: 'oa-pill-warn', changed: false }
-      return { label: tr('未设置', 'Unset'), tone: '', changed: false }
+      if (item.value) return { label: t("apps.config.modified"), tone: 'oa-pill-accent', changed: true }
+      if (preserved) return { label: t("apps.config.keepOriginal"), tone: 'oa-pill-ok', changed: false }
+      if (item.required) return { label: t("apps.config.required"), tone: 'oa-pill-warn', changed: false }
+      return { label: t("apps.config.unset"), tone: '', changed: false }
     }
     const baseline = original.original_value ?? original.value ?? ''
     if (baseline) {
       if (item.value === baseline) {
         return {
-          label: original.is_example_source ? tr('沿用示例值', 'Keep Example') : tr('沿用原值', 'Keep Original'),
+          label: original.is_example_source ? t("apps.config.keepExample") : t("apps.config.keepOriginal"),
           tone: 'oa-pill-ok',
           changed: false,
         }
       }
       if (!item.value && item.required) {
-        return { label: tr('待填写', 'Required'), tone: 'oa-pill-warn', changed: true }
+        return { label: t("apps.config.required"), tone: 'oa-pill-warn', changed: true }
       }
-      return { label: item.value ? tr('已修改', 'Modified') : tr('已清空', 'Cleared'), tone: 'oa-pill-accent', changed: true }
+      return { label: item.value ? t("apps.config.modified") : t("apps.config.cleared"), tone: 'oa-pill-accent', changed: true }
     }
-    if (item.value) return { label: tr('已覆盖', 'Overridden'), tone: 'oa-pill-accent', changed: true }
-    if (original.app_default) return { label: tr('沿用源码默认', 'Source Default'), tone: 'oa-pill-ok', changed: false }
-    if (item.required) return { label: tr('待填写', 'Required'), tone: 'oa-pill-warn', changed: false }
-    return { label: tr('留空不注入', 'Omit When Empty'), tone: '', changed: false }
+    if (item.value) return { label: t("apps.config.overridden"), tone: 'oa-pill-accent', changed: true }
+    if (original.app_default) return { label: t("apps.config.sourceDefault_2"), tone: 'oa-pill-ok', changed: false }
+    if (item.required) return { label: t("apps.config.required"), tone: 'oa-pill-warn', changed: false }
+    return { label: t("apps.config.omitWhenEmpty"), tone: '', changed: false }
   }
 
   const requiredCount = configs.filter(c => c.required).length
@@ -310,12 +266,12 @@ export function AppDeliveryConfig({
               <code className="oa-code">{item.key}</code>
             ) : (
               <input
-                aria-label={tr('新增配置名称', 'New config key')}
+                aria-label={t("apps.config.newConfigKey")}
                 aria-invalid={keyIssue ? true : undefined}
                 aria-describedby={keyIssue ? issueId : undefined}
                 value={item.key}
                 disabled={readOnly}
-                placeholder={tr('环境变量名，如 WEBHOOK_URL', 'Env var name, e.g. WEBHOOK_URL')}
+                placeholder={t("apps.config.envVarNameEGWebhook")}
                 className="oa-input oa-mono oa-cfg-key-input"
                 onChange={e =>
                   update(index, {
@@ -328,9 +284,9 @@ export function AppDeliveryConfig({
               />
             )}
             {friendly !== item.key && <span className="oa-cfg-friendly">{friendly}</span>}
-            {item.required && <span className="oa-pill oa-pill-warn">{tr('必填', 'Required')}</span>}
-            {isPortLocked && <span className="oa-pill oa-pill-accent">{tr('与容器端口联动', 'Synced with container port')}</span>}
-            {original?.is_example_source && <span className="oa-pill">{tr('示例模板', 'Example')}</span>}
+            {item.required && <span className="oa-pill oa-pill-warn">{t("common.required")}</span>}
+            {isPortLocked && <span className="oa-pill oa-pill-accent">{t("apps.config.syncedWithContainerPort")}</span>}
+            {original?.is_example_source && <span className="oa-pill">{t("apps.config.example")}</span>}
           </div>
 
           <div className="oa-cfg-actions">
@@ -344,7 +300,7 @@ export function AppDeliveryConfig({
                   return prior ? { ...prior, local_connection_confirmed: false } : config
                 }))}
               >
-                {tr('恢复默认', 'Reset')}
+                {t("apps.config.reset")}
               </button>
             )}
             {!original && !readOnly && (
@@ -353,7 +309,7 @@ export function AppDeliveryConfig({
                 className="oa-btn oa-btn-xs oa-btn-danger"
                 onClick={() => removeCustom(index)}
               >
-                {tr('删除', 'Delete')}
+                {t("apps.config.delete")}
               </button>
             )}
           </div>
@@ -363,11 +319,11 @@ export function AppDeliveryConfig({
         <div className="oa-grid-2" style={{ gap: 10, fontSize: 12 }}>
           <div className="oa-field">
             <div className="oa-cfg-col-label">
-              <span>{tr('应用内部默认值', 'App Default')}</span>
+              <span>{t("apps.config.appDefault")}</span>
               {original?.source_label && <span className="oa-hint">{original.source_label}</span>}
             </div>
             <input
-              aria-label={tr('{key} 原始值', '{key} original value', { key: item.key || tr('新增项', 'New item') })}
+              aria-label={t("apps.config.originalValue", { key: item.key || t("apps.config.newItem") })}
               readOnly
               value={leftValue}
               title={leftValue}
@@ -377,7 +333,7 @@ export function AppDeliveryConfig({
 
           <div className="oa-field">
             <div className="oa-cfg-col-label">
-              <span style={{ fontWeight: 600, color: 'var(--oa-ink)' }}>{tr('部署生效值', 'Effective Value')}</span>
+              <span style={{ fontWeight: 600, color: 'var(--oa-ink)' }}>{t("apps.config.effectiveValue")}</span>
               {selected && !readOnly && (
                 <button
                   type="button"
@@ -389,7 +345,7 @@ export function AppDeliveryConfig({
                     } : config))
                   }
                 >
-                  {group.length > 1 ? tr('整组改为手填', 'Manual input for group') : tr('改为手填', 'Manual input')}
+                  {group.length > 1 ? t("apps.config.manualInputForGroup") : t("apps.config.manualInput")}
                 </button>
               )}
             </div>
@@ -397,7 +353,7 @@ export function AppDeliveryConfig({
             {isPortLocked ? (
               <div className="oa-cfg-input-wrap">
                 <input
-                  aria-label={tr('{key} 配置值', '{key} value', { key: item.key })}
+                  aria-label={t("apps.config.value", { key: item.key })}
                   {...valueIssueProps}
                   readOnly
                   value={portValue}
@@ -406,22 +362,18 @@ export function AppDeliveryConfig({
               </div>
             ) : selected || (onlineRuntime && item.resource_id) ? (
               <input
-                aria-label={tr('{key} 配置值', '{key} value', { key: item.key })}
+                aria-label={t("apps.config.value", { key: item.key })}
                 {...valueIssueProps}
                 readOnly
                 value={boundValue(item)}
-                placeholder={tr(
-                  '由「{name}」注入 · {key}',
-                  'Injected by "{name}" · {key}',
-                  { name: selected?.name || item.source_label || item.resource_id || '', key: item.resource_key || item.key },
-                )}
+                placeholder={t("apps.config.injectedBy", { name: selected?.name || item.source_label || item.resource_id || '', key: item.resource_key || item.key })}
                 className="oa-input oa-cfg-readonly"
                 style={{ color: 'var(--oa-accent)' }}
               />
             ) : (
               <div className="oa-cfg-input-wrap">
                 <input
-                  aria-label={tr('{key} 配置值', '{key} value', { key: item.key || tr('新增项', 'New item') })}
+                  aria-label={t("apps.config.value", { key: item.key || t("apps.config.newItem") })}
                   {...valueIssueProps}
                   type="text"
                   disabled={!onlineRuntime && readOnly}
@@ -429,16 +381,16 @@ export function AppDeliveryConfig({
                   value={item.value}
                   placeholder={
                     onlineRuntime
-                      ? item.required ? tr('请输入配置值', 'Enter value') : tr('可留空', 'Optional')
+                      ? item.required ? t("apps.config.enterValue") : t("apps.config.optional")
                       : item.value_source === 'generated'
-                      ? tr('已生成，输入新值可替换', 'Generated; enter new value to replace')
+                      ? t("apps.config.generatedEnterNewValueToReplace")
                       : hasOriginalSecret
-                      ? tr('留空沿用原值，输入新值则覆盖', 'Leave empty to keep original; enter to override')
+                      ? t("apps.config.leaveEmptyToKeepOriginalEnter")
                       : original?.app_default
-                        ? tr('留空沿用源码默认 ({val})，或输入覆盖', 'Leave empty for default ({val}), or enter to override', { val: original.app_default })
+                        ? t("apps.config.leaveEmptyForDefaultOrEnter", { val: original.app_default })
                         : item.required
-                          ? tr('请输入配置值', 'Enter value')
-                          : tr('选填，留空则不注入该环境变量', 'Optional; leave empty to omit')
+                          ? t("apps.config.enterValue")
+                          : t("apps.config.optionalLeaveEmptyToOmit")
                   }
                   className={`oa-input oa-mono${onlineRuntime && !canEditRuntimeValue ? ' oa-cfg-readonly' : ''}`}
                   style={{ minHeight: 34, padding: '6px 10px', fontSize: 12 }}
@@ -457,7 +409,7 @@ export function AppDeliveryConfig({
             {valueIssue && (
               <p id={issueId} className="oa-config-field-warning">
                 {valueIssue.kind === 'required' && candidates.length > 0
-                  ? tr('{msg}，或选择下方可用的资源。', '{msg}, or select an available resource below.', { msg: valueIssue.message })
+                  ? t("apps.config.orSelectAnAvailableResourceBelow", { msg: valueIssue.message })
                   : valueIssue.message}
               </p>
             )}
@@ -468,10 +420,7 @@ export function AppDeliveryConfig({
           <div role="note" className="oa-config-field-warning">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
               <span>
-                {tr(
-                  '容器内监听 127.0.0.1 / localhost 将导致外部访问与健康检查失败，建议改为 0.0.0.0。',
-                  'Listening on 127.0.0.1 / localhost inside the container will break external access and health checks. Use 0.0.0.0 instead.',
-                )}
+                {t("apps.config.listeningOn127001")}
               </span>
               {!readOnly && (
                 <button
@@ -487,7 +436,7 @@ export function AppDeliveryConfig({
                     })
                   }
                 >
-                  {tr('一键改为 0.0.0.0', 'Set to 0.0.0.0')}
+                  {t("apps.config.setTo0000")}
                 </button>
               )}
             </div>
@@ -498,10 +447,7 @@ export function AppDeliveryConfig({
           <div role="note" className="oa-config-field-warning">
             {valueIssue?.kind !== 'loopback' && (
               <div>
-                {tr(
-                  '这个连接指向容器自己，部署后不能连接你电脑上的服务。请选择下方平台资源，或填写服务器可访问地址。',
-                  'This connection points to localhost inside the container. Select a platform resource below or enter a server-reachable address.',
-                )}
+                {t("apps.config.thisConnectionPointsToLocalhostInside")}
               </div>
             )}
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
@@ -512,10 +458,7 @@ export function AppDeliveryConfig({
                 onChange={e => update(index, { ...item, local_connection_confirmed: e.target.checked })}
               />
               <span>
-                {tr(
-                  '只有该服务确实和应用运行在同一容器内时，才勾选保留此连接',
-                  'Only check this if the service actually runs inside the same container',
-                )}
+                {t("apps.config.onlyCheckThisIfTheService")}
               </span>
             </label>
           </div>
@@ -523,13 +466,13 @@ export function AppDeliveryConfig({
 
         {!!candidates.length && !readOnly && (
           <div className="oa-cfg-resources">
-            <span className="oa-hint">{tr('可绑平台资源：', 'Available resources:')}</span>
+            <span className="oa-hint">{t("apps.config.availableResources")}</span>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {candidates.map(resource => (
                 <button
                   key={resource.id}
                   type="button"
-                  aria-label={tr('使用{name}替换 {key}', 'Use {name} for {key}', { name: resource.name, key: item.key })}
+                  aria-label={t("apps.config.useFor", { name: resource.name, key: item.key })}
                   disabled={item.resource_id === resource.id}
                   className={`oa-btn oa-btn-xs ${item.resource_id === resource.id ? 'oa-btn-accent-soft' : ''}`}
                   onClick={() => {
@@ -549,19 +492,19 @@ export function AppDeliveryConfig({
                     } : config))
                   }}
                 >
-                  {item.resource_id === resource.id ? '✓ ' : group.length > 1 ? tr('整组改用 ', 'Use for group: ') : tr('改用 ', 'Use ')}
+                  {item.resource_id === resource.id ? '✓ ' : group.length > 1 ? t("apps.config.useForGroup") : t("apps.config.use")}
                   {resource.name}
                 </button>
               ))}
             </div>
             {selected && (
               <div style={{ background: 'var(--oa-paper)', borderRadius: 6, padding: '6px 8px', fontSize: 11.5, color: 'var(--oa-muted)', width: '100%' }}>
-                <div>{tr('资源', 'Resource')} <code className="oa-mono">{selected.id}</code></div>
+                <div>{t("apps.config.resource")} <code className="oa-mono">{selected.id}</code></div>
                 <div>
                   {selected.env_preview?.[item.resource_key || item.key] &&
                     selected.env_preview[item.resource_key || item.key] !== '[REDACTED]'
                     ? selected.env_preview[item.resource_key || item.key]
-                    : tr('由服务器提供配置值', 'Provided by server')}
+                    : t("apps.config.providedByServer")}
                 </div>
                 {resourceMigrationNote(selected, locale) && <div style={{ marginTop: 3 }}>{resourceMigrationNote(selected, locale)}</div>}
               </div>
@@ -574,7 +517,7 @@ export function AppDeliveryConfig({
         )}
         {item.description && friendly !== item.key && item.description !== friendly && (
           <details style={{ fontSize: 11.5, color: 'var(--oa-muted)' }}>
-            <summary style={{ cursor: 'pointer' }}>{tr('用途说明', 'Description')}</summary>
+            <summary style={{ cursor: 'pointer' }}>{t("apps.config.description")}</summary>
             <p style={{ margin: '4px 0 0' }}>{item.description}</p>
           </details>
         )}
@@ -615,24 +558,21 @@ export function AppDeliveryConfig({
   }
 
   return (
-    <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label={tr('应用配置对照', 'App Configuration')}>
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label={t("apps.config.appConfiguration")}>
       {!compact && (
         <div className="oa-cfg-toolbar">
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <h3 style={{ margin: 0, fontSize: 13.5, fontWeight: 650 }}>{tr('运行时环境变量', 'Runtime Environment Variables')}</h3>
-              <span className="oa-pill">{tr('共 {count} 项', '{count} total', { count: configs.length })}</span>
-              {requiredCount > 0 && <span className="oa-pill oa-pill-warn">{tr('必填 {count} 项', '{count} required', { count: requiredCount })}</span>}
+              <h3 style={{ margin: 0, fontSize: 13.5, fontWeight: 650 }}>{t("apps.config.runtimeEnvironmentVariables")}</h3>
+              <span className="oa-pill">{t("apps.config.total", { count: configs.length })}</span>
+              {requiredCount > 0 && <span className="oa-pill oa-pill-warn">{t("apps.config.required_2", { count: requiredCount })}</span>}
               {modifiedItems.length > 0 && (
-                <span className="oa-pill oa-pill-accent">{tr('已修改 {count} 项', '{count} modified', { count: modifiedItems.length })}</span>
+                <span className="oa-pill oa-pill-accent">{t("apps.config.modified_2", { count: modifiedItems.length })}</span>
               )}
             </div>
             {!onlineRuntime && (
               <p className="oa-hint" style={{ margin: '3px 0 0' }}>
-                {tr(
-                  '留空或保持不变将沿用应用默认值；修改仅在本次容器运行时生效，不改本地源码。应用配置值可在部署会话中核对。',
-                  'Empty or unchanged items use app defaults. Changes apply only to the deployed container runtime.',
-                )}
+                {t("apps.config.emptyOrUnchangedItemsUseApp")}
               </p>
             )}
           </div>
@@ -648,7 +588,7 @@ export function AppDeliveryConfig({
                 ])
               }
             >
-              {tr('＋ 新增环境变量', '+ Add Env Var')}
+              {t("apps.config.addEnvVar")}
             </button>
           )}
         </div>
@@ -656,13 +596,13 @@ export function AppDeliveryConfig({
 
       {configs.length === 0 && (
         <div className="oa-subcard" style={{ textAlign: 'center', padding: 18, color: 'var(--oa-muted)' }}>
-          {tr('当前交付清单没有运行时环境变量。', 'No runtime environment variables in this delivery manifest.')}
+          {t("apps.config.noRuntimeEnvironmentVariablesInThis")}
         </div>
       )}
 
       {configs.length > 0 && primaryConfigs.length === 0 && !hasContainerIssue && (
         <div className="oa-alert oa-alert-ok">
-          {tr('✓ 当前应用无需额外配置外部数据库或密钥；容器基础参数已就绪。', '✓ No external database or secret configuration required; container defaults are ready.')}
+          {t("apps.config.noExternalDatabaseOrSecretConfiguration")}
         </div>
       )}
 
@@ -676,9 +616,9 @@ export function AppDeliveryConfig({
           style={{ fontSize: 12 }}
         >
           <summary style={{ cursor: 'pointer', fontWeight: 600, color: hasContainerIssue ? '#92400e' : 'var(--oa-ink)' }}>
-            {tr('容器基础参数（{count} 项：', 'Container defaults ({count}: ', { count: containerDefaultConfigs.length })}
+            {t("apps.config.containerDefaults", { count: containerDefaultConfigs.length })}
             {containerDefaultConfigs.map(({ item }) => formatContainerSummary(item)).join(' · ')}
-            {hasContainerIssue ? tr(' · 有配置待处理', ' · Action needed') : ''}）
+            {hasContainerIssue ? t("apps.config.actionNeeded") : ''}）
           </summary>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--oa-line)' }}>
             {containerDefaultConfigs.map(({ item, index }) => renderConfigCard(item, index))}
@@ -687,24 +627,24 @@ export function AppDeliveryConfig({
       )}
 
       {!compact && configs.length > 0 && (
-        <div className="oa-subcard" style={{ padding: '9px 12px', fontSize: 12 }} aria-label={tr('配置更改汇总', 'Configuration Changes Summary')}>
+        <div className="oa-subcard" style={{ padding: '9px 12px', fontSize: 12 }} aria-label={t("apps.config.configurationChangesSummary")}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 600 }}>{tr('配置变更摘要', 'Configuration Change Summary')}</span>
+            <span style={{ fontWeight: 600 }}>{t("apps.config.configurationChangeSummary")}</span>
             <span className="oa-hint">
               {onlineRuntime
-                ? modifiedItems.length ? tr('{count} 项待保存', '{count} pending save', { count: modifiedItems.length }) : tr('暂无修改', 'No changes')
+                ? modifiedItems.length ? t("apps.config.pendingSave", { count: modifiedItems.length }) : t("apps.config.noChanges")
                 : modifiedItems.length
-                  ? tr('已调整 {count} 项配置或平台资源 · 草稿自动保存', '{count} items modified · Draft auto-saved', { count: modifiedItems.length })
-                  : tr('全部沿用应用默认值或原配置 · 草稿自动保存', 'All using defaults or original values · Draft auto-saved')}
+                  ? t("apps.config.itemsModifiedDraftAutoSaved", { count: modifiedItems.length })
+                  : t("apps.config.allUsingDefaultsOrOriginalValues")}
             </span>
           </div>
           {modifiedItems.map((item, idx) => {
             const target = item.resource_id
-              ? tr('平台资源「{name}」', 'Resource "{name}"', { name: resources.find(r => r.id === item.resource_id)?.name || item.resource_id })
-              : item.value || tr('（已清空）', '(Cleared)')
+              ? t("apps.config.resource_2", { name: resources.find(r => r.id === item.resource_id)?.name || item.resource_id })
+              : item.value || t("apps.config.cleared_2")
             return (
               <div key={`${item.key}-${idx}`} style={{ marginTop: 4, fontWeight: 500 }}>
-                • {configName(item, locale)} (<code>{item.key || tr('未命名', 'Unnamed')}</code>) → {target}
+                • {configName(item, locale)} (<code>{item.key || t("apps.config.unnamed")}</code>) → {target}
               </div>
             )
           })}

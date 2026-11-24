@@ -1,31 +1,37 @@
 import React, { createContext, useContext, useSyncExternalStore } from 'react'
+import {
+  FALLBACK_LOCALE,
+  getIntlLocale,
+  LOCALE_DEFINITIONS,
+  LOCALE_MESSAGES,
+  resolveClientLocale,
+  SUPPORTED_LOCALES,
+  translate,
+  type ClientLocale,
+  type LocaleDefinition,
+  type LocaleDictionary,
+  type MessageKey,
+  type MessageVars,
+} from './locales/index.ts'
 
-export type ClientLocale = 'zh' | 'en'
+export {
+  FALLBACK_LOCALE,
+  getIntlLocale,
+  LOCALE_DEFINITIONS,
+  LOCALE_MESSAGES,
+  resolveClientLocale,
+  SUPPORTED_LOCALES,
+  translate,
+  type ClientLocale,
+  type LocaleDefinition,
+  type LocaleDictionary,
+  type MessageKey,
+  type MessageVars,
+}
 
 export interface DshLocaleRuntime {
   getSnapshot?: () => { active?: string }
   subscribe?: (fn: () => void) => () => void
-}
-
-export function resolveClientLocale(raw?: string | null): ClientLocale {
-  if (typeof raw !== 'string') return 'en'
-  const trimmed = raw.trim()
-  return /^zh(?:[-_]|$)/i.test(trimmed) ? 'zh' : 'en'
-}
-
-export function translatePair(
-  locale: ClientLocale,
-  zh: string,
-  en: string,
-  vars?: Record<string, string | number>
-): string {
-  let text = locale === 'zh' ? zh : en
-  if (vars) {
-    for (const [k, v] of Object.entries(vars)) {
-      text = text.replaceAll(`{${k}}`, String(v))
-    }
-  }
-  return text
 }
 
 function readBrowserLocale(): string {
@@ -62,16 +68,14 @@ function subscribeLocale(listener: () => void): () => void {
   }
 }
 
-interface I18nContextValue {
+export interface I18nContextValue {
   locale: ClientLocale
-  isEn: boolean
-  tr: (zh: string, en: string, vars?: Record<string, string | number>) => string
+  t: (key: MessageKey, vars?: MessageVars) => string
 }
 
 const I18nContext = createContext<I18nContextValue>({
   locale: 'zh',
-  isEn: false,
-  tr: (zh, _en, vars) => translatePair('zh', zh, _en, vars),
+  t: (key, vars) => translate('zh', key, vars),
 })
 
 export function LocaleProvider({
@@ -89,8 +93,7 @@ export function LocaleProvider({
   )
   const value: I18nContextValue = {
     locale,
-    isEn: locale === 'en',
-    tr: (zh, en, vars) => translatePair(locale, zh, en, vars),
+    t: (key, vars) => translate(locale, key, vars),
   }
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>
 }
