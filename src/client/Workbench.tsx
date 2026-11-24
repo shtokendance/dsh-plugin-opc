@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react'
+import type { OpcApi } from './api.ts'
 import { AppIcon, type AppIconName } from './AppIcon.tsx'
 import { labels, OpcIcon } from './branding.tsx'
 
@@ -115,73 +116,120 @@ export function WorkbenchNavigation({ kind, onSelect }: { kind: PanelKind; onSel
   )
 }
 
-type HomeGuideTab = 'quickstart' | ModuleKind | 'faq'
+type HomeGuideTab = ModuleKind | 'faq'
 
 declare const __OPC_PLUGIN_VERSION__: string | undefined
 
 const PLUGIN_VERSION = typeof __OPC_PLUGIN_VERSION__ !== 'undefined' ? __OPC_PLUGIN_VERSION__ : ''
 
 const GUIDE_TABS: readonly { id: HomeGuideTab; label: string }[] = [
-  { id: 'quickstart', label: '对话指令速查' },
+  { id: 'apps', label: '应用交付 4 步走' },
   { id: 'knowledge', label: '知识库用法' },
   { id: 'skills', label: '技能用法' },
   { id: 'mcp', label: 'MCP 用法' },
-  { id: 'apps', label: '应用部署 4 步流' },
   { id: 'faq', label: '常见问题' },
 ]
 
 const QUICK_COMMANDS = [
   {
     id: 'kb',
-    tone: 'knowledge',
-    title: '引用知识库问答',
-    syntax: '@<库名> 你的问题',
+    label: '知识库',
+    shortCode: '@<库名> 提问',
     example: '@企业制度库 差旅报销需要准备哪些材料？请列出依据文档的名称',
-    hint: '在对话中输入 @ 从「OPC 知识库」候选中选中目标库；也可在知识库卡片点击「限定问答范围」持续绑定当前会话。',
   },
   {
     id: 'skill',
-    tone: 'skills',
-    title: '调用已安装技能',
-    syntax: '/<技能名> 任务描述',
+    label: '技能',
+    shortCode: '/<技能名> 执行',
     example: '/excel-compare 对比这两份报价单的差异',
-    hint: '先在「技能」页点击下载安装并确认已启用，随后在左侧对话输入 / 选中对应技能即可执行。',
   },
   {
     id: 'mcp',
-    tone: 'mcp',
-    title: '查询 MCP 业务数据',
-    syntax: '说明要用哪个 MCP 服务及条件',
+    label: 'MCP',
+    shortCode: '直接对话调用',
     example: '用订单查询 MCP 服务查一下昨天的异常采购单',
-    hint: '写操作或敏感操作会触发 DSH 审批确认，阅读参数无误后确认即可执行；也可在 MCP 页在线调试。',
   },
   {
     id: 'app',
-    tone: 'apps',
-    title: '调用已部署的应用',
-    syntax: '/app-<应用标识> 请求内容',
+    label: '应用',
+    shortCode: '/app-<标识>',
     example: '/app-supplier-audit 查询最近提交的审厂记录',
-    hint: '应用部署并业务验证通过后自动生成本地技能，在对话中即可直接调用其业务接口。',
   },
 ] as const
+
+interface GuideStep {
+  badge: string
+  title: string
+  desc: string
+  imgName: string
+  imgCap: string
+}
 
 const MODULE_GUIDES: Record<ModuleKind, {
   heading: string
   actionLabel: string
-  steps: readonly { num: string; title: string; desc: string }[]
+  steps: readonly GuideStep[]
   exampleTitle: string
   exampleCmd: string
   tipTitle: string
   tipText: string
 }> = {
+  apps: {
+    heading: '应用交付 4 步走（本地应用一键 AI 改造上线）',
+    actionLabel: '前往应用交付中心 →',
+    steps: [
+      {
+        badge: '第 1 步 · 选择源码',
+        title: '导入本地源码文件夹或 ZIP 压缩包',
+        desc: '进入「应用交付中心」点击「新建并部署应用」，可直接选择本机源码目录或上传项目 ZIP。系统会自动过滤构建产物与敏感文件。',
+        imgName: '16-app-source.jpg',
+        imgCap: '源码文件夹与 ZIP 导入入口',
+      },
+      {
+        badge: '第 2 步 · AI 自动分析与确认',
+        title: '自动分析环境并处理待确认项',
+        desc: '点击开始分析后，右侧展示分析进度，同时在左侧生成专属对话会话。若发现登录方式或端口等需确认事项，系统会暂停并提示确认。',
+        imgName: '19-app-analysis.jpg',
+        imgCap: 'AI 正在分析项目源码与运行配置',
+      },
+      {
+        badge: '第 3 步 · 核对配置并提交发布',
+        title: '确认端口、环境变量与持久化卷',
+        desc: '打包检查完成后，在部署确认页核对应用名称、容器端口、环境变量及持久化存储卷配置，确认无误后点击「确认配置并发布上线」。',
+        imgName: '22-app-deploy-review.jpg',
+        imgCap: '发布前核对运行配置与持久化卷',
+      },
+      {
+        badge: '第 4 步 · 构建上线与技能就绪',
+        title: '查看实时构建日志，通过域名直接访问',
+        desc: '提交后可实时跟踪镜像构建与容器启动日志。应用上线并分配企业域名后，即可在浏览器直接访问，同时自动生成 /app-<标识> 技能。',
+        imgName: '25-app-login-page.jpg',
+        imgCap: '部署上线后通过企业域名访问应用',
+      },
+    ],
+    exampleTitle: '对话调用示例',
+    exampleCmd: '/app-supplier-audit 查询最近提交的供应商审厂记录',
+    tipTitle: '运维保障',
+    tipText: '版本升级与回滚均会保留挂载卷中的业务数据；支持单卷与整应用数据快照备份下载。',
+  },
   knowledge: {
     heading: '企业知识库使用方式',
-    actionLabel: '前往知识库 →',
+    actionLabel: '打开知识库 →',
     steps: [
-      { num: '01', title: '查看全部空间知识库', desc: '进入知识库页即可查看所有已授权空间及跨空间共享的知识库，每张卡片均标明所属空间；点击「刷新」同步最新授权范围。' },
-      { num: '02', title: '文档全文检索', desc: '在「文档全文检索」模式选择全部或指定库，输入关键词点击「开始检索」，点击结果标题即可打开文档正文。' },
-      { num: '03', title: '目录筛选与定位', desc: '切换到「知识库目录筛选」按库名、描述或所属空间查找目标库，点击「检索此库」可一键切回全文检索并选定该库。' },
-      { num: '04', title: '对话引用与限定', desc: '在对话中输入 @库名 选中目标库即可问答；点击卡片「限定问答范围」可持续绑定当前会话，用完点「取消限定」。' },
+      {
+        badge: '方式 A · 全文检索',
+        title: '关键词检索企业文档正文',
+        desc: '切换到「文档全文检索」模式输入关键词即可检索正文内容；在左侧对话输入 @ 选择「OPC 知识库」即可引用指定文档问答。',
+        imgName: '11-knowledge-search.jpg',
+        imgCap: '知识库全文检索与范围切换',
+      },
+      {
+        badge: '方式 B · 目录定位与限定',
+        title: '按目录筛选并持续限定会话范围',
+        desc: '切换到「知识库目录」可按名称或描述快速定位库，点击「限定问答范围」可将该知识库持续绑定到当前对话，用完点「取消限定」。',
+        imgName: '12-knowledge-catalog.jpg',
+        imgCap: '按名称或描述筛选知识库目录',
+      },
     ],
     exampleTitle: '对话调用示例',
     exampleCmd: '@企业制度库 差旅报销需要准备哪些材料？请列出依据文档的名称',
@@ -190,12 +238,15 @@ const MODULE_GUIDES: Record<ModuleKind, {
   },
   skills: {
     heading: '企业技能安装与调用',
-    actionLabel: '前往技能页 →',
+    actionLabel: '管理技能 →',
     steps: [
-      { num: '01', title: '搜索与筛选技能', desc: '进入「技能」页输入技能名称或关键词，点击「立即检索」；支持按「全部 / 已安装 / 未安装」过滤。' },
-      { num: '02', title: '一键下载安装', desc: '在目标技能卡片点击「下载安装」，等待插件自动完成安装与初始化，直到状态标签变为「已启用」。' },
-      { num: '03', title: '斜杠唤起执行', desc: '回到左侧 DSH 对话框，输入 / 和技能名从候选中选中它，接着描述你的具体任务或上传待处理文件。' },
-      { num: '04', title: '启停与版本更新', desc: '已安装技能可按需「停用」或「卸载」；当企业平台发布新版本时，可直接在卡片上核对状态并更新。' },
+      {
+        badge: '下载与调用',
+        title: '一键安装启用并在对话中 / 调用',
+        desc: '在技能页搜索企业开放技能（如财务报销审查、Excel 比对等），点击「下载安装」并确认启用后，在左侧对话输入 /技能名 任务描述 即可执行。',
+        imgName: '14-skills.jpg',
+        imgCap: 'OPC 技能搜索与安装状态筛选',
+      },
     ],
     exampleTitle: '对话调用示例',
     exampleCmd: '/excel-compare 请对比这两份报价单，按物料编码列输出差异明细',
@@ -204,31 +255,20 @@ const MODULE_GUIDES: Record<ModuleKind, {
   },
   mcp: {
     heading: 'MCP 服务查看与调试',
-    actionLabel: '前往 MCP 页 →',
+    actionLabel: '查看与调试服务 →',
     steps: [
-      { num: '01', title: '查看连接状态', desc: '进入「MCP」页按服务或工具名称搜索，使用「全部 / 已连接 / 未挂载」胶囊快速筛选可用服务。' },
-      { num: '02', title: '核对工具定义', desc: '点击服务卡片的「工具与调试」进入详情页，核对每个工具的名称、业务用途说明及输入参数 Schema。' },
-      { num: '03', title: '在线 JSON 调试', desc: '在详情页左侧选择工具，右侧填写或填充示例 JSON 参数并点击「调用工具」，直接查看返回数据或报错。' },
-      { num: '04', title: '对话中审批调用', desc: '在 DSH 对话中说明要用哪个服务、工具和查询条件；写操作会弹出审批卡片，核对参数确认后才会执行。' },
+      {
+        badge: '查看与调试',
+        title: '在线调试 JSON 入参或直接在对话调用',
+        desc: '在 MCP 服务页查看已连接服务与工具 Schema，支持填写 JSON 参数在线测试；在左侧对话直接下达业务指令时，写操作会触发安全审批确认。',
+        imgName: '15-mcp.jpg',
+        imgCap: 'MCP 服务列表与连接状态筛选',
+      },
     ],
     exampleTitle: '显式调用示例',
     exampleCmd: '使用 supply-chain-erp 的 query_supplier_status 查询供应商 SUP-2026-008 状态',
     tipTitle: '调试贴士',
-    tipText: '建议优先选择只读工具做首次联调；显式调用 opc_mcp_invoke 时需提供准确的 service_id、tool_name 与 arguments。',
-  },
-  apps: {
-    heading: '本地应用一键 AI 改造与部署上线（4 步流程）',
-    actionLabel: '前往应用中心 →',
-    steps: [
-      { num: '01', title: '选择应用与源码', desc: '点击「新建应用」，填写名称、访问子域名与分析模型，选择本地源码文件夹或 ZIP 压缩包发起 AI 分析。' },
-      { num: '02', title: '与 AI 改造应用', desc: 'OPC 在独立源码副本上生成 Dockerfile、契约与技能；如有待确认项（如管理员账密），在左侧会话回复即可。' },
-      { num: '03', title: '核对并发布上线', desc: '核对应用地址、容器端口、运行配置、持久化数据卷与必填环境变量，点击「确认配置并发布上线」。' },
-      { num: '04', title: '部署验证与运维', desc: '实时查看构建日志与健康检查，启用 /app-<标识> 技能；支持版本回滚、配置更新与单卷/整应用备份下载。' },
-    ],
-    exampleTitle: '对话调用示例',
-    exampleCmd: '/app-supplier-audit 查询最近提交的供应商审厂记录',
-    tipTitle: '运维保障',
-    tipText: '版本升级与回滚均会保留挂载卷中的业务数据；若平台上一轮构建未结束（1108），可直接等待后核对重发原交付包。',
+    tipText: '建议优先选择只读工具做首次联调；写操作或敏感动作会在对话中弹出审批卡片。',
   },
 } as const
 
@@ -239,32 +279,121 @@ const FAQ_ITEMS = [
   { q: '右侧边栏找不到 OPC 工作台入口', a: '在「插件 → 已安装插件」确认开关已打开，进入新会话再打开右侧栏；仍找不到可完整退出重启 DSH。' },
 ] as const
 
-export function WorkbenchHome({ onSelect }: { onSelect: (kind: ModuleKind) => void }) {
+export function WorkbenchHome({ onSelect, api }: { onSelect: (kind: ModuleKind) => void; api?: OpcApi }) {
   const heading = useId()
   const guideHeading = useId()
-  const guideRef = useRef<HTMLElement>(null)
-  const [guideTab, setGuideTab] = useState<HomeGuideTab>('quickstart')
+  const [guideOpen, setGuideOpen] = useState(false)
+  const [guideTab, setGuideTab] = useState<HomeGuideTab>('apps')
+  const [modalModule, setModalModule] = useState<ModuleKind | null>(null)
+  const [lightbox, setLightbox] = useState<{ src: string; cap: string } | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [images, setImages] = useState<Record<string, string>>({})
+  const loadingImages = useRef(new Set<string>())
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => () => {
     if (copyTimer.current) clearTimeout(copyTimer.current)
   }, [])
 
-  const openGuide = (tab: HomeGuideTab) => {
-    setGuideTab(tab)
-    guideRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-  }
+  useEffect(() => {
+    if (!api?.getGuideImage) return
+    const targetTabs: ModuleKind[] = []
+    if (guideOpen && guideTab !== 'faq') targetTabs.push(guideTab)
+    if (modalModule) targetTabs.push(modalModule)
+    const needed = targetTabs.flatMap(kind => MODULE_GUIDES[kind].steps.map(step => step.imgName))
+    for (const name of needed) {
+      if (images[name] !== undefined || loadingImages.current.has(name)) continue
+      loadingImages.current.add(name)
+      void api.getGuideImage(name).then(src => {
+        if (src) setImages(prev => ({ ...prev, [name]: src }))
+      }).catch(() => {}).finally(() => {
+        loadingImages.current.delete(name)
+      })
+    }
+  }, [api, guideOpen, guideTab, modalModule, images])
+
+  useEffect(() => {
+    if (!modalModule && !lightbox) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (lightbox) setLightbox(null)
+      else setModalModule(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [modalModule, lightbox])
 
   const copyCommand = async (id: string, text: string) => {
     try {
       await navigator.clipboard?.writeText(text)
     } catch {
-      // Clipboard may be unavailable in restricted contexts; visual confirmation still resets cleanly.
     }
     setCopiedId(id)
     if (copyTimer.current) clearTimeout(copyTimer.current)
     copyTimer.current = setTimeout(() => setCopiedId(current => (current === id ? null : current)), 1800)
+  }
+
+  const renderModuleGuideBody = (kind: ModuleKind, copyKeyPrefix: string) => {
+    const detail = MODULE_GUIDES[kind]
+    return (
+      <div className="opc-guide-pane">
+        <div className="opc-guide-pane-head">
+          <strong>{detail.heading}</strong>
+          <button type="button" className="opc-guide-link-btn" onClick={() => { setModalModule(null); onSelect(kind) }}>
+            {detail.actionLabel}
+          </button>
+        </div>
+        <div className="opc-guide-illustrated-list">
+          {detail.steps.map(step => {
+            const src = images[step.imgName]
+            return (
+              <div key={step.title} className="opc-guide-step-row">
+                <div className="opc-guide-step-copy">
+                  <span className={`opc-guide-badge opc-badge-${kind}`}>{step.badge}</span>
+                  <h4>{step.title}</h4>
+                  <p>{step.desc}</p>
+                </div>
+                {src ? (
+                  <button
+                    type="button"
+                    className="opc-guide-shot-btn"
+                    onClick={() => setLightbox({ src, cap: step.imgCap })}
+                    title="点击放大查看截图"
+                  >
+                    <img src={src} alt={step.imgCap} />
+                    <span className="opc-guide-shot-cap">{step.imgCap}</span>
+                  </button>
+                ) : (
+                  <div className="opc-guide-shot-placeholder">
+                    <span>{step.imgCap}</span>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        <div className="opc-guide-extras">
+          <div className="opc-guide-example-box">
+            <div className="opc-guide-example-head">
+              <strong>{detail.exampleTitle}</strong>
+              <button
+                type="button"
+                className="opc-guide-copy-btn"
+                onClick={() => void copyCommand(`${copyKeyPrefix}-${kind}`, detail.exampleCmd)}
+              >
+                <AppIcon name={copiedId === `${copyKeyPrefix}-${kind}` ? 'check' : 'copy'} size={12} />
+                <span>{copiedId === `${copyKeyPrefix}-${kind}` ? '已复制' : '复制示例'}</span>
+              </button>
+            </div>
+            <code className="opc-guide-cmd-syntax">{detail.exampleCmd}</code>
+          </div>
+          <div className="opc-guide-tip-box">
+            <strong>{detail.tipTitle}</strong>
+            <p>{detail.tipText}</p>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -272,147 +401,149 @@ export function WorkbenchHome({ onSelect }: { onSelect: (kind: ModuleKind) => vo
       <div className="opc-home-intro">
         <div className="opc-home-intro-copy">
           <div className="opc-home-intro-title-row">
-            <h2 id={heading}>欢迎使用 OPC 企业工作台</h2>
+            <h2 id={heading}>企业能力工作台</h2>
             {PLUGIN_VERSION && <span className="opc-home-version">v{PLUGIN_VERSION}</span>}
           </div>
-          <p>在 DeepSeek Harness 中无缝连接企业级能力：查文档、调技能、连业务工具，以及将本地应用源码一键 AI 改造并部署上线。</p>
+          <p>选择下方功能模块进入管理，或在左侧对话中直接调用企业能力。</p>
         </div>
       </div>
 
-      <div className="opc-home-section-head">
-        <h3>核心功能入口</h3>
-        <span>点击卡片进入对应模块，或点击「怎么用？」查看操作指南</span>
-      </div>
+      <div>
+        <div className="opc-home-section-head">
+          <div className="opc-home-section-label">
+            <span className="opc-home-section-dot" aria-hidden="true" />
+            <h3>功能模块入口</h3>
+          </div>
+          <span>点击卡片进入模块 · 点击 ? 查看图文指南</span>
+        </div>
 
-      <div className="opc-workbench-grid">
-        {modules.map(module => (
-          <article className="opc-workbench-card" key={module.kind}>
-            <button type="button" className="opc-workbench-card-main" onClick={() => onSelect(module.kind)}>
-              <span className={`opc-workbench-card-icon opc-workbench-card-${module.kind}`}>
-                <AppIcon name={module.icon} size={21} />
-              </span>
-              <span className="opc-workbench-card-copy">
-                <span className="opc-workbench-card-title-row">
-                  <strong>{module.label}</strong>
-                  <code className={`opc-workbench-card-tag opc-tag-${module.kind}`}>{module.tag}</code>
-                </span>
-                <span>{module.description}</span>
-              </span>
-            </button>
-            <div className="opc-workbench-card-footer">
-              <button type="button" className="opc-workbench-card-help" onClick={() => openGuide(module.kind)}>
-                怎么用？
-              </button>
-              <button type="button" className={`opc-workbench-card-go opc-go-${module.kind}`} onClick={() => onSelect(module.kind)}>
+        <div className="opc-workbench-grid">
+          {modules.map(module => (
+            <article className="opc-workbench-card" data-kind={module.kind} key={module.kind}>
+              <div className="opc-workbench-card-top">
+                <button type="button" className="opc-workbench-card-main" onClick={() => onSelect(module.kind)}>
+                  <span className={`opc-workbench-card-icon opc-workbench-card-${module.kind}`}>
+                    <AppIcon name={module.icon} size={20} />
+                  </span>
+                  <span className="opc-workbench-card-copy">
+                    <span className="opc-workbench-card-title-row">
+                      <strong>{module.label}</strong>
+                      <code className={`opc-workbench-card-tag opc-tag-${module.kind}`}>{module.tag}</code>
+                    </span>
+                    <span>{module.description}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="opc-workbench-card-help"
+                  title={`查看${module.label}图文指南`}
+                  aria-label={`查看${module.label}图文指南`}
+                  onClick={() => setModalModule(module.kind)}
+                >
+                  ?
+                </button>
+              </div>
+              <button type="button" className={`opc-workbench-card-cta opc-cta-${module.kind}`} onClick={() => onSelect(module.kind)}>
                 <span>{module.actionLabel}</span>
                 <AppIcon name="chevronRight" size={14} />
               </button>
-            </div>
-          </article>
-        ))}
+            </article>
+          ))}
+        </div>
       </div>
 
-      <section className="opc-home-guide" ref={guideRef} aria-labelledby={guideHeading}>
-        <h3 id={guideHeading} className="sr-only">使用指南与速查手册</h3>
-        <div className="opc-home-guide-tabs" role="tablist" aria-label="功能使用指南">
-          {GUIDE_TABS.map(tab => (
+      <section className="opc-home-ref" aria-labelledby={guideHeading}>
+        <div className="opc-home-ref-head">
+          <div className="opc-home-ref-title">
+            <h3 id={guideHeading}>使用指南与指令速查</h3>
+            <span className="opc-home-ref-badge">说明文档</span>
+          </div>
+          <button
+            type="button"
+            className="opc-home-ref-toggle"
+            aria-expanded={guideOpen}
+            onClick={() => setGuideOpen(open => !open)}
+          >
+            {guideOpen ? '收起图文指南 ▴' : '展开图文指南（含应用 4 步走） ▾'}
+          </button>
+        </div>
+
+        <div className="opc-home-quick-strip">
+          {QUICK_COMMANDS.map(cmd => (
             <button
-              key={tab.id}
+              key={cmd.id}
               type="button"
-              role="tab"
-              aria-selected={guideTab === tab.id}
-              className={`opc-home-guide-tab ${guideTab === tab.id ? 'is-active' : ''}`}
-              onClick={() => setGuideTab(tab.id)}
+              className="opc-home-quick-chip"
+              title={`点击复制示例：${cmd.example}`}
+              onClick={() => void copyCommand(`chip-${cmd.id}`, cmd.example)}
             >
-              {tab.label}
+              <span>{cmd.label}</span>
+              <code>{copiedId === `chip-${cmd.id}` ? '已复制示例' : cmd.shortCode}</code>
             </button>
           ))}
         </div>
 
-        <div className="opc-home-guide-body" role="tabpanel">
-          {guideTab === 'quickstart' && (
-            <div className="opc-guide-pane">
-              <p className="opc-guide-lead">在左侧 DSH 对话框中，可直接通过以下方式调用已授权的企业能力（点击可复制示例）：</p>
-              <div className="opc-guide-cmd-grid">
-                {QUICK_COMMANDS.map(cmd => (
-                  <div key={cmd.id} className="opc-guide-cmd-card">
-                    <div className="opc-guide-cmd-top">
-                      <strong className={`opc-cmd-title-${cmd.tone}`}>{cmd.title}</strong>
-                      <button type="button" className="opc-guide-copy-btn" onClick={() => void copyCommand(cmd.id, cmd.example)}>
-                        <AppIcon name={copiedId === cmd.id ? 'check' : 'copy'} size={12} />
-                        <span>{copiedId === cmd.id ? '已复制' : '复制示例'}</span>
-                      </button>
-                    </div>
-                    <code className="opc-guide-cmd-syntax">{cmd.syntax}</code>
-                    <p className="opc-guide-cmd-hint">{cmd.hint}</p>
-                  </div>
-                ))}
-              </div>
+        {guideOpen && (
+          <div className="opc-home-ref-details">
+            <div className="opc-home-guide-tabs" role="tablist" aria-label="功能使用指南">
+              {GUIDE_TABS.map(tab => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={guideTab === tab.id}
+                  className={`opc-home-guide-tab ${guideTab === tab.id ? 'is-active' : ''}`}
+                  onClick={() => setGuideTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
-          )}
 
-          {guideTab !== 'quickstart' && guideTab !== 'faq' && (() => {
-            const detail = MODULE_GUIDES[guideTab]
-            return (
-              <div className="opc-guide-pane">
-                <div className="opc-guide-pane-head">
-                  <strong>{detail.heading}</strong>
-                  <button type="button" className="opc-guide-link-btn" onClick={() => onSelect(guideTab)}>
-                    {detail.actionLabel}
-                  </button>
-                </div>
-                <div className="opc-guide-steps-grid">
-                  {detail.steps.map(step => (
-                    <div key={step.num} className={`opc-guide-step-card opc-step-tone-${guideTab}`}>
-                      <div className="opc-guide-step-top">
-                        <span className="opc-guide-step-num">{step.num}</span>
-                        <strong>{step.title}</strong>
+            <div className="opc-home-guide-body" role="tabpanel">
+              {guideTab !== 'faq' ? renderModuleGuideBody(guideTab, 'tab') : (
+                <div className="opc-guide-pane">
+                  <div className="opc-guide-pane-head">
+                    <strong>高频问题排查</strong>
+                  </div>
+                  <div className="opc-guide-faq-list">
+                    {FAQ_ITEMS.map(item => (
+                      <div key={item.q} className="opc-guide-faq-item">
+                        <strong>{item.q}</strong>
+                        <span>{item.a}</span>
                       </div>
-                      <p>{step.desc}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="opc-guide-extras">
-                  <div className="opc-guide-example-box">
-                    <div className="opc-guide-example-head">
-                      <strong>{detail.exampleTitle}</strong>
-                      <button
-                        type="button"
-                        className="opc-guide-copy-btn"
-                        onClick={() => void copyCommand(`guide-${guideTab}`, detail.exampleCmd)}
-                      >
-                        <AppIcon name={copiedId === `guide-${guideTab}` ? 'check' : 'copy'} size={12} />
-                        <span>{copiedId === `guide-${guideTab}` ? '已复制' : '复制示例'}</span>
-                      </button>
-                    </div>
-                    <code className="opc-guide-cmd-syntax">{detail.exampleCmd}</code>
-                  </div>
-                  <div className="opc-guide-tip-box">
-                    <strong>{detail.tipTitle}</strong>
-                    <p>{detail.tipText}</p>
+                    ))}
                   </div>
                 </div>
-              </div>
-            )
-          })()}
-
-          {guideTab === 'faq' && (
-            <div className="opc-guide-pane">
-              <div className="opc-guide-pane-head">
-                <strong>高频问题排查</strong>
-              </div>
-              <div className="opc-guide-faq-list">
-                {FAQ_ITEMS.map(item => (
-                  <div key={item.q} className="opc-guide-faq-item">
-                    <strong>{item.q}</strong>
-                    <span>{item.a}</span>
-                  </div>
-                ))}
-              </div>
+              )}
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </section>
+
+      {modalModule && (
+        <div className="opc-guide-modal-backdrop" role="dialog" aria-modal="true" onClick={e => { if (e.target === e.currentTarget) setModalModule(null) }}>
+          <div className="opc-guide-modal">
+            <div className="opc-guide-modal-head">
+              <strong>{MODULE_GUIDES[modalModule].heading}</strong>
+              <button type="button" className="opc-guide-modal-close" aria-label="关闭" onClick={() => setModalModule(null)}>✕</button>
+            </div>
+            {renderModuleGuideBody(modalModule, 'modal')}
+          </div>
+        </div>
+      )}
+
+      {lightbox && (
+        <div className="opc-guide-lightbox" role="dialog" aria-modal="true" onClick={e => { if (e.target === e.currentTarget) setLightbox(null) }}>
+          <div className="opc-guide-lightbox-inner">
+            <img src={lightbox.src} alt={lightbox.cap} />
+            <div className="opc-guide-lightbox-bar">
+              <span>{lightbox.cap}</span>
+              <button type="button" onClick={() => setLightbox(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
