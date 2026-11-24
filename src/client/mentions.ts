@@ -1,4 +1,5 @@
 import { OpcIcon } from './branding.tsx'
+import { getActiveClientLocale, translate } from './i18n.tsx'
 import type { Context } from '@deepseek-ai/cordis'
 import type { InputTriggerServiceContract, InputTriggerSource } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type { AuthState, OpcApi, Resource } from './api.ts'
@@ -26,7 +27,7 @@ export function registerMentions(ctx: Context, api: OpcApi) {
         return {
           name: `opc ${row.name} ${ownerSpace}`,
           label: displayLabel,
-          section: 'OPC 知识库',
+          section: translate(getActiveClientLocale(), 'common.module.knowledge'),
           icon: OpcIcon,
           value: `opc-kb:${state.context!.contextId}/${encodeURIComponent(row.tenant_id)}/${encodeURIComponent(row.knowledge_base_id!)}`,
         }

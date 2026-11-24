@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import type { AppDeliveryJob, OpcApi } from './api.ts'
 import { AppDiscoveryReport } from './AppDiscoveryReport.tsx'
 import { AppIcon, type AppIconName } from './AppIcon.tsx'
-import { translatePair, useI18n, type ClientLocale } from './i18n.tsx'
+import { translate, useI18n, type ClientLocale } from './i18n.tsx'
 import { NoticeModal } from './NoticeModal.tsx'
 
 type DimensionMeta = {
@@ -15,27 +15,27 @@ type DimensionMeta = {
 function getDimensionMeta(tag: string, locale: ClientLocale): DimensionMeta {
   const t = tag.trim()
   if (/应用定位|业务用途|项目用途|定位/.test(t)) {
-    return { label: translatePair(locale, '应用定位', 'Positioning'), subTitle: translatePair(locale, '业务用途与定位', 'Business Purpose'), icon: 'sparkle', pillClass: 'oa-pill-accent' }
+    return { label: translate(locale, "apps.review.positioning"), subTitle: translate(locale, "apps.review.businessPurpose"), icon: 'sparkle', pillClass: 'oa-pill-accent' }
   }
   if (/运行环境|技术栈|开发语言|运行时|环境/.test(t)) {
-    return { label: translatePair(locale, '运行环境', 'Runtime'), subTitle: translatePair(locale, '开发语言与技术栈', 'Language & Stack'), icon: 'code', pillClass: 'oa-pill-teal' }
+    return { label: translate(locale, "apps.review.runtime"), subTitle: translate(locale, "apps.review.languageAndStack"), icon: 'code', pillClass: 'oa-pill-teal' }
   }
   if (/接口与页面|页面与接口|页面与业务视图|视图与路由/.test(t)) {
-    return { label: translatePair(locale, '接口与页面', 'APIs & Pages'), subTitle: translatePair(locale, '全景契约与视图', 'Contract & Views'), icon: 'table', pillClass: 'oa-pill-warn' }
+    return { label: translate(locale, "apps.review.apisAndPages"), subTitle: translate(locale, "apps.review.contractAndViews"), icon: 'table', pillClass: 'oa-pill-warn' }
   }
   if (/后端\s*API|API\s*接口|服务接口|接口清单/.test(t)) {
-    return { label: translatePair(locale, '后端接口', 'Backend APIs'), subTitle: translatePair(locale, 'API 接口全景', 'API Overview'), icon: 'plug', pillClass: 'oa-pill-accent' }
+    return { label: translate(locale, "apps.review.backendApis"), subTitle: translate(locale, "apps.review.apiOverview"), icon: 'plug', pillClass: 'oa-pill-accent' }
   }
   if (/页面与视图|页面清单|业务视图/.test(t)) {
-    return { label: translatePair(locale, '页面视图', 'Pages & Views'), subTitle: translatePair(locale, '业务视图全景', 'View Overview'), icon: 'table', pillClass: 'oa-pill-warn' }
+    return { label: translate(locale, "apps.review.pagesAndViews"), subTitle: translate(locale, "apps.review.viewOverview"), icon: 'table', pillClass: 'oa-pill-warn' }
   }
   if (/登录与鉴权|鉴权与安全|安全凭据|权限与凭据/.test(t)) {
-    return { label: translatePair(locale, '登录与鉴权', 'Auth & Security'), subTitle: translatePair(locale, '权限与安全策略', 'Permissions & Auth'), icon: 'shield', pillClass: 'oa-pill-ok' }
+    return { label: translate(locale, "apps.review.authAndSecurity"), subTitle: translate(locale, "apps.review.permissionsAndAuth"), icon: 'shield', pillClass: 'oa-pill-ok' }
   }
   if (/数据与存储|存储与数据库|持久化|数据库/.test(t)) {
-    return { label: translatePair(locale, '数据与存储', 'Data & Storage'), subTitle: translatePair(locale, '数据存储与持久化', 'Storage & Persistence'), icon: 'archive', pillClass: '' }
+    return { label: translate(locale, "apps.review.dataAndStorage"), subTitle: translate(locale, "apps.review.storageAndPersistence"), icon: 'archive', pillClass: '' }
   }
-  return { label: t, subTitle: translatePair(locale, '分析明细', 'Analysis Details'), icon: 'diamond', pillClass: '' }
+  return { label: t, subTitle: translate(locale, "apps.review.analysisDetails"), icon: 'diamond', pillClass: '' }
 }
 
 function renderFormattedSummary(rawText: string, locale: ClientLocale) {
@@ -200,7 +200,7 @@ export function AppDeliveryReview({
   footerMode?: 'inline' | 'external'
   onStepStateChange?: (state: { jobId: string; canContinue: boolean; triggerNext: () => void } | null) => void
 }) {
-  const { locale, tr } = useI18n()
+  const { locale, t } = useI18n()
   const [job, setJob] = useState<AppDeliveryJob | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -286,7 +286,7 @@ export function AppDeliveryReview({
     try {
       await api.appSaveConfigDraft(job.id, JSON.stringify({ artifactHash: job.artifactHash, protectedInputs: true, rows }), contextId)
       accept(await loadJob())
-      setInputResult(tr('已保存，第三步可核对或替换。', 'Saved; you can review or replace it in Step 3.'))
+      setInputResult(t("apps.review.savedYouCanReviewOrReplace"))
     } catch (error) {
       setInputResult(String(error))
     } finally {
@@ -327,7 +327,7 @@ export function AppDeliveryReview({
       const raw = await api.appPrepare(jobId, pHash, contextId)
       const result = JSON.parse(raw) as AppDeliveryJob
       accept(result)
-      if (result.status !== 'ready') setError(result.error || tr('交付包生成未完成', 'Delivery bundle preparation incomplete'))
+      if (result.status !== 'ready') setError(result.error || t("apps.review.deliveryBundlePreparationIncomplete"))
     } catch (e) {
       setError(String(e))
     } finally {
@@ -348,7 +348,7 @@ export function AppDeliveryReview({
       const result = await loadJob()
       if (!result || result.status !== 'ready' || result.artifactHash !== job?.artifactHash || result.proposal?.unresolved?.length) {
         accept(result)
-        throw new Error(tr('应用或配置已变化，请先处理当前问题。', 'App or configuration has changed. Please resolve the current issue first.'))
+        throw new Error(t("apps.review.appOrConfigurationHasChangedPlease"))
       }
       onReady(result)
       onNextStep?.()
@@ -371,16 +371,16 @@ export function AppDeliveryReview({
   }, [jobId, canContinue, onStepStateChange])
 
   const title = running
-    ? job?.status === 'preparing' ? tr('正在生成交付包', 'Preparing delivery bundle') : tr('AI 正在检查和改造', 'AI is inspecting and adapting')
+    ? job?.status === 'preparing' ? t("apps.review.preparingDeliveryBundle") : t("apps.review.aiIsInspectingAndAdapting")
     : activeError
-      ? tr('应用准备暂停', 'App preparation paused')
+      ? t("apps.review.appPreparationPaused")
       : questions.length
-        ? tr('有 {count} 件事需要你决定', '{count} decision(s) needed', { count: questions.length })
+        ? t("apps.review.decisionSNeeded", { count: questions.length })
         : checkingProposal
-          ? tr('改造方案已通过校验', 'Proposal validated')
+          ? t("apps.review.proposalValidated")
           : ready
-            ? tr('交付包已生成，可以核对部署内容', 'Delivery bundle ready for review')
-            : tr('正在读取应用', 'Loading application')
+            ? t("apps.review.deliveryBundleReadyForReview")
+            : t("apps.review.loadingApplication")
 
   const summaries = (job?.conversation || []).filter(message => message.role === 'assistant')
   const events = job?.events || []
@@ -420,7 +420,7 @@ export function AppDeliveryReview({
       <NoticeModal
         open={Boolean(activeError) && dismissedError !== activeError}
         variant="error"
-        title={isConnectionError ? tr('暂时无法连接 AI 服务', 'Unable to connect to AI service') : tr('应用准备暂停', 'App preparation paused')}
+        title={isConnectionError ? t("apps.review.unableToConnectToAiService") : t("apps.review.appPreparationPaused")}
         message={activeError}
         onClose={() => {
           setError('')
@@ -431,12 +431,12 @@ export function AppDeliveryReview({
           <>
             {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
               <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => { setDismissedError(activeError); void prepare() }}>
-                {tr('重试准备', 'Retry preparation')}
+                {t("apps.review.retryPreparation")}
               </button>
             )}
             {(job?.status === 'failed' || job?.status === 'cancelled') && api.appAnalyzeWithMode && (
               <button type="button" className={`oa-btn oa-btn-sm${job.failureStage === 'preparation' ? '' : ' oa-btn-primary'}`} disabled={running} onClick={() => { setDismissedError(activeError); void resumeAnalysis() }}>
-                {job.failureStage === 'preparation' ? tr('让 AI 查看失败证据', 'Let AI inspect failure') : tr('让 AI 继续准备', 'Let AI continue')}
+                {job.failureStage === 'preparation' ? t("apps.review.letAiInspectFailure") : t("apps.review.letAiContinue")}
               </button>
             )}
           </>
@@ -444,9 +444,9 @@ export function AppDeliveryReview({
       />
 
       {(repairMode || job?.analysis_mode === 'repair' || job?.analysisMode === 'repair') && (
-        <div className="oa-alert oa-alert-warn" style={{ margin: '12px 14px 0' }} aria-label={tr('部署失败修复状态', 'Repair status')}>
-          <strong>{running ? tr('正在诊断失败并核对修复', 'Diagnosing failure and verifying fix') : ready ? tr('修复包已生成，等待部署验证', 'Fix bundle ready, awaiting deployment') : tr('部署失败专项修复', 'Deployment failure repair')}</strong>
-          <span>{tr('对照失败制品与原始源码，保留业务和已有配置。提案、语法检查、服务器启动和业务验证分别记录。', 'Comparing failed artifacts with original source while preserving business logic and existing config.')}</span>
+        <div className="oa-alert oa-alert-warn" style={{ margin: '12px 14px 0' }} aria-label={t("apps.review.repairStatus")}>
+          <strong>{running ? t("apps.review.diagnosingFailureAndVerifyingFix") : ready ? t("apps.review.fixBundleReadyAwaitingDeployment") : t("apps.review.deploymentFailureRepair")}</strong>
+          <span>{t("apps.review.comparingFailedArtifactsWithOriginalSource")}</span>
         </div>
       )}
 
@@ -470,27 +470,27 @@ export function AppDeliveryReview({
           <div>
             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
               <h3 style={{ margin: 0, fontSize: 14.5, fontWeight: 600 }}>{title}</h3>
-              <span className="oa-pill">{tr('第 {rev} 轮 · {name}', 'Round {rev} · {name}', { rev: revNum, name: job?.name || tr('准备应用', 'Preparing app') })}</span>
+              <span className="oa-pill">{t("apps.review.round", { rev: revNum, name: job?.name || t("apps.review.preparingApp") })}</span>
             </div>
             <p className="oa-hint" style={{ margin: '3px 0 0' }}>
               {chatActive
-                ? tr('请在左侧分析会话的聊天框回复。AI 要求填写管理员账号时，也在这里回复。', 'Reply in the left analysis chat box, including admin account prompts from AI.')
+                ? t("apps.review.replyInTheLeftAnalysisChat")
                 : ready
-                  ? tr('交付包检查已完成。服务器构建、启动与业务访问将在部署时验证。', 'Delivery bundle check complete. Server build, startup, and access will be verified on deploy.')
+                  ? t("apps.review.deliveryBundleCheckCompleteServerBuild")
                   : null}
             </p>
           </div>
         </div>
       </header>
 
-      <div ref={chatScrollRef} className="oa-review-stream" aria-label={tr('应用改造进度与结果', 'Adaptation progress and results')}>
+      <div ref={chatScrollRef} className="oa-review-stream" aria-label={t("apps.review.adaptationProgressAndResults")}>
         {summaries.map((m, i) => (
           <article key={i} className="oa-msg-row">
             <div className="oa-avatar-badge">
               <AppIcon name="sparkle" size={14} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="oa-hint" style={{ marginBottom: 4 }}>{tr('第 {rev} 轮改造摘要', 'Round {rev} adaptation summary', { rev: m.revision || revNum })}</div>
+              <div className="oa-hint" style={{ marginBottom: 4 }}>{t("apps.review.roundAdaptationSummary", { rev: m.revision || revNum })}</div>
               <div className="oa-bubble">{renderFormattedSummary(m.text, locale)}</div>
             </div>
           </article>
@@ -502,7 +502,7 @@ export function AppDeliveryReview({
               <AppIcon name="sparkle" size={14} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="oa-hint" style={{ marginBottom: 4 }}>{tr('AI 改造助手 · 第 {rev} 轮分析', 'AI Assistant · Round {rev} analysis', { rev: revNum })}</div>
+              <div className="oa-hint" style={{ marginBottom: 4 }}>{t("apps.review.aiAssistantRoundAnalysis", { rev: revNum })}</div>
               <div className="oa-bubble">{renderFormattedSummary(plan.summary, locale)}</div>
             </div>
           </article>
@@ -516,12 +516,12 @@ export function AppDeliveryReview({
 
         {ready && job?.runtime_configs?.some(item => !item.needs_user_input) && (
           <details className="oa-subcard">
-            <summary>{tr('查看已解析的部署配置', 'View resolved deployment configs')}</summary>
+            <summary>{t("apps.review.viewResolvedDeploymentConfigs")}</summary>
             <dl className="oa-cfg-ref-dl">
               {job.runtime_configs.filter(item => !item.needs_user_input).map(item => (
                 <React.Fragment key={item.key}>
                   <dt><code>{item.key}</code></dt>
-                  <dd><code>{item.effective_value || item.value || (item.resource_id ? tr('由所选资源在部署时提供', 'Provided by selected resource on deploy') : tr('未设置', 'Unset'))}</code></dd>
+                  <dd><code>{item.effective_value || item.value || (item.resource_id ? t("apps.review.providedBySelectedResourceOnDeploy") : t("apps.config.unset"))}</code></dd>
                 </React.Fragment>
               ))}
             </dl>
@@ -529,22 +529,22 @@ export function AppDeliveryReview({
         )}
 
         {ready && requestedInputs.length > 0 && api.appSaveConfigDraft && (
-          <form className="oa-subcard" aria-label={tr('填写部署配置', 'Fill Deployment Config')} onSubmit={event => { event.preventDefault(); void saveProtectedInputs() }}>
-            <strong>{tr('填写部署配置', 'Fill Deployment Config')}</strong>
-            <span className="oa-hint">{tr('在这里填写，第三步会带入这些值。部署会话可读取已填写的值。', 'Values entered here carry over to Step 3 and are readable by the deployment session.')}</span>
+          <form className="oa-subcard" aria-label={t("apps.review.fillDeploymentConfig")} onSubmit={event => { event.preventDefault(); void saveProtectedInputs() }}>
+            <strong>{t("apps.review.fillDeploymentConfig")}</strong>
+            <span className="oa-hint">{t("apps.review.valuesEnteredHereCarryOverTo")}</span>
             {requestedInputs.map(item => (
               <label key={item.key} className="oa-field">
-                <span className="oa-label"><code>{item.key}</code> {item.has_value ? tr('· 已填写', '· Filled') : item.required ? tr('· 必填', '· Required') : tr('· 选填', '· Optional')}</span>
+                <span className="oa-label"><code>{item.key}</code> {item.has_value ? t("apps.review.filled") : item.required ? t("apps.review.required") : t("apps.review.optional")}</span>
                 {item.description && <span className="oa-hint">{item.description}</span>}
                 <input className="oa-input" type="text"
                   value={protectedValues[item.key] ?? item.value} disabled={savingInputs} autoComplete="off"
-                  placeholder={item.has_value ? tr('保留已填写值，或在这里替换', 'Keep existing value or replace here') : tr('也可在第三步填写', 'Can also be filled in Step 3')}
+                  placeholder={item.has_value ? t("apps.review.keepExistingValueOrReplaceHere") : t("apps.review.canAlsoBeFilledInStep")}
                   onChange={event => { const value = event.target.value; setProtectedValues(current => ({ ...current, [item.key]: value })) }} />
               </label>
             ))}
             <div>
               <button type="submit" className="oa-btn oa-btn-sm" disabled={savingInputs || !requestedInputs.some(item => protectedValues[item.key])}>
-                {tr('保存配置', 'Save Config')}
+                {t("apps.review.saveConfig")}
               </button>
               {inputResult && <p className="oa-hint" role="status">{inputResult}</p>}
             </div>
@@ -564,13 +564,13 @@ export function AppDeliveryReview({
                     style={{ background: running ? 'var(--oa-accent)' : activeError ? 'var(--oa-danger)' : 'var(--oa-ok)' }}
                   />
                   <strong style={{ fontSize: 12.5 }}>
-                    {running ? tr('AI 正在检查与改造应用…', 'AI is inspecting and adapting the app...') : activeError ? tr('AI 改造处理过程（执行中断）', 'AI adaptation process (interrupted)') : tr('AI 改造处理过程记录', 'AI adaptation process log')}
+                    {running ? t("apps.review.aiIsInspectingAndAdaptingThe") : activeError ? t("apps.review.aiAdaptationProcessInterrupted") : t("apps.review.aiAdaptationProcessLog")}
                   </strong>
                 </div>
-                <span className="oa-hint oa-mono">{tr('已记录 {count} 项进度', '{count} event(s)', { count: visibleEvents.length })}</span>
+                <span className="oa-hint oa-mono">{t("apps.review.eventS", { count: visibleEvents.length })}</span>
               </div>
 
-              {recovering && <div role="status" className="oa-hint">{tr('AI 正在处理检查发现的问题，你的选择已保留。', 'AI is resolving issues found during inspection; your choices are preserved.')}</div>}
+              {recovering && <div role="status" className="oa-hint">{t("apps.review.aiIsResolvingIssuesFoundDuring")}</div>}
 
               <div ref={eventsScrollRef} className="oa-timeline-list">
                 {visibleEvents.map((ev, idx) => {
@@ -585,7 +585,7 @@ export function AppDeliveryReview({
                 {!visibleEvents.length && running && (
                   <div className="oa-timeline-item latest">
                     <AppIcon name="refresh" size={12} className="oa-spin" />
-                    <span>{tr('正在连接 AI 改造引擎与代码沙箱…', 'Connecting to AI adaptation engine and sandbox...')}</span>
+                    <span>{t("apps.review.connectingToAiAdaptationEngineAnd")}</span>
                   </div>
                 )}
               </div>
@@ -598,9 +598,9 @@ export function AppDeliveryReview({
             <div className="oa-avatar-badge warn">
               <AppIcon name="sparkle" size={14} />
             </div>
-            <div className="oa-bubble" aria-label={tr('需要你决定的事项', 'Decisions required')}>
+            <div className="oa-bubble" aria-label={t("apps.review.decisionsRequired")}>
               <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--oa-warn)' }}>
-                {job?.analysisChatStarting ? tr('正在恢复左侧分析会话', 'Resuming analysis session') : tr('请在左侧分析会话回答以下问题', 'Please answer these questions in the left analysis chat')}
+                {job?.analysisChatStarting ? t("apps.review.resumingAnalysisSession") : t("apps.review.pleaseAnswerTheseQuestionsInThe")}
               </div>
               {questions.map((q, i) => {
                 const question = text(q)
@@ -621,7 +621,7 @@ export function AppDeliveryReview({
                 )
               })}
               {!chatActive && !job?.analysisChatStarting && api.appAnalyzeWithMode && (
-                <button type="button" className="oa-btn oa-btn-sm" onClick={() => void resumeAnalysis()}>{tr('恢复左侧分析会话', 'Resume Analysis Chat')}</button>
+                <button type="button" className="oa-btn oa-btn-sm" onClick={() => void resumeAnalysis()}>{t("apps.review.resumeAnalysisChat")}</button>
               )}
             </div>
           </div>
@@ -629,7 +629,7 @@ export function AppDeliveryReview({
 
         {technicalEvents.length > 0 && (
           <details style={{ fontSize: 12, color: 'var(--oa-muted)' }}>
-            <summary style={{ cursor: 'pointer' }}>{tr('查看历史提案校验记录', 'View proposal validation history')}</summary>
+            <summary style={{ cursor: 'pointer' }}>{t("apps.review.viewProposalValidationHistory")}</summary>
             <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
               {technicalEvents.map((ev, index) => (
                 <li key={index}>{isRejected(ev) ? '× ' : ''}{ev}</li>
@@ -645,27 +645,27 @@ export function AppDeliveryReview({
             </div>
             <div role="alert" className="oa-bubble oa-alert-danger">
               <div style={{ fontWeight: 600 }}>
-                {isConnectionError ? tr('暂时无法连接 AI 服务。', 'Unable to connect to AI service.') : tr('这次应用准备没有完成。', 'App preparation did not complete.')}
+                {isConnectionError ? t("apps.review.unableToConnectToAiService_2") : t("apps.review.appPreparationDidNotComplete")}
                 {job?.failureStage === 'preparation' && plan
-                  ? tr(' 已通过校验的方案已保存，可以直接重试生成交付包。', ' Validated proposal saved; you can retry preparing the bundle.')
+                  ? t("apps.review.validatedProposalSavedYouCanRetry")
                   : job?.status === 'failed' || job?.status === 'cancelled'
-                    ? tr(' 原始源码和你的选择已保留，可以继续准备。', ' Original source and choices are preserved.')
-                    : tr(' 请重试当前操作。', ' Please retry the current operation.')}
+                    ? t("apps.review.originalSourceAndChoicesArePreserved")
+                    : t("apps.review.pleaseRetryTheCurrentOperation")}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
                   <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void prepare()}>
-                    {tr('重试准备', 'Retry preparation')}
+                    {t("apps.review.retryPreparation")}
                   </button>
                 )}
                 {(job?.status === 'failed' || job?.status === 'cancelled') && api.appAnalyzeWithMode && (
                   <button type="button" className={`oa-btn oa-btn-sm${job.failureStage === 'preparation' ? '' : ' oa-btn-primary'}`} disabled={running} onClick={() => void resumeAnalysis()}>
-                    {job.failureStage === 'preparation' ? tr('让 AI 查看失败证据', 'Let AI inspect failure') : tr('让 AI 继续准备', 'Let AI continue')}
+                    {job.failureStage === 'preparation' ? t("apps.review.letAiInspectFailure") : t("apps.review.letAiContinue")}
                   </button>
                 )}
               </div>
               <details style={{ fontSize: 12 }}>
-                <summary style={{ cursor: 'pointer' }}>{tr('查看技术详情', 'View technical details')}</summary>
+                <summary style={{ cursor: 'pointer' }}>{t("apps.review.viewTechnicalDetails")}</summary>
                 <p style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{activeError}</p>
               </details>
             </div>
@@ -674,8 +674,8 @@ export function AppDeliveryReview({
 
         {checkingProposal && !chatActive && (
           <div className="oa-bubble oa-alert-info">
-            <div>{tr('当前方案已通过校验，可以生成交付包。', 'Proposal validated. Ready to generate delivery bundle.')}</div>
-            <button type="button" className="oa-btn oa-btn-sm" onClick={() => void prepare()}>{tr('生成交付包', 'Generate Bundle')}</button>
+            <div>{t("apps.review.proposalValidatedReadyToGenerateDelivery")}</div>
+            <button type="button" className="oa-btn oa-btn-sm" onClick={() => void prepare()}>{t("apps.review.generateBundle")}</button>
           </div>
         )}
 
@@ -687,24 +687,24 @@ export function AppDeliveryReview({
             <div className="oa-bubble oa-alert-ok">
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>{tr('应用改造和交付包检查已完成', 'Adaptation and bundle verification complete')}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{t("apps.review.adaptationAndBundleVerificationComplete")}</div>
                   <div className="oa-hint" style={{ marginTop: 2 }}>
-                    {plan?.readiness?.reason || transformation?.headline || tr('可以核对要部署的应用内容和配置。', 'Ready to review deployment contents and config.')}
+                    {plan?.readiness?.reason || transformation?.headline || t("apps.review.readyToReviewDeploymentContentsAnd")}
                   </div>
                 </div>
                 {footerMode === 'inline' && canContinue && (
                   <button type="button" className="oa-btn oa-btn-primary" onClick={() => void next()}>
-                    {tr('下一步：核对部署内容', 'Next: Review Deployment')}
+                    {t("apps.review.nextReviewDeployment")}
                   </button>
                 )}
               </div>
 
               {transformation && (
-                <div className="oa-subcard" style={{ marginTop: 4 }} aria-label={tr('第二步：应用改造完成报告', 'Step 2: Adaptation Report')}>
-                  <div style={{ fontWeight: 600 }}>{tr('📋 改造简报（增减与改动一览）', 'Adaptation Summary')}</div>
+                <div className="oa-subcard" style={{ marginTop: 4 }} aria-label={t("apps.review.step2AdaptationReport")}>
+                  <div style={{ fontWeight: 600 }}>{t("apps.review.adaptationSummary")}</div>
                   <div className="oa-grid-2">
                     <div style={{ borderRadius: 8, border: '1px solid var(--oa-line)', background: 'var(--oa-paper)', padding: 10 }}>
-                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{tr('➕ 新增了什么（{count} 项）', 'Added ({count})', { count: transformation.added_files?.length || 0 })}</div>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("apps.review.added", { count: transformation.added_files?.length || 0 })}</div>
                       {transformation.added_files?.length ? (
                         <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, color: 'var(--oa-muted)' }}>
                           {transformation.added_files.map((item: any) => (
@@ -714,11 +714,11 @@ export function AppDeliveryReview({
                           ))}
                         </ul>
                       ) : (
-                        <div className="oa-hint">{tr('无新增文件', 'No added files')}</div>
+                        <div className="oa-hint">{t("apps.review.noAddedFiles")}</div>
                       )}
                     </div>
                     <div style={{ borderRadius: 8, border: '1px solid var(--oa-line)', background: 'var(--oa-paper)', padding: 10 }}>
-                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{tr('🔧 改造了什么（{count} 项）', 'Modified ({count})', { count: transformation.modified_files?.length || 0 })}</div>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("apps.review.modified", { count: transformation.modified_files?.length || 0 })}</div>
                       {transformation.modified_files?.length ? (
                         <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, color: 'var(--oa-muted)' }}>
                           {transformation.modified_files.map((item: any) => (
@@ -728,7 +728,7 @@ export function AppDeliveryReview({
                           ))}
                         </ul>
                       ) : (
-                        <div className="oa-hint">{tr('未改动业务源码（零侵入交付）', 'No source code modified (zero-intrusion delivery)')}</div>
+                        <div className="oa-hint">{t("apps.review.noSourceCodeModifiedZeroIntrusion")}</div>
                       )}
                     </div>
                   </div>
@@ -755,14 +755,14 @@ export function AppDeliveryReview({
         {handoff && (
           <div className="oa-subcard" style={{ background: 'var(--oa-paper)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <strong>{tr('已生成交接说明并复制到剪贴板', 'Handoff prompt generated and copied to clipboard')}</strong>
+              <strong>{t("apps.review.handoffPromptGeneratedAndCopiedTo")}</strong>
               <button type="button" className="oa-btn-link" onClick={() => setHandoff(null)}>
-                {tr('关闭', 'Close')}
+                {t("common.close")}
               </button>
             </div>
-            {handoff.source_path && <div className="oa-hint oa-mono">{tr('本机独立源码副本：', 'Local source copy: ')}{handoff.source_path}</div>}
+            {handoff.source_path && <div className="oa-hint oa-mono">{t("apps.review.localSourceCopy")}{handoff.source_path}</div>}
             <details style={{ fontSize: 12 }}>
-              <summary style={{ cursor: 'pointer', color: 'var(--oa-accent)' }}>{tr('查看交接说明', 'View handoff prompt')}</summary>
+              <summary style={{ cursor: 'pointer', color: 'var(--oa-accent)' }}>{t("apps.review.viewHandoffPrompt")}</summary>
               <pre className="oa-mono" style={{ whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto', marginTop: 6, padding: 8, background: 'var(--oa-panel)', borderRadius: 8 }}>
                 {handoff.prompt}
               </pre>
@@ -789,18 +789,18 @@ export function AppDeliveryReview({
               }}
             >
               <AppIcon name="copy" size={12} />
-              {copied ? tr('已复制交接说明', 'Copied handoff') : tr('复制交接说明', 'Copy handoff')}
+              {copied ? t("apps.review.copiedHandoff") : t("apps.review.copyHandoff")}
             </button>
             {onReplaceSource && (
               <button type="button" disabled={running} className="oa-btn oa-btn-sm" onClick={onReplaceSource}>
                 <AppIcon name="refresh" size={12} />
-                {tr('已经改好了，重新导入源码', 'Changes done, re-import source')}
+                {t("apps.review.changesDoneReImportSource")}
               </button>
             )}
           </div>
           {job?.analysisSessionId && job.analysisSessionId !== sessionId && (
             <button type="button" className="oa-btn oa-btn-sm" onClick={() => job && beginAnalysisNavigation?.()?.(job)}>
-              {tr('打开左侧分析会话', 'Open Left Analysis Chat')}
+              {t("apps.review.openLeftAnalysisChat")}
             </button>
           )}
         </div>
