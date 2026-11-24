@@ -2,6 +2,8 @@ import type { RequestApproval } from './mcp.ts'
 import { ManagedMcpMounts, mcpMountName } from './mcp-mount.ts'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -9,6 +11,17 @@ import { OpcCore } from './core.ts'
 import { contextId, OpcError } from './context.ts'
 import { AppDelivery } from './app-delivery.ts'
 import { OpcConfigStore } from './opc-config.ts'
+
+const GUIDE_IMAGE_ALLOWLIST = new Set([
+  '11-knowledge-search.jpg',
+  '12-knowledge-catalog.jpg',
+  '14-skills.jpg',
+  '15-mcp.jpg',
+  '16-app-source.jpg',
+  '19-app-analysis.jpg',
+  '22-app-deploy-review.jpg',
+  '25-app-login-page.jpg',
+])
 
 const execFileAsync = promisify(execFile)
 
@@ -285,6 +298,19 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async opcConfigTest(url: string): Promise<string> {
     return JSON.stringify(await this.configStore.testConnection(url))
+  }
+  @Remote
+  async getGuideImage(imageName: string): Promise<string> {
+    if (!GUIDE_IMAGE_ALLOWLIST.has(imageName)) return ''
+    const fromSrc = fileURLToPath(new URL(`../../docs/images/workbench/${imageName}`, import.meta.url))
+    const fromLib = fileURLToPath(new URL(`../docs/images/workbench/${imageName}`, import.meta.url))
+    const target = import.meta.url.endsWith('/lib/index.js') ? fromLib : fromSrc
+    try {
+      const data = await readFile(target)
+      return `data:image/jpeg;base64,${data.toString('base64')}`
+    } catch {
+      return ''
+    }
   }
   @Remote
   async state(): Promise<string> {

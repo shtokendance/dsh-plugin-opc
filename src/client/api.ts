@@ -308,6 +308,7 @@ export interface OpcApi {
   mountMcpService(service: string, context: string, tenantId: string): Promise<void>
   unmountMcpService(service: string, context: string): Promise<void>
   listMcpServices(): Promise<string>
+  getGuideImage?(imageName: string): Promise<string>
 }
 export interface AuthState {
   pinnedScopes?: Record<string, string>

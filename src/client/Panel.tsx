@@ -1100,7 +1100,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
       </div>}
       {state.loginError && <p role="alert" className="error">{state.loginError.message}</p>}
     </div> : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
-      {kind === 'home' && <WorkbenchHome onSelect={selectPage} />}
+      {kind === 'home' && <WorkbenchHome onSelect={selectPage} api={api} />}
       {/* Apps View */}
       {appsOpened && appContextId && (
         <div className="opc-workbench-apps" hidden={kind !== 'apps'}>
