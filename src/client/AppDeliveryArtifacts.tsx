@@ -63,12 +63,14 @@ export function AppDeliveryArtifacts({
   contextId,
   slug,
   version,
+  readOnly = false,
   onOpenVerification,
 }: {
   api: OpcApi
   contextId: string
   slug: string
   version?: number
+  readOnly?: boolean
   onOpenVerification: (job: AppDeliveryJob) => void
 }) {
   const { locale, t } = useI18n()
@@ -84,7 +86,6 @@ export function AppDeliveryArtifacts({
         const jobs = JSON.parse(raw) as AppDeliveryJob[]
         const matched = jobs.find(j => j.slug === slug && j.published && j.version === version && j.artifactHash) ?? null
         setJob(matched)
-        if (!matched) setMessage(t("apps.artifacts.noLocalDeliveryPackageRecordFor"))
       })
       .catch(e => {
         if (alive) setMessage(String(e))
@@ -92,7 +93,7 @@ export function AppDeliveryArtifacts({
     return () => {
       alive = false
     }
-  }, [api, contextId, slug, version, t])
+  }, [api, contextId, slug, version])
 
   const artifacts = Object.entries(job?.artifacts || {})
 
@@ -136,7 +137,7 @@ export function AppDeliveryArtifacts({
               {t("apps.artifacts.standardDeliveryBundleGeneratedByAi")}
             </p>
           </div>
-          {job && (
+          {job && !readOnly && (
             <button
               type="button"
               className="oa-btn oa-btn-sm oa-btn-primary"
@@ -201,9 +202,11 @@ export function AppDeliveryArtifacts({
                     >
                       <AppIcon name="copy" size={11} /> {t("apps.artifacts.copyPath")}
                     </button>
-                    <button type="button" className="oa-btn oa-btn-xs oa-btn-accent-soft" onClick={() => void handleExport(name)}>
-                      <AppIcon name="archive" size={11} /> {t("apps.artifacts.export")}
-                    </button>
+                    {!readOnly && (
+                      <button type="button" className="oa-btn oa-btn-xs oa-btn-accent-soft" onClick={() => void handleExport(name)}>
+                        <AppIcon name="archive" size={11} /> {t("apps.artifacts.export")}
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div className="oa-hint">{meta.description}</div>

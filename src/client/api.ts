@@ -313,6 +313,7 @@ export interface OpcApi {
   appSaveDownload(slug: string, selection: string, context: string): Promise<string>
   appStorage?(slug: string, context: string): Promise<string>
   appRecheck?(slug: string, context: string): Promise<string>
+  appSyncSkill?(slug: string, context: string): Promise<string>
   appRuntimeStatus?(slug: string, context: string): Promise<string>
   appRuntimeChange?(slug: string, commandJson: string, context: string): Promise<string>
   appUpdateConfig?(slug: string, bodyJson: string, context: string): Promise<string>
