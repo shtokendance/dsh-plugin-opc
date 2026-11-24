@@ -1202,6 +1202,14 @@ export const appsCss = `
   gap: 8px;
   flex-wrap: wrap;
 }
+.oa-cfg-ref-toggle {
+  display: inline-flex;
+  align-items: center;
+  transition: transform var(--oa-motion);
+}
+.oa-cfg-ref-details[open] > summary .oa-cfg-ref-toggle {
+  transform: rotate(180deg);
+}
 .oa-cfg-ref-file {
   margin-top: 8px;
   padding: 8px 10px;
