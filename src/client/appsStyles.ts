@@ -456,7 +456,8 @@ export const appsCss = `
   width: 100%;
   min-width: 0;
 }
-.oa-detail-tab-panel > .oa-form-card {
+.oa-app-detail-view .oa-overlay-body > .oa-form-card,
+.oa-detail-tab-panel .oa-form-card {
   max-width: none;
   margin: 0;
 }

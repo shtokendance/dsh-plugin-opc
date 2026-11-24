@@ -3048,7 +3048,7 @@ export function AppsPanel({
       : detailLogsSubTab === 'build' ? t("apps.buildAndDeployLogs") : t("apps.archivedDockerfile")
 
     return (
-      <div className="oa-overlay-view">
+      <div className="oa-overlay-view oa-app-detail-view">
         <div className="oa-overlay-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <button type="button" className="oa-btn oa-btn-sm" onClick={() => setViewMode('list')}>
@@ -3215,8 +3215,8 @@ export function AppsPanel({
             className={logView ? 'oa-detail-tab-panel oa-detail-log-panel' : 'oa-detail-tab-panel'}>
           {detailTab === 'artifacts' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div className="oa-form-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <strong style={{ fontSize: 14, color: '#0f172a' }}>{t("apps.agentSkill")}</strong>
                     <span className="oa-code">{detailApp.skill_name || `app-${detailApp.slug}`}</span>
