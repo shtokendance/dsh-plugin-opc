@@ -599,7 +599,7 @@ test('a backup response streams past 64 MiB and a mismatched file is discarded',
     assert.equal((await stat(file.path)).size, 65 * chunk.length)
     valid = false
     await assert.rejects(delivery.saveDownload('test-app', { storage: true }, contexts.applicationContextId!, root), /摘要不匹配/)
-    assert.deepEqual(await readdir(root), ['test-app-storage-backup.tar'])
+    assert.deepEqual(await readdir(root), ['test-app-storage-backup.tar.gz'])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
