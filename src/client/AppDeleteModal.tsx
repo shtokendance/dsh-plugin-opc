@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { AppIcon } from './AppIcon.tsx'
+import { useI18n } from './i18n.tsx'
 import type {
   AppStorageOverview,
   AppVolumeBackupItem,
@@ -60,6 +61,7 @@ export function AppDeleteModal({
   onClose: () => void
   onDeleted: (info: { slug: string; name: string; backup?: AppVolumeBackupItem | null }) => void
 }) {
+  const { tr } = useI18n()
   const mounts = storageOverview?.mounts ?? app.storage_mounts ?? []
   const hasMounts = mounts.length > 0
 
@@ -79,7 +81,7 @@ export function AppDeleteModal({
 
   const runExport = async () => {
     if (!api.appCreateVolumeBackup) {
-      setExportError('当前插件版本不支持挂载卷云端导出，请更新插件')
+      setExportError(tr('当前插件版本不支持挂载卷云端导出，请更新插件', 'Current plugin version does not support volume export'))
       setStage('export_error')
       return
     }
@@ -89,14 +91,14 @@ export function AppDeleteModal({
       const raw = await api.appCreateVolumeBackup(app.slug, contextId)
       const parsed = parseJson<{ backup?: AppVolumeBackupItem }>(raw, {})
       if (!parsed.backup?.id) {
-        throw new Error('平台未返回有效的备份记录')
+        throw new Error(tr('平台未返回有效的备份记录', 'Platform did not return a valid backup record'))
       }
       setBackup(parsed.backup)
       setDownloadedPath('')
       setDownloadError('')
       setStage('download_gate')
     } catch (err) {
-      setExportError(readErrorMessage(err, '挂载卷导出失败'))
+      setExportError(readErrorMessage(err, tr('挂载卷导出失败', 'Volume export failed')))
       setStage('export_error')
     }
   }
@@ -163,22 +165,34 @@ export function AppDeleteModal({
   const canDelete = unlocked && slugMatched && stage === 'download_gate'
 
   const stepLabel =
-    stage === 'confirm' ? '步骤 1 / 3' : stage === 'exporting' || stage === 'export_error' ? '步骤 2 / 3' : stage === 'download_gate' ? '步骤 3 / 3' : '执行中'
+    stage === 'confirm'
+      ? tr('步骤 1 / 3', 'Step 1 / 3')
+      : stage === 'exporting' || stage === 'export_error'
+        ? tr('步骤 2 / 3', 'Step 2 / 3')
+        : stage === 'download_gate'
+          ? tr('步骤 3 / 3', 'Step 3 / 3')
+          : tr('执行中', 'Deleting')
 
   return (
-    <div className="oa-modal-backdrop" role="dialog" aria-modal="true" aria-label="删除应用确认">
+    <div className="oa-modal-backdrop" role="dialog" aria-modal="true" aria-label={tr('删除应用确认', 'Confirm App Deletion')}>
       <div className="oa-modal-card">
         <div className="oa-modal-head">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <AppIcon name="warning" size={16} className="oa-text-danger" />
             <strong style={{ fontSize: 14, color: '#0f172a' }}>
-              {stage === 'export_error' ? '导出失败 · 已阻断删除' : stage === 'exporting' ? '正在导出挂载卷' : stage === 'deleting' ? '正在删除应用' : '删除应用确认'}
+              {stage === 'export_error'
+                ? tr('导出失败 · 已阻断删除', 'Export Failed · Deletion Blocked')
+                : stage === 'exporting'
+                  ? tr('正在导出挂载卷', 'Exporting Volumes')
+                  : stage === 'deleting'
+                    ? tr('正在删除应用', 'Deleting App')
+                    : tr('删除应用确认', 'Confirm App Deletion')}
             </strong>
             <span className="oa-pill">{stepLabel}</span>
           </div>
           {stage !== 'exporting' && stage !== 'deleting' && (
-            <button type="button" className="oa-btn oa-btn-xs" onClick={onClose} aria-label="关闭">
-              关闭
+            <button type="button" className="oa-btn oa-btn-xs" onClick={onClose} aria-label={tr('关闭', 'Close')}>
+              {tr('关闭', 'Close')}
             </button>
           )}
         </div>
@@ -192,21 +206,21 @@ export function AppDeleteModal({
                   <span className="oa-code">{app.slug}</span>
                   {app.current_version ? <span className="oa-pill oa-pill-accent">v{app.current_version}</span> : null}
                 </div>
-                <span style={{ color: '#dc2626', fontSize: 12, fontWeight: 500 }}>停服 · 删域名 · 卸技能</span>
+                <span style={{ color: '#dc2626', fontSize: 12, fontWeight: 500 }}>{tr('停服 · 删域名 · 卸技能', 'Stop · Remove Domain · Uninstall Skill')}</span>
               </div>
 
               {hasMounts ? (
                 <>
                   <div className="oa-table-box">
                     <div className="oa-table-head" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>待处理挂载卷（{mounts.length} 个{storageOverview ? ` · 共 ${storageOverview.total_files} 个文件` : ''}）</span>
+                      <span>{tr('待处理挂载卷（{n} 个{files}）', 'Volumes ({n}{files})', { n: mounts.length, files: storageOverview ? tr(' · 共 {c} 个文件', ' · {c} files', { c: storageOverview.total_files }) : '' })}</span>
                       <span className="oa-mono">{storageOverview?.total_human || ''}</span>
                     </div>
                     {mounts.map(m => (
                       <div key={m.container_path} className="oa-table-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span className="oa-mono" style={{ fontWeight: 500 }}>{m.container_path}</span>
                         <span className="oa-hint">
-                          {'file_count' in m && typeof m.file_count === 'number' ? `${m.file_count} 文件 · ` : ''}
+                          {'file_count' in m && typeof m.file_count === 'number' ? tr('{c} 文件 · ', '{c} files · ', { c: m.file_count }) : ''}
                           {'size_human' in m && m.size_human ? m.size_human : ''}
                         </span>
                       </div>
@@ -226,11 +240,11 @@ export function AppDeleteModal({
                       />
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <strong style={{ color: '#0f172a' }}>导出全部挂载卷并备份后删除</strong>
-                          <span className="oa-pill oa-pill-accent">推荐</span>
+                          <strong style={{ color: '#0f172a' }}>{tr('导出全部挂载卷并备份后删除', 'Export & Backup Volumes Before Delete')}</strong>
+                          <span className="oa-pill oa-pill-accent">{tr('推荐', 'Recommended')}</span>
                         </div>
                         <div className="oa-hint" style={{ marginTop: 2 }}>
-                          按原路径打包归档至云端（保留 30 天）并下载到本地，下载完成后解锁删除
+                          {tr('按原路径打包归档至云端（保留 30 天）并下载到本地，下载完成后解锁删除', 'Archive to cloud (30 days) and download locally before unlocking deletion')}
                         </div>
                       </div>
                     </label>
@@ -246,9 +260,9 @@ export function AppDeleteModal({
                         onChange={() => setExportMode('skip_export')}
                       />
                       <div style={{ flex: 1 }}>
-                        <strong style={{ color: '#dc2626' }}>不导出，直接彻底删除</strong>
+                        <strong style={{ color: '#dc2626' }}>{tr('不导出，直接彻底删除', 'Delete Without Exporting')}</strong>
                         <div className="oa-hint" style={{ marginTop: 2 }}>
-                          同步清理服务器挂载卷内全部文件，删除后无法恢复
+                          {tr('同步清理服务器挂载卷内全部文件，删除后无法恢复', 'Permanently purge all files in server volumes; cannot be undone')}
                         </div>
                       </div>
                     </label>
@@ -257,7 +271,7 @@ export function AppDeleteModal({
               ) : (
                 <div className="oa-alert oa-alert-info">
                   <AppIcon name="warning" size={16} />
-                  <div>该应用未配置持久化挂载卷，确认应用标识后即可直接删除。</div>
+                  <div>{tr('该应用未配置持久化挂载卷，确认应用标识后即可直接删除。', 'This app has no persistent volumes. Confirm the slug to delete.')}</div>
                 </div>
               )}
             </>
@@ -267,8 +281,8 @@ export function AppDeleteModal({
             <div className="oa-subcard" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 16px' }}>
               <AppIcon name="refresh" size={18} className="oa-spin" />
               <div>
-                <strong style={{ color: '#0f172a' }}>正在按路径打包服务器挂载卷并归档至云端对象存储…</strong>
-                <div className="oa-hint" style={{ marginTop: 4 }}>请勿关闭窗口，导出完成前不会删除应用。</div>
+                <strong style={{ color: '#0f172a' }}>{tr('正在按路径打包服务器挂载卷并归档至云端对象存储…', 'Archiving server volume files to cloud storage…')}</strong>
+                <div className="oa-hint" style={{ marginTop: 4 }}>{tr('请勿关闭窗口，导出完成前不会删除应用。', 'Do not close this dialog; the app will not be deleted until export completes.')}</div>
               </div>
             </div>
           )}
@@ -277,7 +291,7 @@ export function AppDeleteModal({
             <div className="oa-alert oa-alert-danger">
               <AppIcon name="warning" size={16} />
               <div style={{ flex: 1 }}>
-                <strong>挂载卷导出失败，已阻断删除操作</strong>
+                <strong>{tr('挂载卷导出失败，已阻断删除操作', 'Volume export failed; deletion blocked')}</strong>
                 <div style={{ marginTop: 4, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{exportError}</div>
               </div>
             </div>
@@ -291,7 +305,7 @@ export function AppDeleteModal({
                     <div style={{ minWidth: 0 }}>
                       <div className="oa-mono" style={{ fontWeight: 600, color: '#0f172a' }}>{backup.filename}</div>
                       <div className="oa-hint" style={{ marginTop: 2 }}>
-                        {backup.size_human} · {backup.file_count} 个文件 · 已归档至云端（保留 {backup.remain_days} 天）
+                        {tr('{size} · {files} 个文件 · 已归档至云端（保留 {days} 天）', '{size} · {files} files · Archived in cloud ({days}d)', { size: backup.size_human, files: backup.file_count, days: backup.remain_days })}
                       </div>
                     </div>
                     <button
@@ -301,12 +315,12 @@ export function AppDeleteModal({
                       onClick={() => void handleDownloadLocal()}
                     >
                       <AppIcon name={downloading ? 'refresh' : 'download'} size={13} className={downloading ? 'oa-spin' : ''} />
-                      <span>{downloading ? '下载中…' : downloadedPath ? '重新下载' : '下载到本地'}</span>
+                      <span>{downloading ? tr('下载中…', 'Downloading…') : downloadedPath ? tr('重新下载', 'Download Again') : tr('下载到本地', 'Download Locally')}</span>
                     </button>
                   </div>
                   {downloadedPath && (
                     <div style={{ marginTop: 8, fontSize: 12, color: '#059669', fontWeight: 500 }}>
-                      已保存至：<span className="oa-mono">{downloadedPath}</span>
+                      {tr('已保存至：', 'Saved to: ')}<span className="oa-mono">{downloadedPath}</span>
                     </div>
                   )}
                   {downloadError && (
@@ -318,7 +332,7 @@ export function AppDeleteModal({
               {exportMode === 'skip_export' && (
                 <div className="oa-alert oa-alert-danger">
                   <AppIcon name="warning" size={16} />
-                  <div>已选择不导出挂载卷，删除后服务器挂载卷内全部文件将被永久清除。</div>
+                  <div>{tr('已选择不导出挂载卷，删除后服务器挂载卷内全部文件将被永久清除。', 'Skipping export: all files in server volumes will be permanently deleted.')}</div>
                 </div>
               )}
 
@@ -331,8 +345,8 @@ export function AppDeleteModal({
 
               <div style={{ opacity: unlocked ? 1 : 0.45 }}>
                 <label htmlFor="oa-delete-slug-input" style={{ display: 'block', fontWeight: 500, marginBottom: 6, color: '#0f172a' }}>
-                  输入应用标识 <span className="oa-code">{app.slug}</span> 确认删除
-                  {!unlocked && <span style={{ color: '#d97706', marginLeft: 8, fontWeight: 400 }}>（请先完成本地下载以解锁）</span>}
+                  {tr('输入应用标识', 'Type app slug')} <span className="oa-code">{app.slug}</span> {tr('确认删除', 'to confirm')}
+                  {!unlocked && <span style={{ color: '#d97706', marginLeft: 8, fontWeight: 400 }}>{tr('（请先完成本地下载以解锁）', '(Download locally to unlock)')}</span>}
                 </label>
                 <input
                   id="oa-delete-slug-input"
@@ -351,8 +365,8 @@ export function AppDeleteModal({
             <div className="oa-subcard" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 16px' }}>
               <AppIcon name="refresh" size={18} className="oa-spin" />
               <div>
-                <strong style={{ color: '#0f172a' }}>正在下线服务、清理服务器挂载目录与本地技能…</strong>
-                <div className="oa-hint" style={{ marginTop: 4 }}>请稍候，完成后将返回应用列表。</div>
+                <strong style={{ color: '#0f172a' }}>{tr('正在下线服务、清理服务器挂载目录与本地技能…', 'Stopping service, purging volumes, and removing local skill…')}</strong>
+                <div className="oa-hint" style={{ marginTop: 4 }}>{tr('请稍候，完成后将返回应用列表。', 'Please wait...')}</div>
               </div>
             </div>
           )}
@@ -360,41 +374,41 @@ export function AppDeleteModal({
 
         <div className="oa-modal-foot">
           <span className="oa-hint">
-            {stage === 'confirm' && hasMounts ? '仅包含容器挂载卷文件，不含外部共享数据库' : ''}
+            {stage === 'confirm' && hasMounts ? tr('仅包含容器挂载卷文件，不含外部共享数据库', 'Includes volume files only; excludes external shared databases') : ''}
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {stage === 'confirm' && (
               <>
-                <button type="button" className="oa-btn oa-btn-sm" onClick={onClose}>取消</button>
+                <button type="button" className="oa-btn oa-btn-sm" onClick={onClose}>{tr('取消', 'Cancel')}</button>
                 <button
                   type="button"
                   className={`oa-btn oa-btn-sm ${exportMode === 'export_and_delete' ? 'oa-btn-primary' : 'oa-btn-danger'}`}
                   onClick={handleConfirmNext}
                 >
-                  {exportMode === 'export_and_delete' ? '开始打包并备份' : '下一步：输入确认'}
+                  {exportMode === 'export_and_delete' ? tr('开始打包并备份', 'Export & Backup') : tr('下一步：输入确认', 'Next: Confirm')}
                 </button>
               </>
             )}
             {stage === 'export_error' && (
               <>
-                <button type="button" className="oa-btn oa-btn-sm" onClick={() => setStage('confirm')}>返回上一步</button>
-                <button type="button" className="oa-btn oa-btn-sm" onClick={onClose}>取消</button>
+                <button type="button" className="oa-btn oa-btn-sm" onClick={() => setStage('confirm')}>{tr('返回上一步', 'Back')}</button>
+                <button type="button" className="oa-btn oa-btn-sm" onClick={onClose}>{tr('取消', 'Cancel')}</button>
                 <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => void runExport()}>
-                  重试导出
+                  {tr('重试导出', 'Retry Export')}
                 </button>
               </>
             )}
             {stage === 'download_gate' && (
               <>
-                <button type="button" className="oa-btn oa-btn-sm" onClick={() => setStage('confirm')}>返回上一步</button>
-                <button type="button" className="oa-btn oa-btn-sm" onClick={onClose}>取消</button>
+                <button type="button" className="oa-btn oa-btn-sm" onClick={() => setStage('confirm')}>{tr('返回上一步', 'Back')}</button>
+                <button type="button" className="oa-btn oa-btn-sm" onClick={onClose}>{tr('取消', 'Cancel')}</button>
                 <button
                   type="button"
                   className="oa-btn oa-btn-sm oa-btn-danger"
                   disabled={!canDelete}
                   onClick={() => void handleExecuteDelete()}
                 >
-                  确认彻底删除
+                  {tr('确认彻底删除', 'Delete Permanently')}
                 </button>
               </>
             )}

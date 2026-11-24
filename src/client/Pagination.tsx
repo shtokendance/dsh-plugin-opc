@@ -1,4 +1,5 @@
 import React from 'react'
+import { useI18n } from './i18n.tsx'
 
 export const DEFAULT_PAGE_SIZE = 6
 export const PAGE_SIZE_OPTIONS = [6, 12, 24] as const
@@ -120,25 +121,26 @@ export function Pagination({
   onPageChange: (page: number) => void
   onPageSizeChange: (pageSize: number) => void
 }) {
+  const { tr } = useI18n()
   if (totalItems <= 0) return null
   const totalPages = Math.max(1, Math.ceil(totalItems / Math.max(1, pageSize)))
   const currentPage = Math.min(Math.max(1, page), totalPages)
   const tokens = buildPageTokens(currentPage, totalPages)
 
   return (
-    <nav className="opc-pagination" aria-label="列表分页">
+    <nav className="opc-pagination" aria-label={tr('列表分页', 'Pagination')}>
       <span className="opc-pagination-info">
-        共 {totalItems} 项 · 第 {currentPage} / {totalPages} 页
+        {tr('共 {total} 项 · 第 {page} / {pages} 页', '{total} items · Page {page} / {pages}', { total: totalItems, page: currentPage, pages: totalPages })}
       </span>
       <div className="opc-pagination-controls">
         <select
           className="opc-page-size"
-          aria-label="每页显示条数"
+          aria-label={tr('每页显示条数', 'Items per page')}
           value={pageSize}
           onChange={event => onPageSizeChange(Number(event.target.value))}
         >
           {PAGE_SIZE_OPTIONS.map(size => (
-            <option key={size} value={size}>{size} 条/页</option>
+            <option key={size} value={size}>{tr('{size} 条/页', '{size} / page', { size })}</option>
           ))}
         </select>
         <button
@@ -147,7 +149,7 @@ export function Pagination({
           disabled={currentPage <= 1}
           onClick={() => onPageChange(currentPage - 1)}
         >
-          上一页
+          {tr('上一页', 'Prev')}
         </button>
         {tokens.map(token => (
           typeof token === 'number' ? (
@@ -155,7 +157,7 @@ export function Pagination({
               key={token}
               type="button"
               className={`opc-page-btn ${token === currentPage ? 'is-active' : ''}`}
-              aria-label={`第 ${token} 页`}
+              aria-label={tr('第 {page} 页', 'Page {page}', { page: token })}
               aria-current={token === currentPage ? 'page' : undefined}
               onClick={() => onPageChange(token)}
             >
@@ -171,7 +173,7 @@ export function Pagination({
           disabled={currentPage >= totalPages}
           onClick={() => onPageChange(currentPage + 1)}
         >
-          下一页
+          {tr('下一页', 'Next')}
         </button>
       </div>
     </nav>

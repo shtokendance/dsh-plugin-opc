@@ -16,6 +16,8 @@ import type { ConfigChatAction, ConfigChatFrame, ConfigChatResult, ConfigChatRow
 import { AppDeleteModal } from './AppDeleteModal.tsx'
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
 import { DeletedAppBackupsView } from './DeletedAppBackupsView.tsx'
+import { useI18n, translatePair, type ClientLocale } from './i18n.tsx'
+import { NoticeModal } from './NoticeModal.tsx'
 import {
   getConfigPublishIssues,
   mergeJobConfigs,
@@ -200,40 +202,41 @@ function triggerBrowserDownload(filename: string, base64: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-function jobStatusTone(status?: string, userDisabled?: boolean): { text: string; pillClass: string; spinning?: boolean } {
+function jobStatusTone(status?: string, userDisabled?: boolean, locale: ClientLocale = 'zh'): { text: string; pillClass: string; spinning?: boolean } {
+  const t = (zh: string, en: string) => translatePair(locale, zh, en)
   switch (status) {
     case 'running':
-      return { text: '运行中', pillClass: 'oa-pill-ok' }
+      return { text: t('运行中', 'Running'), pillClass: 'oa-pill-ok' }
     case 'verified':
       return userDisabled
-        ? { text: '技能已停用（待开启）', pillClass: 'oa-pill-warn' }
-        : { text: '已上线并启用技能', pillClass: 'oa-pill-ok' }
+        ? { text: t('技能已停用（待开启）', 'Skill Disabled'), pillClass: 'oa-pill-warn' }
+        : { text: t('已上线并启用技能', 'Live & Skill Ready'), pillClass: 'oa-pill-ok' }
     case 'awaiting_page_verification':
-      return { text: '待确认页面可用', pillClass: 'oa-pill-warn' }
+      return { text: t('待确认页面可用', 'Awaiting Page Verify'), pillClass: 'oa-pill-warn' }
     case 'skill_disabled':
-      return { text: '技能未启用', pillClass: 'oa-pill-warn' }
+      return { text: t('技能未启用', 'Skill Disabled'), pillClass: 'oa-pill-warn' }
     case 'verification_failed':
-      return { text: '验证未通过', pillClass: 'oa-pill-danger' }
+      return { text: t('验证未通过', 'Verify Failed'), pillClass: 'oa-pill-danger' }
     case 'failed':
     case 'unhealthy':
-      return { text: '失败', pillClass: 'oa-pill-danger' }
+      return { text: t('失败', 'Failed'), pillClass: 'oa-pill-danger' }
     case 'unknown':
-      return { text: '发布结果待确认', pillClass: 'oa-pill-warn' }
+      return { text: t('发布结果待确认', 'Status Unknown'), pillClass: 'oa-pill-warn' }
     case 'building':
-      return { text: '构建发布中', pillClass: 'oa-pill-accent', spinning: true }
+      return { text: t('构建发布中', 'Building'), pillClass: 'oa-pill-accent', spinning: true }
     case 'verifying':
-      return { text: '服务验证中', pillClass: 'oa-pill-teal', spinning: true }
+      return { text: t('服务验证中', 'Verifying'), pillClass: 'oa-pill-teal', spinning: true }
     case 'analyzing':
     case 'preparing':
     case 'importing':
-      return { text: '分析准备中', pillClass: 'oa-pill-accent', spinning: true }
+      return { text: t('分析准备中', 'Analyzing'), pillClass: 'oa-pill-accent', spinning: true }
     case 'review':
-      return { text: '待核对改造方案', pillClass: 'oa-pill-warn' }
+      return { text: t('待核对改造方案', 'Review Plan'), pillClass: 'oa-pill-warn' }
     case 'ready':
-      return { text: '待配置与发布', pillClass: 'oa-pill-accent' }
+      return { text: t('待配置与发布', 'Ready to Publish'), pillClass: 'oa-pill-accent' }
     case 'draft':
     default:
-      return { text: '草稿待分析', pillClass: '' }
+      return { text: t('草稿待分析', 'Draft'), pillClass: '' }
   }
 }
 
@@ -524,6 +527,7 @@ export function AppsPanel({
   active?: boolean
   prepareAnalysisNavigation?: PrepareAnalysisNavigation
 }) {
+  const { locale, tr } = useI18n()
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [loadingLinkedJob, setLoadingLinkedJob] = useState(Boolean(api.appJobByAnalysisSession))
   const [linkedJob, setLinkedJob] = useState<AppDeliveryJob | null>(null)
@@ -1886,44 +1890,41 @@ export function AppsPanel({
     <div className="oa-app-list">
       <div className="oa-topbar">
         <div>
-          <h2 className="oa-title">应用中心</h2>
-          <p className="oa-subtitle">企微登录即可部署。应用列表对所有已登录用户开放。</p>
+          <h2 className="oa-title">{tr('应用中心', 'Apps')}</h2>
+          <p className="oa-subtitle">{tr('企微登录即可部署。应用列表对所有已登录用户开放。', 'Sign in to deploy. The app list is visible to all signed-in users.')}</p>
         </div>
         <div className="oa-app-list-toolbar">
           {api.appVolumeBackupsList && (
             <button type="button" className="oa-btn" onClick={() => { void loadVolumeBackups(); setViewMode('backups') }}>
               <AppIcon name="archive" size={14} />
-              <span>数据备份</span>
+              <span>{tr('数据备份', 'Backups')}</span>
               {volumeBackups.length > 0 && <span className="oa-pill oa-pill-accent">{volumeBackups.length}</span>}
             </button>
           )}
           <button type="button" className="oa-btn" disabled={loadingList} onClick={() => void loadWorkspaceData(false)}>
             <AppIcon name="refresh" size={14} className={loadingList ? 'oa-spin' : ''} />
-            <span>刷新</span>
+            <span>{tr('刷新', 'Refresh')}</span>
           </button>
           <button type="button" className="oa-btn oa-btn-primary" onClick={() => startWizardNew()}>
             <AppIcon name="plus" size={14} />
-            <span>新建应用</span>
+            <span>{tr('新建应用', 'New App')}</span>
           </button>
         </div>
       </div>
 
-      {bannerError && (
-        <div role="alert" className="oa-alert oa-alert-danger">
-          <AppIcon name="warning" size={16} />
-          <div style={{ flex: 1 }}>{bannerError}</div>
-          <button type="button" className="oa-btn oa-btn-xs" onClick={() => setBannerError(null)}>
-            关闭
-          </button>
-        </div>
-      )}
+      <NoticeModal
+        open={Boolean(bannerError)}
+        variant="error"
+        message={bannerError || ''}
+        onClose={() => setBannerError(null)}
+      />
 
       {bannerNotice && (
         <div role="status" className="oa-alert oa-alert-ok">
           <AppIcon name="check" size={16} />
           <div style={{ flex: 1 }}>{bannerNotice}</div>
           <button type="button" className="oa-btn oa-btn-xs" onClick={() => setBannerNotice(null)}>
-            关闭
+            {tr('关闭', 'Close')}
           </button>
         </div>
       )}
@@ -1971,20 +1972,20 @@ export function AppsPanel({
 
       {loadingList && apps.length === 0 ? (
         <div className="oa-form-card" style={{ textAlign: 'center', padding: '44px 20px', color: '#64748b' }}>
-          正在加载企业应用目录…
+          {tr('正在加载企业应用目录…', 'Loading apps…')}
         </div>
       ) : apps.length === 0 ? (
         <div className="oa-form-card" style={{ textAlign: 'center', padding: '48px 24px' }}>
           <div className="oa-app-icon-box" style={{ margin: '0 auto 14px', width: 48, height: 48 }}>
             <AppIcon name="sparkle" size={22} />
           </div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>暂无已部署的企业应用</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>{tr('暂无已部署的企业应用', 'No deployed apps yet')}</div>
           <p className="oa-subtitle" style={{ maxWidth: 460, margin: '8px auto 18px' }}>
-            上传项目压缩包或选择本地项目文件夹，AI 将自动分析运行环境、托管配置并发布到企业访问域名，同时生成同名应用技能。
+            {tr('上传项目压缩包或选择本地项目文件夹，AI 将自动分析运行环境、托管配置并发布到企业访问域名，同时生成同名应用技能。', 'Upload a ZIP or choose a local folder. AI will analyze, configure, deploy, and generate an app skill.')}
           </p>
           <button type="button" className="oa-btn oa-btn-primary" onClick={() => startWizardNew()}>
             <AppIcon name="plus" size={14} />
-            <span>新建第一个应用</span>
+            <span>{tr('新建第一个应用', 'Create First App')}</span>
           </button>
         </div>
       ) : (() => {
@@ -1992,7 +1993,7 @@ export function AppsPanel({
         return <>
         <div className="oa-apps-grid">
           {pageApps.map(app => {
-            const tone = jobStatusTone(app.status)
+            const tone = jobStatusTone(app.status, undefined, locale)
             const readOnly = app.can_manage !== true
             const isFailed = app.status === 'failed' || app.status === 'unhealthy'
             const matchingJob = findAppJob(jobs, app)
@@ -2015,18 +2016,18 @@ export function AppsPanel({
                   </span>
                 </div>
 
-                <p className="oa-app-card-desc" title={app.description || undefined}>{app.description || '暂无应用描述'}</p>
+                <p className="oa-app-card-desc" title={app.description || undefined}>{app.description || tr('暂无应用描述', 'No description')}</p>
 
                 <div className="oa-app-card-meta">
                   <div className="oa-app-card-row">
-                    <span><AppIcon name="cloud" size={13} />内网地址</span>
+                    <span><AppIcon name="cloud" size={13} />{tr('内网地址', 'URL')}</span>
                     {app.app_url
                       ? <a className="oa-mono" href={app.app_url} target="_blank" rel="noreferrer" title={app.app_url}>{app.app_url}</a>
-                      : <span>暂无</span>}
+                      : <span>{tr('暂无', 'None')}</span>}
                   </div>
                   {!readOnly && (
                     <div className="oa-app-card-row">
-                      <span><AppIcon name="sparkle" size={13} />本地技能</span>
+                      <span><AppIcon name="sparkle" size={13} />{tr('本地技能', 'Local Skill')}</span>
                       <code className="oa-code" title={app.skill_name || `app-${app.slug}`}>{app.skill_name || `app-${app.slug}`}</code>
                     </div>
                   )}
@@ -2035,41 +2036,41 @@ export function AppsPanel({
                 {isFailed && app.error_message && (
                   <div className="oa-alert oa-alert-danger oa-app-card-error" role="status">
                     <AppIcon name="warning" size={14} />
-                    <span>{healthFailureDetail(app.error_message) || '应用健康检查未通过，请查看日志。'}</span>
+                    <span>{healthFailureDetail(app.error_message) || tr('应用健康检查未通过，请查看日志。', 'Health check failed. See logs.')}</span>
                   </div>
                 )}
 
                 <div className="oa-app-card-actions">
-                  {readOnly ? <span className="oa-hint">共享应用 · 只读</span> : isFailed ? (
+                  {readOnly ? <span className="oa-hint">{tr('共享应用 · 只读', 'Shared · Read-only')}</span> : isFailed ? (
                     <>
                       <button type="button" className="oa-btn oa-btn-xs" onClick={() => {
                         if (matchingJob?.published) void resumeWizardJob(matchingJob, 4)
                         else startWizardNew(app)
                       }}>
-                        恢复 / 重新部署
+                        {tr('恢复 / 重新部署', 'Recover / Redeploy')}
                       </button>
                       {api.appRecheck && (
                         <button type="button" className="oa-btn oa-btn-xs" onClick={() => void handleRecheckApp(app.slug, false)}>
-                          <AppIcon name="refresh" size={12} />重新检查
+                          <AppIcon name="refresh" size={12} />{tr('重新检查', 'Recheck')}
                         </button>
                       )}
                     </>
                   ) : (
                     <>
                       <button type="button" className="oa-btn oa-btn-xs" onClick={() => void openAppDetail(app.slug, 'versions')}>
-                        版本与回退
+                        {tr('版本与回退', 'Versions')}
                       </button>
                       <button type="button" className="oa-btn oa-btn-xs oa-btn-accent-soft" onClick={() => startWizardNew(app, matchingJob)}>
-                        升级新版本
+                        {tr('升级新版本', 'Upgrade')}
                       </button>
                     </>
                   )}
                   {!readOnly && (app.current_version ?? 0) > 0 && api.appRuntimeStatus && api.appRuntimeChange && (
-                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => openRuntimePanel(app, true)}>重启应用</button>
+                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => openRuntimePanel(app, true)}>{tr('重启应用', 'Restart')}</button>
                   )}
                   <button type="button" className="oa-btn oa-btn-xs oa-btn-link oa-app-card-detail"
                     onClick={() => void openAppDetail(app.slug, isFailed && !readOnly ? 'logs' : 'configs')}>
-                    {isFailed && !readOnly ? '失败日志' : '详情'}<AppIcon name="chevronRight" size={12} />
+                    {isFailed && !readOnly ? tr('失败日志', 'Logs') : tr('详情', 'Details')}<AppIcon name="chevronRight" size={12} />
                   </button>
                 </div>
               </article>
@@ -2153,15 +2154,12 @@ export function AppsPanel({
         </header>
 
         <div className="oa-overlay-body">
-          {wizardError && (
-            <div role="alert" className="oa-alert oa-alert-danger">
-              <AppIcon name="warning" size={16} />
-              <div style={{ flex: 1 }}>{wizardError}</div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setWizardError(null)}>
-                关闭
-              </button>
-            </div>
-          )}
+          <NoticeModal
+            open={Boolean(wizardError)}
+            variant="error"
+            message={wizardError || ''}
+            onClose={() => setWizardError(null)}
+          />
 
           {wizardNotice && (
             <div role="status" className="oa-alert oa-alert-ok">
@@ -2192,7 +2190,7 @@ export function AppsPanel({
                     id={`${formId}-app-name`}
                     className="oa-input"
                     value={appName}
-                    placeholder="例如：报销审批助手 / 阿里云效流水线"
+                    placeholder={tr('例如：报销审批助手 / 阿里云效流水线', 'e.g. Expense Approval Assistant')}
                     onCompositionStart={() => {
                       isComposingRef.current = true
                     }}
@@ -2216,7 +2214,7 @@ export function AppsPanel({
 
                 <div className="oa-field">
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <label className="oa-label" htmlFor={`${formId}-app-slug`}>应用访问子域名 (唯一标识) *</label>
+                    <label className="oa-label" htmlFor={`${formId}-app-slug`}>{tr('应用访问子域名 (唯一标识) *', 'App Subdomain (Unique ID) *')}</label>
                     {!upgradingStep1 && slugManual && appName.trim() && (
                       <button
                         type="button"
@@ -2227,7 +2225,7 @@ export function AppsPanel({
                           setAppSlug(toAppSlug(appName, { allowTrailingDash: false }))
                         }}
                       >
-                        根据应用名称重新生成
+                        {tr('根据应用名称重新生成', 'Regenerate from name')}
                       </button>
                     )}
                   </div>
@@ -2238,7 +2236,7 @@ export function AppsPanel({
                       className="oa-compound-input oa-mono"
                       value={appSlug}
                       disabled={upgradingStep1}
-                      placeholder="例如：devops-aly（仅限小写字母、数字和中划线）"
+                      placeholder={tr('例如：devops-aly（仅限小写字母、数字和中划线）', 'e.g. devops-aly (lowercase letters, digits, hyphens)')}
                       onCompositionStart={() => {
                         isSlugComposingRef.current = true
                       }}
@@ -2260,7 +2258,7 @@ export function AppsPanel({
                   </div>
                   <div className="oa-url-preview-bar">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' }}>
-                      <span style={{ color: '#64748b', flexShrink: 0 }}>内网访问直达地址：</span>
+                      <span style={{ color: '#64748b', flexShrink: 0 }}>{tr('内网访问直达地址：', 'Intranet URL:')}</span>
                       <span
                         className="oa-mono"
                         style={{ color: '#2563eb', fontWeight: 500, wordBreak: 'break-all', userSelect: 'all' }}
@@ -2268,16 +2266,16 @@ export function AppsPanel({
                         http://{appSlug.trim() || 'your-app'}.{opcConfig.appDomainRoot}
                       </span>
                       {!upgradingStep1 && slugCheck.checking && (
-                        <span className="oa-pill">正在校验…</span>
+                        <span className="oa-pill">{tr('正在校验…', 'Checking...')}</span>
                       )}
                       {!upgradingStep1 && !slugCheck.checking && !slugCheck.error && slugCheck.available && (
-                        <span className="oa-pill oa-pill-ok">标识可用</span>
+                        <span className="oa-pill oa-pill-ok">{tr('标识可用', 'Available')}</span>
                       )}
                     </div>
                     <span style={{ fontSize: 11.5, color: '#64748b', flexShrink: 0 }}>
                       {upgradingStep1
-                        ? `(容器端口: 沿用 ${effectiveStep1Port})`
-                        : `(容器端口: 自动识别，默认 ${effectiveStep1Port})`}
+                        ? tr('(容器端口: 沿用 {port})', '(Container port: {port})', { port: effectiveStep1Port })
+                        : tr('(容器端口: 自动识别，默认 {port})', '(Container port: auto-detect, default {port})', { port: effectiveStep1Port })}
                     </span>
                   </div>
                   {!upgradingStep1 && slugCheck.error && (
@@ -2288,29 +2286,29 @@ export function AppsPanel({
                 </div>
 
                 <div className="oa-field">
-                  <label className="oa-label" htmlFor={`${formId}-description`}>应用描述</label>
+                  <label className="oa-label" htmlFor={`${formId}-description`}>{tr('应用描述', 'Description')}</label>
                   <textarea
                     id={`${formId}-description`}
                     className="oa-textarea"
                     rows={2}
                     value={appDescription}
-                    placeholder="简述该应用功能，将自动用于 AI 技能描述与调用匹配"
+                    placeholder={tr('简述该应用功能，将自动用于 AI 技能描述与调用匹配', 'Briefly describe the app; used for AI skill description and matching')}
                     onChange={e => setAppDescription(e.target.value)}
                   />
                 </div>
               </div>
 
               <div className="oa-form-card">
-                <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a', marginBottom: 4 }}>AI 分析模型设置</div>
+                <div style={{ fontSize: 14, fontWeight: 650, color: '#0f172a', marginBottom: 4 }}>{tr('AI 分析模型设置', 'AI Analysis Model')}</div>
                 <p className="oa-hint" style={{ marginBottom: 12 }}>
-                  所选 AI 负责应用分析、改造和失败修复。平台通过应用域名检查部署结果。
+                  {tr('所选 AI 负责应用分析、改造和失败修复。平台通过应用域名检查部署结果。', 'Selected AI handles app analysis, adaptation, and failure repair.')}
                 </p>
                 {modelGroups.length === 0 ? (
-                  <div className="oa-hint">将沿用当前会话已选的 AI 模型。</div>
+                  <div className="oa-hint">{tr('将沿用当前会话已选的 AI 模型。', 'Uses the AI model selected in the current session.')}</div>
                 ) : (
                   <div className="oa-grid-3">
                     <div className="oa-field">
-                      <label className="oa-label" htmlFor={`${formId}-provider`}>模型提供商</label>
+                      <label className="oa-label" htmlFor={`${formId}-provider`}>{tr('模型提供商', 'Provider')}</label>
                       <select id={`${formId}-provider`}
                         className="oa-select"
                         value={selectedProvider}
@@ -2320,7 +2318,7 @@ export function AppsPanel({
                           setSelectedEffort('')
                         }}
                       >
-                        <option value="">沿用当前会话模型</option>
+                        <option value="">{tr('沿用当前会话模型', 'Use current session model')}</option>
                         {modelGroups.map(g => (
                           <option key={g.id} value={g.id}>
                             {g.name || g.id}
@@ -2329,13 +2327,13 @@ export function AppsPanel({
                       </select>
                     </div>
                     <div className="oa-field">
-                      <label className="oa-label" htmlFor={`${formId}-model`}>分析模型</label>
+                      <label className="oa-label" htmlFor={`${formId}-model`}>{tr('分析模型', 'Model')}</label>
                       <select id={`${formId}-model`} className="oa-select" value={selectedModel} disabled={!selectedModelGroup}
                         onChange={e => {
                           setSelectedModel(e.target.value)
                           setSelectedEffort('')
                         }}>
-                        <option value="">{selectedModelGroup ? '请选择模型' : '当前会话模型'}</option>
+                        <option value="">{selectedModelGroup ? tr('请选择模型', 'Select model') : tr('当前会话模型', 'Session model')}</option>
                         {(selectedModelGroup?.models ?? []).map(m => (
                           <option key={m.id} value={m.id}>
                             {m.name || m.id}
@@ -2344,14 +2342,14 @@ export function AppsPanel({
                       </select>
                     </div>
                     <div className="oa-field">
-                      <label className="oa-label" htmlFor={`${formId}-effort`}>推理深度</label>
+                      <label className="oa-label" htmlFor={`${formId}-effort`}>{tr('推理深度', 'Reasoning Effort')}</label>
                       <select id={`${formId}-effort`}
                         className="oa-select"
                         value={selectedEffort}
                         disabled={availableEfforts.length === 0}
                         onChange={e => setSelectedEffort(e.target.value)}
                       >
-                        <option value="">模型默认值</option>
+                        <option value="">{tr('模型默认值', 'Model default')}</option>
                         {availableEfforts.map(ef => (
                             <option key={ef.id} value={ef.id}>
                               {ef.name || ef.id}
@@ -2364,7 +2362,7 @@ export function AppsPanel({
               </div>
 
               <section className="oa-form-card" aria-labelledby={`${formId}-source-label`}>
-                <h3 id={`${formId}-source-label`} className="oa-source-label">选择应用源码（文件夹或 ZIP）<span aria-hidden="true"> *</span></h3>
+                <h3 id={`${formId}-source-label`} className="oa-source-label">{tr('选择应用源码（文件夹或 ZIP）', 'Select App Source (Folder or ZIP)')}<span aria-hidden="true"> *</span></h3>
                 <div
                   className={`oa-dropzone${dragActive ? ' dragging' : ''}`}
                   onDragOver={event => {
@@ -2379,18 +2377,18 @@ export function AppsPanel({
                     setDragActive(false)
                     const files = event.dataTransfer.files
                     if (files.length === 1 && files[0]) selectZip(files[0])
-                    else if (files.length > 1) setWizardError('一次只能选择一个 ZIP 压缩包')
+                    else if (files.length > 1) setWizardError(tr('一次只能选择一个 ZIP 压缩包', 'Only one ZIP archive can be selected at a time'))
                   }}
                 >
                   <span className="oa-source-icon"><AppIcon name="folder" size={22} /></span>
-                  <strong>选择本地应用源码</strong>
-                  <div className="oa-hint">选择源码文件夹，或拖拽上传 ZIP 压缩包（最多 64 MiB）。分析会使用源码副本。</div>
+                  <strong>{tr('选择本地应用源码', 'Select Local App Source')}</strong>
+                  <div className="oa-hint">{tr('选择源码文件夹，或拖拽上传 ZIP 压缩包（最多 64 MiB）。分析会使用源码副本。', 'Select a source folder or drag & drop a ZIP archive (max 64 MiB).')}</div>
                   <div className="oa-source-actions">
                     <button type="button" className="oa-btn oa-btn-primary" disabled={wizardBusy} onClick={() => void handleBrowseFolder()}>
-                      <AppIcon name="folder" size={15} /> 选择源码文件夹
+                      <AppIcon name="folder" size={15} /> {tr('选择源码文件夹', 'Select Folder')}
                     </button>
                     <button type="button" className="oa-btn" disabled={wizardBusy} onClick={() => fileInputRef.current?.click()}>
-                      <AppIcon name="archive" size={15} /> 选择 ZIP 压缩包
+                      <AppIcon name="archive" size={15} /> {tr('选择 ZIP 压缩包', 'Select ZIP')}
                     </button>
                     <input ref={fileInputRef} type="file" accept=".zip,application/zip" hidden onChange={event => {
                       const file = event.currentTarget.files?.[0]
@@ -2402,14 +2400,20 @@ export function AppsPanel({
                 {(reuseSourceVersion || zipFile || sourcePath.trim()) && (
                   <div className="oa-source-choice" role="status">
                     <AppIcon name="check" size={16} />
-                    <span>{reuseSourceVersion ? `已选择本机保存的 v${reuseSourceVersion} 源码` : zipFile ? `已选择：${zipFile.name}（${formatFileSize(zipFile.size)}）` : '已填写本机源码路径'}</span>
-                    <button type="button" className="oa-btn oa-btn-xs" disabled={wizardBusy} onClick={() => selectSourcePath('')}>清除选择</button>
+                    <span>
+                      {reuseSourceVersion
+                        ? tr('已选择本机保存的 v{version} 源码', 'Selected local saved v{version} source', { version: reuseSourceVersion })
+                        : zipFile
+                          ? tr('已选择：{name}（{size}）', 'Selected: {name} ({size})', { name: zipFile.name, size: formatFileSize(zipFile.size) })
+                          : tr('已填写本机源码路径', 'Local source path entered')}
+                    </span>
+                    <button type="button" className="oa-btn oa-btn-xs" disabled={wizardBusy} onClick={() => selectSourcePath('')}>{tr('清除选择', 'Clear')}</button>
                   </div>
                 )}
                 <div className="oa-field">
-                  <label className="oa-label" htmlFor={`${formId}-source-path`}>或输入源码文件夹 / ZIP 的完整路径</label>
+                  <label className="oa-label" htmlFor={`${formId}-source-path`}>{tr('或输入源码文件夹 / ZIP 的完整路径', 'Or enter full path to source folder / ZIP')}</label>
                   <input id={`${formId}-source-path`} ref={sourcePathInputRef} className="oa-input oa-mono"
-                    value={sourcePath} placeholder="/路径/my-app 或 /路径/application.zip" disabled={wizardBusy}
+                    value={sourcePath} placeholder={tr('/路径/my-app 或 /路径/application.zip', '/path/to/my-app or /path/to/application.zip')} disabled={wizardBusy}
                     onChange={event => selectSourcePath(event.currentTarget.value)} />
                 </div>
               </section>
@@ -2456,7 +2460,7 @@ export function AppsPanel({
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: 15, color: '#0f172a' }}>{wizardJob.name}</strong>
                       <span className="oa-code">{wizardJob.slug}</span>
-                      <span className="oa-pill oa-pill-accent">端口 {wizardJob.port ?? opcConfig.defaultPort}</span>
+                      <span className="oa-pill oa-pill-accent">{tr('端口 {port}', 'Port {port}', { port: wizardJob.port ?? opcConfig.defaultPort })}</span>
                       {wizardJob.proposal?.contract?.runtime?.language && (
                         <span className="oa-pill oa-pill-teal">
                           {wizardJob.proposal.contract.runtime.language} {wizardJob.proposal.contract.runtime.version || ''}
@@ -2464,7 +2468,7 @@ export function AppsPanel({
                       )}
                     </div>
                     <div className="oa-hint" style={{ marginTop: 4 }}>
-                      访问地址：<span className="oa-mono">{wizardJob.url}</span>
+                      {tr('访问地址：', 'Access URL: ')}<span className="oa-mono">{wizardJob.url}</span>
                     </div>
                   </div>
 
@@ -2474,15 +2478,15 @@ export function AppsPanel({
                       className={`oa-segmented-btn ${configSubTab === 'configs' ? 'active' : ''}`}
                       onClick={() => setConfigSubTab('configs')}
                     >
-                      运行配置
-                      {hasConfigIssues && <span className="oa-dot oa-config-tab-warning" role="img" aria-label="有配置待处理" />}
+                      {tr('运行配置', 'Runtime Config')}
+                      {hasConfigIssues && <span className="oa-dot oa-config-tab-warning" role="img" aria-label={tr('有配置待处理', 'Config action needed')} />}
                     </button>
                     <button
                       type="button"
                       className={`oa-segmented-btn ${configSubTab === 'skill' ? 'active' : ''}`}
                       onClick={() => setConfigSubTab('skill')}
                     >
-                      应用技能
+                      {tr('应用技能', 'App Skill')}
                     </button>
                     <button
                       type="button"
@@ -2496,19 +2500,19 @@ export function AppsPanel({
                       className={`oa-segmented-btn ${configSubTab === 'mounts' ? 'active' : ''}`}
                       onClick={() => setConfigSubTab('mounts')}
                     >
-                      挂载信息
-                      {hasMissingStorage && <span className="oa-dot oa-config-tab-warning" role="img" aria-label="有挂载待处理" />}
+                      {tr('挂载信息', 'Mounts')}
+                      {hasMissingStorage && <span className="oa-dot oa-config-tab-warning" role="img" aria-label={tr('有挂载待处理', 'Mount action needed')} />}
                     </button>
                   </div>
                 </div>
 
                 <div className="oa-field" style={{ marginTop: 12 }}>
-                  <label className="oa-label" htmlFor={`${formId}-version-note`}>版本发布说明（可选）</label>
+                  <label className="oa-label" htmlFor={`${formId}-version-note`}>{tr('版本发布说明（可选）', 'Release Note (Optional)')}</label>
                   <input id={`${formId}-version-note`}
                     className="oa-input"
                     value={versionNote}
                     disabled={!step3Ready}
-                    placeholder={wizardJob.upgrade ? '例如：新增审批导出接口、修复环境变量读取' : '例如：首次上线发布'}
+                    placeholder={wizardJob.upgrade ? tr('例如：新增审批导出接口、修复环境变量读取', 'e.g. Added approval export API') : tr('例如：首次上线发布', 'e.g. Initial release')}
                     onChange={e => handleStep3NoteChange(e.target.value)}
                   />
                 </div>
@@ -2517,7 +2521,7 @@ export function AppsPanel({
               {currentStep3Load?.status === 'failed' && (
                 <div className="oa-alert oa-alert-danger" role="alert">
                   <div>{currentStep3Load.error}</div>
-                  <button type="button" className="oa-btn oa-btn-sm" onClick={() => void syncStep3Drafts(wizardJob)}>重新加载</button>
+                  <button type="button" className="oa-btn oa-btn-sm" onClick={() => void syncStep3Drafts(wizardJob)}>{tr('重新加载', 'Reload')}</button>
                 </div>
               )}
               {step3Loading && (
@@ -2525,20 +2529,20 @@ export function AppsPanel({
                   <div className="oa-deploy-loading-icon" aria-hidden="true">
                     <AppIcon name="refresh" size={22} className="oa-spin" />
                   </div>
-                  <strong>正在加载部署核对内容</strong>
-                  <span className="oa-hint">正在读取运行配置、Dockerfile 和挂载信息。</span>
+                  <strong>{tr('正在加载部署核对内容', 'Loading deployment review')}</strong>
+                  <span className="oa-hint">{tr('正在读取运行配置、Dockerfile 和挂载信息。', 'Reading runtime configs, Dockerfile, and mount info.')}</span>
                 </div>
               )}
 
               {step3Ready && (deliveryFiles.length > 0 || sourceChanges.length > 0) && (() => {
                 const summaryParts = [
-                  deliveryFiles.length > 0 ? `${deliveryFiles.length} 个交付文件` : '',
-                  sourceChanges.length > 0 ? `${sourceChanges.length} 处源码改动` : '',
+                  deliveryFiles.length > 0 ? tr('{count} 个交付文件', '{count} delivery files', { count: deliveryFiles.length }) : '',
+                  sourceChanges.length > 0 ? tr('{count} 处源码改动', '{count} source changes', { count: sourceChanges.length }) : '',
                 ].filter(Boolean)
                 return (
                   <details className="oa-subcard oa-cfg-ref-details">
                     <summary>
-                      <span>交付文件与源码改动{summaryParts.length > 0 ? `（${summaryParts.join(' · ')}）` : ''}</span>
+                      <span>{tr('交付文件与源码改动', 'Delivery Files & Source Changes')}{summaryParts.length > 0 ? ` (${summaryParts.join(' · ')})` : ''}</span>
                       <span className="oa-cfg-ref-toggle" aria-hidden="true">
                         <AppIcon name="chevronDown" size={14} />
                       </span>
@@ -2559,7 +2563,7 @@ export function AppsPanel({
                         <code className="oa-code">{change.path}</code> {change.reason}
                         {change.diff && (
                           <details>
-                            <summary>查看文件差异</summary>
+                            <summary>{tr('查看文件差异', 'View diff')}</summary>
                             <pre className="oa-dockerfile-source oa-mono">{change.diff}</pre>
                           </details>
                         )}
@@ -2570,32 +2574,32 @@ export function AppsPanel({
               })()}
 
               {step3Ready && configSubTab === 'configs' && (
-                <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="运行时环境变量配置">
+                <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label={tr('运行时环境变量配置', 'Runtime Environment Config')}>
                   {api.appWatchConfigChat && wizardJob.analysisSessionId && (
                     <div className="oa-draft-banner">
-                      <span>{wizardJob.analysisSessionId !== sessionId ? '在原部署会话中请 AI 协助核对配置。'
-                        : configChatStatus === 'ready' ? '已联动左侧 AI：可在左侧提问配置用途，或让 AI 直接修改右侧草稿。'
-                        : configChatStatus === 'connecting' ? '正在连接左侧 AI 配置助手…'
-                        : `暂时无法联动右侧草稿（左侧对话仍可正常使用）${configChatError ? ` · ${configChatError}` : ''}`}</span>
+                      <span>{wizardJob.analysisSessionId !== sessionId ? tr('在原部署会话中请 AI 协助核对配置。', 'Ask AI in the original deployment chat to help review configs.')
+                        : configChatStatus === 'ready' ? tr('已联动左侧 AI：可在左侧提问配置用途，或让 AI 直接修改右侧草稿。', 'Linked to left AI chat: ask about configs or let AI edit this draft.')
+                        : configChatStatus === 'connecting' ? tr('正在连接左侧 AI 配置助手…', 'Connecting to left AI config assistant...')
+                        : tr('暂时无法联动右侧草稿（左侧对话仍可正常使用）', 'Draft sync temporarily unavailable (left chat still works)') + (configChatError ? ` · ${configChatError}` : '')}</span>
                       {wizardJob.analysisSessionId !== sessionId && prepareAnalysisNavigation &&
-                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => beginAnalysisNavigation()?.(wizardJob)}>打开部署会话</button>}
+                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => beginAnalysisNavigation()?.(wizardJob)}>{tr('打开部署会话', 'Open Deployment Chat')}</button>}
                       {wizardJob.analysisSessionId === sessionId && configChatStatus === 'unavailable' &&
-                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => setConfigChatReconnect(value => value + 1)}>重新连接</button>}
+                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => setConfigChatReconnect(value => value + 1)}>{tr('重新连接', 'Reconnect')}</button>}
                     </div>
                   )}
                   {aiConfigEdits.length > 0 && (
                     <div className="oa-draft-banner" role="status">
                       <div style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-                        <strong>AI 已修改本次草稿</strong>
+                        <strong>{tr('AI 已修改本次草稿', 'AI updated this draft')}</strong>
                         {aiConfigEdits.map(edit => (
                           <div key={edit.after.key} className="oa-hint">
-                            {edit.after.description || edit.after.key} · {configChatRow(edit.before, deploymentResources, volumeMounts).value || '空值'}
-                            {' → '}{configChatRow(edit.after, deploymentResources, volumeMounts).value || '空值'}
+                            {edit.after.description || edit.after.key} · {configChatRow(edit.before, deploymentResources, volumeMounts).value || tr('空值', 'Empty')}
+                            {' → '}{configChatRow(edit.after, deploymentResources, volumeMounts).value || tr('空值', 'Empty')}
                           </div>
                         ))}
                       </div>
                       <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy || !aiConfigEdits.some(edit => configDrafts.includes(edit.after))}
-                        onClick={() => void undoAiConfigEdits()}>撤销 AI 修改</button>
+                        onClick={() => void undoAiConfigEdits()}>{tr('撤销 AI 修改', 'Undo AI Edits')}</button>
                     </div>
                   )}
                   <AppDeliveryConfig
@@ -2613,30 +2617,30 @@ export function AppsPanel({
                   <details className="oa-subcard oa-cfg-ref-details">
                     <summary>
                       <span>
-                        查看原项目配置文件参考
+                        {tr('查看原项目配置文件参考', 'View original project config reference')}
                         {sourceConfiguration?.files?.length
-                          ? `（${sourceConfiguration.files.length} 个文件）`
+                          ? tr('（{count} 个文件）', ' ({count} files)', { count: sourceConfiguration.files.length })
                           : ''}
                       </span>
-                      <span className="oa-hint">仅只读参考；完整源文件需在本地编辑后重新导入</span>
+                      <span className="oa-hint">{tr('仅只读参考；完整源文件需在本地编辑后重新导入', 'Read-only reference; edit source files locally and re-import')}</span>
                     </summary>
                     {!sourceConfiguration ? (
-                      <p className="oa-hint" style={{ margin: '8px 0 0' }}>暂时无法读取原应用配置文件。</p>
+                      <p className="oa-hint" style={{ margin: '8px 0 0' }}>{tr('暂时无法读取原应用配置文件。', 'Unable to read original app config files.')}</p>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
                         {sourceConfiguration.files.map(file => (
                           <details key={file.path} className="oa-cfg-ref-file">
                             <summary>
                               <code>{file.path}</code>
-                              {file.is_example && <span className="oa-pill">示例模板</span>}
-                              <span className="oa-hint">{file.fields.length} 项</span>
+                              {file.is_example && <span className="oa-pill">{tr('示例模板', 'Example')}</span>}
+                              <span className="oa-hint">{tr('{count} 项', '{count} items', { count: file.fields.length })}</span>
                             </summary>
                             {file.fields.length > 0 && (
                               <dl className="oa-cfg-ref-dl">
                                 {file.fields.map(({ key, value }, index) => (
                                   <React.Fragment key={`${key}-${index}`}>
                                     <dt><code>{key}</code></dt>
-                                    <dd><code>{value || '（空）'}</code></dd>
+                                    <dd><code>{value || tr('（空）', '(Empty)')}</code></dd>
                                   </React.Fragment>
                                 ))}
                               </dl>
@@ -2645,7 +2649,7 @@ export function AppsPanel({
                         ))}
                         {sourceConfiguration.references.length > 0 && (
                           <div className="oa-cfg-ref-file">
-                            <div className="oa-hint" style={{ fontWeight: 600, marginBottom: 4 }}>源码引用的环境变量</div>
+                            <div className="oa-hint" style={{ fontWeight: 600, marginBottom: 4 }}>{tr('源码引用的环境变量', 'Env vars referenced in source')}</div>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                               {sourceConfiguration.references.map(key => (
                                 <code key={key} className="oa-code">{key}</code>
@@ -2654,7 +2658,7 @@ export function AppsPanel({
                           </div>
                         )}
                         {!sourceConfiguration.files.length && !sourceConfiguration.references.length && (
-                          <p className="oa-hint" style={{ margin: '6px 0 0' }}>在导入的源码中未识别到配置文件或环境变量引用。</p>
+                          <p className="oa-hint" style={{ margin: '6px 0 0' }}>{tr('在导入的源码中未识别到配置文件或环境变量引用。', 'No config files or env var references detected in source.')}</p>
                         )}
                       </div>
                     )}
@@ -2665,19 +2669,19 @@ export function AppsPanel({
               {step3Ready && configSubTab === 'mounts' && (
                 <div className="oa-form-card">
                   {volumeMounts.length === 0 ? (
-                    <div className="oa-hint">此应用没有目录挂载。</div>
+                    <div className="oa-hint">{tr('此应用没有目录挂载。', 'No directory mounts for this app.')}</div>
                   ) : (
                     <div className="oa-subcard">
                       <div className="oa-subcard-head">
-                        <span>持久化目录与存储资源</span>
-                        <span className="oa-pill oa-pill-ok">{volumeMounts.length} 项</span>
+                        <span>{tr('持久化目录与存储资源', 'Persistent Directories & Storage Resources')}</span>
+                        <span className="oa-pill oa-pill-ok">{tr('{count} 项', '{count}', { count: volumeMounts.length })}</span>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                         {volumeMounts.map((mount, index) => {
                           if (!mount.container_path) {
                             return (
                               <p key={index} className="oa-config-field-warning">
-                                此挂载缺少容器内路径，请返回核对方案，由原会话的 AI 补全。
+                                {tr('此挂载缺少容器内路径，请返回核对方案，由原会话的 AI 补全。', 'This mount is missing a container path. Return to review and let AI complete it.')}
                               </p>
                             )
                           }
@@ -2692,10 +2696,10 @@ export function AppsPanel({
                                   <code>{mount.container_path}</code> {mount.purpose || ''}
                                 </span>
                                 {existing ? (
-                                  <span>复用 {existing.storage_location || existing.host_path || existing.volume_name || '现有挂载'}</span>
+                                  <span>{tr('复用 {loc}', 'Reuse {loc}', { loc: existing.storage_location || existing.host_path || existing.volume_name || tr('现有挂载', 'existing mount') })}</span>
                                 ) : (
                                   <select
-                                    aria-label={`存储资源 ${mount.container_path}`}
+                                    aria-label={tr('存储资源 {path}', 'Storage resource {path}', { path: mount.container_path })}
                                     aria-invalid={missingResource ? true : undefined}
                                     aria-describedby={missingResource ? issueId : undefined}
                                     value={storageSelections[mount.container_path]}
@@ -2707,13 +2711,13 @@ export function AppsPanel({
                                     }}
                                   >
                                     {(skillDrivenDelivery || options.length === 0) && (
-                                      <option value="" disabled>{options.length > 0 ? '请选择存储资源'
-                                        : mount.kind === 'sqlite' ? '等待管理员配置本地磁盘卷' : '等待管理员配置存储'}</option>
+                                      <option value="" disabled>{options.length > 0 ? tr('请选择存储资源', 'Select storage resource')
+                                        : mount.kind === 'sqlite' ? tr('等待管理员配置本地磁盘卷', 'Awaiting admin local disk volume') : tr('等待管理员配置存储', 'Awaiting admin storage config')}</option>
                                     )}
                                     {options.map(resource => (
                                       <option key={resource.id} value={resource.id}>
-                                        {resource.name} · {resource.type === 'aliyun-oss-volume' ? '阿里云 OSS' : '本地磁盘'}
-                                        {resource.is_default ? '（默认）' : ''}
+                                        {resource.name} · {resource.type === 'aliyun-oss-volume' ? tr('阿里云 OSS', 'Alibaba OSS') : tr('本地磁盘', 'Local Disk')}
+                                        {resource.is_default ? tr('（默认）', ' (Default)') : ''}
                                       </option>
                                     ))}
                                   </select>
@@ -2721,7 +2725,7 @@ export function AppsPanel({
                               </label>
                               {missingResource && (
                                 <p id={issueId} className="oa-config-field-warning">
-                                  {options.length ? '请为此目录选择存储资源。' : '请联系管理员启用适用于此目录的存储资源。'}
+                                  {options.length ? tr('请为此目录选择存储资源。', 'Please select a storage resource for this directory.') : tr('请联系管理员启用适用于此目录的存储资源。', 'Contact an admin to enable a storage resource for this directory.')}
                                 </p>
                               )}
                             </div>
@@ -2732,16 +2736,16 @@ export function AppsPanel({
                   )}
                   {dataPlan && (
                     <details className="oa-subcard oa-cfg-ref-details" open={dataPlan.strategy === 'postgres_copy'}>
-                      <summary>数据变更与恢复</summary>
+                      <summary>{tr('数据变更与恢复', 'Data Migration & Recovery')}</summary>
                       <p style={{ whiteSpace: 'pre-wrap' }}>{dataPlan.summary}</p>
                       {dataPlan.strategy === 'postgres_copy' && (
                         <div className="oa-hint">
-                          原库 <code>{dataPlan.source_resource_id}</code> · 演练库 <code>{dataPlan.rehearsal_resource_id}</code> · 目标库 <code>{dataPlan.target_resource_id}</code>
-                          <p>发布包含一次停写窗口。先在演练库验证，正式复制期间暂停旧实例写入。</p>
+                          {tr('原库', 'Source')} <code>{dataPlan.source_resource_id}</code> · {tr('演练库', 'Staging')} <code>{dataPlan.rehearsal_resource_id}</code> · {tr('目标库', 'Target')} <code>{dataPlan.target_resource_id}</code>
+                          <p>{tr('发布包含一次停写窗口。先在演练库验证，正式复制期间暂停旧实例写入。', 'Release includes a brief write freeze window; verified on staging first.')}</p>
                         </div>
                       )}
                       {dataPlan.migration_files?.map(path => <div key={path}><code>{path}</code></div>)}
-                      <p style={{ whiteSpace: 'pre-wrap' }}>恢复方式　{dataPlan.recovery}</p>
+                      <p style={{ whiteSpace: 'pre-wrap' }}>{tr('恢复方式', 'Recovery')}: {dataPlan.recovery}</p>
                     </details>
                   )}
                 </div>
@@ -2750,29 +2754,29 @@ export function AppsPanel({
               {step3Ready && configSubTab === 'skill' && <AppSkillPreview api={api} contextId={contextId} job={wizardJob} />}
 
               {step3Ready && configSubTab === 'dockerfile' && (
-                <section className="oa-subcard oa-dockerfile-panel" aria-label="本次构建的 Dockerfile">
+                <section className="oa-subcard oa-dockerfile-panel" aria-label={tr('本次构建的 Dockerfile', 'Build Dockerfile')}>
                   <div className="oa-subcard-head">
-                    <strong>本次构建的 Dockerfile</strong>
+                    <strong>{tr('本次构建的 Dockerfile', 'Build Dockerfile')}</strong>
                     {dockerfile && (
                       <button type="button" className="oa-btn oa-btn-sm" onClick={() => void copyText(`dockerfile-${wizardJob.id}`, dockerfile)}>
                         <AppIcon name={copiedKey === `dockerfile-${wizardJob.id}` ? 'check' : 'copy'} size={13} />
-                        {copiedKey === `dockerfile-${wizardJob.id}` ? '已复制' : '复制 Dockerfile'}
+                        {copiedKey === `dockerfile-${wizardJob.id}` ? tr('已复制', 'Copied') : tr('复制 Dockerfile', 'Copy Dockerfile')}
                       </button>
                     )}
                   </div>
                   {dockerfile ? (
-                    <pre className="oa-dockerfile-source oa-mono" tabIndex={0} aria-label="Dockerfile 正文"><code>{dockerfile}</code></pre>
+                    <pre className="oa-dockerfile-source oa-mono" tabIndex={0} aria-label={tr('Dockerfile 正文', 'Dockerfile content')}><code>{dockerfile}</code></pre>
                   ) : (
-                    <p className="oa-hint" role="status">{dockerfile === undefined ? '正在读取 Dockerfile…' : '暂时无法读取本次构建的 Dockerfile。'}</p>
+                    <p className="oa-hint" role="status">{dockerfile === undefined ? tr('正在读取 Dockerfile…', 'Loading Dockerfile...') : tr('暂时无法读取本次构建的 Dockerfile。', 'Unable to read Dockerfile.')}</p>
                   )}
                   {(wizardJob.proposal?.contract?.build_inputs?.length ?? 0) > 0 && (
                     <details className="oa-cfg-ref-details">
-                      <summary>构建参数来源</summary>
+                      <summary>{tr('构建参数来源', 'Build Arg Sources')}</summary>
                       <dl className="oa-cfg-ref-dl">
                         {wizardJob.proposal?.contract?.build_inputs?.map(input => (
                           <div key={input.arg}>
                             <dt><code>{input.arg}</code></dt>
-                            <dd>取自本次确认的配置 <code>{input.key}</code></dd>
+                            <dd>{tr('取自本次确认的配置', 'From confirmed config')} <code>{input.key}</code></dd>
                           </div>
                         ))}
                       </dl>
@@ -2801,31 +2805,31 @@ export function AppsPanel({
                   </span>
                   {progress.tone === 'ok' && (
                     <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">
-                      <AppIcon name="external" size={13} /> 打开应用
+                      <AppIcon name="external" size={13} /> {tr('打开应用', 'Open App')}
                     </a>
                   )}
                   {attempt && progress.tone !== 'ok' && (
                     <div className="oa-deploy-actions">
                       {!['submitting', 'submission_rejected', 'cancelled', 'restored'].includes(attempt.phase) && api.appVerifyWithOptions && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCheckAttempt()}>重新检查</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCheckAttempt()}>{tr('重新检查', 'Recheck')}</button>
                       )}
                       {attempt.can_cancel && !['unknown', 'cancelling', 'cleaning'].includes(attempt.phase) && api.appCancelDeployment && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCancelAttempt()}>取消本次部署</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCancelAttempt()}>{tr('取消本次部署', 'Cancel Deployment')}</button>
                       )}
                       {attempt.phase === 'blocked_previous' && previous && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void resumeWizardJob(previous, 4)}>查看上一轮部署</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void resumeWizardJob(previous, 4)}>{tr('查看上一轮部署', 'View Previous Deployment')}</button>
                       )}
                       {attempt.phase === 'submission_rejected' && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => setWizardStep(3)}>返回第三步</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => setWizardStep(3)}>{tr('返回第三步', 'Back to Step 3')}</button>
                       )}
                       {attempt.retry_safe && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>重试部署</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>{tr('重试部署', 'Retry Deployment')}</button>
                       )}
                       {attempt.retry_safe && (attempt.failure_kind === 'build' || attempt.failure_kind === 'startup') && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>让 AI 分析修复问题</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>{tr('让 AI 分析修复问题', 'Let AI Diagnose & Fix')}</button>
                       )}
                       {attempt.phase === 'restored' && (
-                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">打开当前版本</a>
+                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">{tr('打开当前版本', 'Open Current Version')}</a>
                       )}
                     </div>
                   )}
@@ -2833,20 +2837,20 @@ export function AppsPanel({
                 {attempt && (
                   <div className="oa-hint oa-deploy-message">
                     {attempt.phase === 'unknown' && <div>
-                      正在核对同一笔部署。
-                      {attempt.last_observed_phase && ` 上次确认到「${attemptLabel(wizardJob, attempt.last_observed_phase)}」。`}
-                      {attempt.last_observed_at && ` ${new Date(attempt.last_observed_at).toLocaleTimeString('zh-CN')}`}
+                      {tr('正在核对同一笔部署。', 'Checking deployment status.')}
+                      {attempt.last_observed_phase && tr(' 上次确认到「{phase}」。', ' Last seen at "{phase}".', { phase: attemptLabel(wizardJob, attempt.last_observed_phase) })}
+                      {attempt.last_observed_at && ` ${new Date(attempt.last_observed_at).toLocaleTimeString(locale === 'en' ? 'en-US' : 'zh-CN')}`}
                     </div>}
-                    {attempt.phase === 'blocked_previous' && <div>上一轮结束并完成清理后，即可返回第三步确认本次部署。</div>}
-                    {attempt.stalled && elapsed && <div>已等待 {elapsed}{attempt.phase === 'starting' ? '，应用还没启动完成。' : '。'}</div>}
-                    {attempt.active_version && progress.tone !== 'ok' ? <div>最近上线版本 v{attempt.active_version}</div> : null}
-                    {attempt.phase === 'recovery_required' && <div>平台正在保护应用数据。请复制本次部署日志，交由平台管理员处理。</div>}
+                    {attempt.phase === 'blocked_previous' && <div>{tr('上一轮结束并完成清理后，即可返回第三步确认本次部署。', 'Once the previous deployment finishes cleanup, return to Step 3 to confirm.')}</div>}
+                    {attempt.stalled && elapsed && <div>{tr('已等待 {elapsed}', 'Elapsed {elapsed}', { elapsed })}{attempt.phase === 'starting' ? tr('，应用还没启动完成。', '; app is still starting.') : '.'}</div>}
+                    {attempt.active_version && progress.tone !== 'ok' ? <div>{tr('最近上线版本 v{version}', 'Latest live version v{version}', { version: attempt.active_version })}</div> : null}
+                    {attempt.phase === 'recovery_required' && <div>{tr('平台正在保护应用数据。请复制本次部署日志，交由平台管理员处理。', 'Platform is protecting app data. Please copy the deployment logs for an admin.')}</div>}
                     {(failed || attempt.phase === 'restored') && wizardJob.error && <div>{wizardJob.error}</div>}
                   </div>
                 )}
                 {wizardJob.assessment && (
                   <div className="oa-subcard oa-deploy-message">
-                    <strong>AI 验收结论</strong>
+                    <strong>{tr('AI 验收结论', 'AI Verification Summary')}</strong>
                     <p>{wizardJob.assessment.report}</p>
                   </div>
                 )}
@@ -2855,27 +2859,27 @@ export function AppsPanel({
                     <div className="oa-alert oa-alert-danger" role="alert">
                       <AppIcon name="warning" size={16} />
                       <div className="oa-deploy-message">{blockedByPreviousBuild(wizardJob)
-                        ? '服务器上一轮构建还在进行。等构建结束后，可核对并重新发布原交付包。'
-                        : wizardJob.error || '平台未返回具体失败原因。'}</div>
+                        ? tr('服务器上一轮构建还在进行。等构建结束后，可核对并重新发布原交付包。', 'A previous build is still in progress on the server. Once finished, verify and redeploy.')
+                        : wizardJob.error || tr('平台未返回具体失败原因。', 'Platform did not return a specific failure reason.')}</div>
                     </div>
                     <div className="oa-deploy-actions">
                       {api.appVerifyWithOptions && (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRecheckStartup()}>
                           <AppIcon name="refresh" size={13} />
-                          {recheck?.pending ? '正在检查…' : '重新检查应用是否已启动'}
+                          {recheck?.pending ? tr('正在检查…', 'Checking...') : tr('重新检查应用是否已启动', 'Recheck if app has started')}
                         </button>
                       )}
                       {wizardJob.assessmentPending ? (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleContinueAssessment()}>
-                          继续 AI 验收
+                          {tr('继续 AI 验收', 'Continue AI Verification')}
                         </button>
                       ) : blockedByPreviousBuild(wizardJob) ? (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>
-                          核对并重新部署
+                          {tr('核对并重新部署', 'Verify & Redeploy')}
                         </button>
                       ) : (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>
-                          让 AI 分析修复问题
+                          {tr('让 AI 分析修复问题', 'Let AI Diagnose & Fix')}
                         </button>
                       )}
                     </div>
@@ -2899,7 +2903,6 @@ export function AppsPanel({
           })()}
         </div>
 
-        {/* Sticky Wizard Footer */}
         <div className="oa-overlay-footer">
           {wizardStep === 1 && (
             <>
@@ -2911,10 +2914,10 @@ export function AppsPanel({
                   void loadWorkspaceData(true)
                 }}
               >
-                取消
+                {tr('取消', 'Cancel')}
               </button>
               <button type="submit" form={`${formId}-source-form`} className="oa-btn oa-btn-primary" disabled={!canSubmitStep1}>
-                {wizardBusy ? '正在导入源码…' : '创建并开始 AI 分析'}
+                {wizardBusy ? tr('正在导入源码…', 'Importing source...') : tr('创建并开始 AI 分析', 'Create & Analyze')}
               </button>
             </>
           )}
@@ -2938,11 +2941,11 @@ export function AppsPanel({
                   setWizardStep(1)
                 }}
               >
-                返回重选源码
+                {tr('返回重选源码', 'Back to Source')}
               </button>
               {step2State?.jobId === wizardJob.id && step2State.canContinue && (
                 <button type="button" className="oa-btn oa-btn-primary" onClick={() => step2State.triggerNext()}>
-                  下一步：核对部署内容
+                  {tr('下一步：核对部署内容', 'Next: Review Deployment')}
                 </button>
               )}
             </>
@@ -2951,7 +2954,7 @@ export function AppsPanel({
           {wizardStep === 3 && wizardJob && (
             <>
               <button type="button" className="oa-btn" disabled={wizardBusy} onClick={() => void handleReturnToReview()}>
-                返回核对方案
+                {tr('返回核对方案', 'Back to Proposal')}
               </button>
               <button
                 type="button"
@@ -2959,16 +2962,16 @@ export function AppsPanel({
                 disabled={wizardBusy || !step3Ready || hasConfigIssues || hasMissingStorage}
                 onClick={() => void handlePublishApp()}
               >
-                {wizardBusy ? '正在提交发布…' : step3Loading ? '正在加载部署内容…' : '确认配置并发布上线'}
+                {wizardBusy ? tr('正在提交发布…', 'Deploying...') : step3Loading ? tr('正在加载部署内容…', 'Loading deployment...') : tr('确认配置并发布上线', 'Confirm & Deploy')}
               </button>
             </>
           )}
 
           {wizardStep === 4 && (wizardJob && deploymentProgress(wizardJob).tone === 'warn' ? (
-            <button type="button" className="oa-btn" disabled>部署处理中…</button>
+            <button type="button" className="oa-btn" disabled>{tr('部署处理中…', 'Deploying...')}</button>
           ) : (
             <>
-              <span className="oa-hint">发布完成后可在应用列表中管理配置、版本与备份。</span>
+              <span className="oa-hint">{tr('发布完成后可在应用列表中管理配置、版本与备份。', 'Manage configs, versions, and backups from the app list after deployment.')}</span>
               <button
                 type="button"
                 className="oa-btn oa-btn-primary"
@@ -2977,7 +2980,7 @@ export function AppsPanel({
                   void loadWorkspaceData(false)
                 }}
               >
-                返回应用列表
+                {tr('返回应用列表', 'Back to App List')}
               </button>
             </>
           ))}
@@ -2991,22 +2994,27 @@ export function AppsPanel({
     if (!detailApp && detailLoading) {
       return (
         <div className="oa-form-card" style={{ textAlign: 'center', padding: '44px 20px', color: '#64748b' }}>
-          正在加载应用详情…
+          {tr('正在加载应用详情…', 'Loading app details…')}
         </div>
       )
     }
     if (!detailApp) {
       return (
         <div className="oa-form-card">
-          <p className="oa-alert oa-alert-danger">{detailError || '应用详情不存在或无访问权限'}</p>
+          <NoticeModal
+            open={true}
+            variant="error"
+            message={detailError || tr('应用详情不存在或无访问权限', 'App not found or access denied')}
+            onClose={() => setViewMode('list')}
+          />
           <button type="button" className="oa-btn" style={{ marginTop: 12 }} onClick={() => setViewMode('list')}>
-            返回应用列表
+            {tr('返回应用列表', 'Back to Apps')}
           </button>
         </div>
       )
     }
 
-    const tone = jobStatusTone(detailApp.status)
+    const tone = jobStatusTone(detailApp.status, undefined, locale)
     const readOnly = detailApp.can_manage !== true
     const lastHealthCheck = detailHealthCheck?.slug === detailApp.slug ? detailHealthCheck : null
     const unhealthy = detailApp.status === 'failed' || detailApp.status === 'unhealthy'
@@ -3016,11 +3024,11 @@ export function AppsPanel({
       (matchingJob?.version === detailApp.current_version && matchingJob?.proposal?.delivery_format === 1)
     const activeLocalJob = matchingJob?.version === detailApp.current_version && matchingJob?.status === 'verified' ? matchingJob : undefined
     const detailTabs = {
-      configs: '运行配置',
-      storage: '持久化存储',
-      versions: `版本历史 (${visibleVersions.length})`,
-      logs: '日志与 Dockerfile',
-      artifacts: '能力与技能',
+      configs: tr('运行配置', 'Runtime Config'),
+      storage: tr('持久化存储', 'Storage'),
+      versions: tr('版本历史 ({n})', 'Versions ({n})', { n: visibleVersions.length }),
+      logs: tr('日志与 Dockerfile', 'Logs & Dockerfile'),
+      artifacts: tr('能力与技能', 'Capabilities & Skill'),
     } satisfies Record<DetailTab, string>
 
     const onlineRuntime = api.appRuntimeChange ? runtimeStatus : undefined
@@ -3037,8 +3045,8 @@ export function AppsPanel({
     const runtimeBaseline = { base_version: detailApp.current_version, base_config_revision: onlineRuntime?.config_revision }
     const logView = !readOnly && detailTab === 'logs'
     const detailLog = formatLogOutput(detailLogsData[detailLogsSubTab])
-    const logSummary = detailLogsSubTab === 'runtime' ? '容器服务输出（最近 500 行）'
-      : detailLogsSubTab === 'build' ? '构建与部署日志' : '已归档 Dockerfile'
+    const logSummary = detailLogsSubTab === 'runtime' ? tr('容器服务输出（最近 500 行）', 'Container Output (Last 500 lines)')
+      : detailLogsSubTab === 'build' ? tr('构建与部署日志', 'Build & Deploy Logs') : tr('已归档 Dockerfile', 'Archived Dockerfile')
 
     return (
       <div className="oa-overlay-view">
@@ -3046,7 +3054,7 @@ export function AppsPanel({
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <button type="button" className="oa-btn oa-btn-sm" onClick={() => setViewMode('list')}>
               <AppIcon name="arrowLeft" size={13} />
-              <span>返回列表</span>
+              <span>{tr('返回列表', 'Back')}</span>
             </button>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
               <strong style={{ fontSize: 15, color: '#0f172a' }}>{detailApp.name}</strong>
@@ -3056,13 +3064,13 @@ export function AppsPanel({
                 {tone.spinning && <span className="oa-dot oa-pulse" />}
                 {tone.text}
               </span>
-              {readOnly && <span className="oa-pill">共享只读</span>}
+              {readOnly && <span className="oa-pill">{tr('共享只读', 'Read-only')}</span>}
             </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {!readOnly && (detailApp.current_version ?? 0) > 0 && api.appRuntimeStatus && api.appRuntimeChange && (
-              <button type="button" className="oa-btn oa-btn-sm" onClick={() => openRuntimePanel(detailApp, true)}>重启应用</button>
+              <button type="button" className="oa-btn oa-btn-sm" onClick={() => openRuntimePanel(detailApp, true)}>{tr('重启应用', 'Restart')}</button>
             )}
             <button
               type="button"
@@ -3071,40 +3079,37 @@ export function AppsPanel({
               onClick={() => void openAppDetail(detailApp.slug, detailTab)}
             >
               <AppIcon name="refresh" size={13} className={detailLoading ? 'oa-spin' : ''} />
-              <span>刷新</span>
+              <span>{tr('刷新', 'Refresh')}</span>
             </button>
             {!readOnly && (
               <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" onClick={() => startWizardNew(detailApp, findAppJob(jobs, detailApp))}>
                 <AppIcon name="plus" size={13} />
-                <span>发布新版本</span>
+                <span>{tr('发布新版本', 'Deploy New Version')}</span>
               </button>
             )}
             {!readOnly && api.appDeleteWithOptions && (
               <button type="button" className="oa-btn oa-btn-sm oa-btn-danger" onClick={() => setDeleteModalOpen(true)}>
                 <AppIcon name="trash" size={13} />
-                <span>删除应用</span>
+                <span>{tr('删除应用', 'Delete App')}</span>
               </button>
             )}
           </div>
         </div>
 
         <div className="oa-overlay-body">
-          {detailError && (
-            <div role="alert" className="oa-alert oa-alert-danger">
-              <AppIcon name="warning" size={16} />
-              <div style={{ flex: 1 }}>{detailError}</div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailError(null)}>
-                关闭
-              </button>
-            </div>
-          )}
+          <NoticeModal
+            open={Boolean(detailError)}
+            variant="error"
+            message={detailError || ''}
+            onClose={() => setDetailError(null)}
+          />
 
           {detailNotice && (
             <div role="status" className="oa-alert oa-alert-ok">
               <AppIcon name="check" size={16} />
               <div style={{ flex: 1 }}>{detailNotice}</div>
               <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailNotice(null)}>
-                关闭
+                {tr('关闭', 'Close')}
               </button>
             </div>
           )}
@@ -3113,29 +3118,47 @@ export function AppsPanel({
             <div className="oa-health-result oa-alert oa-alert-ok" role="status">
               <AppIcon name="check" size={16} />
               <div>{lastHealthCheck.message}</div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailHealthCheck(null)}>关闭</button>
+              <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailHealthCheck(null)}>{tr('关闭', 'Close')}</button>
             </div>
           )}
 
-          {(unhealthy || lastHealthCheck?.ok === false) && (
+          <NoticeModal
+            open={Boolean(lastHealthCheck?.ok === false)}
+            variant="error"
+            title={tr('健康检查未通过', 'Health Check Failed')}
+            message={lastHealthCheck?.message || ''}
+            onClose={() => setDetailHealthCheck(null)}
+            actions={!readOnly ? (
+              <button
+                type="button"
+                className="oa-btn oa-btn-sm"
+                onClick={() => {
+                  setDetailHealthCheck(null)
+                  setDetailTab('logs')
+                }}
+              >
+                {tr('查看日志', 'View Logs')}
+              </button>
+            ) : undefined}
+          />
+
+          {unhealthy && (
             <div className="oa-alert oa-alert-danger" style={{ justifyContent: 'space-between', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                 <AppIcon name="warning" size={16} />
                 <div>
-                  <strong>{lastHealthCheck?.ok === false ? lastHealthCheck.message : '应用当前状态异常'}</strong>
-                  {!lastHealthCheck && (
-                    <div style={{ marginTop: 2 }}>{healthFailureDetail(detailApp.error_message) || '请重新检查状态或查看服务器日志。'}</div>
-                  )}
+                  <strong>{tr('应用当前状态异常', 'App Status Abnormal')}</strong>
+                  <div style={{ marginTop: 2 }}>{healthFailureDetail(detailApp.error_message) || tr('请重新检查状态或查看服务器日志。', 'Please recheck status or inspect server logs.')}</div>
                 </div>
               </div>
               {!readOnly && <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {api.appRecheck && (
                   <button type="button" className="oa-btn oa-btn-xs" disabled={detailBusy} onClick={() => void handleRecheckApp(detailApp.slug, true)}>
-                    重新检测状态
+                    {tr('重新检测状态', 'Recheck')}
                   </button>
                 )}
                 <button type="button" className="oa-btn oa-btn-xs" onClick={() => setDetailTab('logs')}>
-                  查看日志
+                  {tr('查看日志', 'View Logs')}
                 </button>
               </div>}
             </div>
@@ -3152,18 +3175,18 @@ export function AppsPanel({
               {detailApp.app_url && (
                 <a href={detailApp.app_url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-xs">
                   <AppIcon name="external" size={12} />
-                  <span>打开应用</span>
+                  <span>{tr('打开应用', 'Open App')}</span>
                 </a>
               )}
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, color: '#334155' }}>
-              {detailApp.description || '暂无应用描述'}
+              {detailApp.description || tr('暂无应用描述', 'No description')}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px 18px', paddingTop: 8, borderTop: '1px solid #e2e8f0', fontSize: 12, color: '#64748b' }}>
-              <span>端口：<strong className="oa-mono" style={{ color: '#0f172a' }}>{detailApp.container_port ?? opcConfig.defaultPort}</strong></span>
-              <span>运行时：<strong style={{ color: '#0f172a' }}>{detailApp.language || '未知'} {detailApp.runtime_version || ''}</strong></span>
-              <span>创建：{formatDateTime(detailApp.created_at)}</span>
-              <span>更新：{formatDateTime(detailApp.updated_at)}</span>
+              <span>{tr('端口：', 'Port: ')}<strong className="oa-mono" style={{ color: '#0f172a' }}>{detailApp.container_port ?? opcConfig.defaultPort}</strong></span>
+              <span>{tr('运行时：', 'Runtime: ')}<strong style={{ color: '#0f172a' }}>{detailApp.language || tr('未知', 'Unknown')} {detailApp.runtime_version || ''}</strong></span>
+              <span>{tr('创建：', 'Created: ')}{formatDateTime(detailApp.created_at)}</span>
+              <span>{tr('更新：', 'Updated: ')}{formatDateTime(detailApp.updated_at)}</span>
             </div>
           </div>
 
@@ -3196,18 +3219,18 @@ export function AppsPanel({
               <div className="oa-form-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <strong style={{ fontSize: 14, color: '#0f172a' }}>智能体技能</strong>
+                    <strong style={{ fontSize: 14, color: '#0f172a' }}>{tr('智能体技能', 'Agent Skill')}</strong>
                     <span className="oa-code">{detailApp.skill_name || `app-${detailApp.slug}`}</span>
                     {detailApp.skill_synced !== undefined && (
                       <span className={`oa-pill ${detailApp.skill_synced ? 'oa-pill-ok' : 'oa-pill-warn'}`}>
-                        {detailApp.skill_synced ? '技能已同步' : '待同步'}
+                        {detailApp.skill_synced ? tr('技能已同步', 'Synced') : tr('待同步', 'Pending Sync')}
                       </span>
                     )}
                   </div>
                   <div className="oa-hint">
                     {detailApp.skill_synced
-                      ? '已安装至本地工作台，可在对话中直接调用该应用能力。'
-                      : '应用页面确认完成后即可自动同步同名本地技能。'}
+                      ? tr('已安装至本地工作台，可在对话中直接调用该应用能力。', 'Installed locally; ready to invoke in chat.')
+                      : tr('应用页面确认完成后即可自动同步同名本地技能。', 'Skill syncs automatically after page verification.')}
                   </div>
                 </div>
                 {matchingJob && !readOnly && matchingJob.status === 'awaiting_page_verification' && (
@@ -3216,7 +3239,7 @@ export function AppsPanel({
                     className="oa-btn oa-btn-sm oa-btn-primary"
                     onClick={() => void resumeWizardJob(matchingJob, 4)}
                   >
-                    前往确认页面并启用技能
+                    {tr('前往确认页面并启用技能', 'Verify Page & Enable Skill')}
                   </button>
                 )}
               </div>
@@ -3231,72 +3254,72 @@ export function AppsPanel({
           )}
 
           {/* Tab 2: Configs */}
-          {detailTab === 'configs' && api.appRuntimeStatus && currentRuntimeError && (
-            <div className="oa-alert oa-alert-danger" role="alert">
-              <AppIcon name="warning" size={16} />
-              <div style={{ flex: 1 }}>
-                <strong>暂时无法读取运行配置</strong>
-                <div>{currentRuntimeError}</div>
-              </div>
-              <button type="button" className="oa-btn oa-btn-xs" onClick={() => {
+          <NoticeModal
+            open={Boolean(detailTab === 'configs' && api.appRuntimeStatus && currentRuntimeError)}
+            variant="error"
+            title={tr('暂时无法读取运行配置', 'Unable to Load Runtime Config')}
+            message={currentRuntimeError || ''}
+            onClose={() => setRuntimeError(null)}
+            actions={(
+              <button type="button" className="oa-btn oa-btn-sm" onClick={() => {
                 setRuntimeError(null)
                 setRuntimeRefresh(value => value + 1)
-              }}>重新加载配置</button>
-            </div>
-          )}
+              }}>{tr('重新加载配置', 'Reload')}</button>
+            )}
+          />
           {detailTab === 'configs' && api.appRuntimeStatus && !runtimeStatus && !currentRuntimeError && (
-            <div className="oa-alert" role="status"><span className="oa-dot oa-pulse" /> 正在加载运行配置…</div>
+            <div className="oa-alert" role="status"><span className="oa-dot oa-pulse" /> {tr('正在加载运行配置…', 'Loading runtime config...')}</div>
           )}
           {detailTab === 'configs' && (
             <div className="oa-form-card">
               <div className="oa-runtime-toolbar">
                 <div>
-                  <strong>在线运行配置</strong>
+                  <strong>{tr('在线运行配置', 'Live Runtime Config')}</strong>
                   <div className="oa-hint">
                     {onlineRuntime
-                      ? `应用 v${detailApp.current_version} · 配置第 ${onlineRuntime.config_number} 版`
+                      ? tr('应用 v{version} · 配置第 {num} 版', 'App v{version} · Config rev {num}', { version: detailApp.current_version, num: onlineRuntime.config_number })
                       : requiresAIUpdate
-                        ? '在更新向导中由所选 AI 分析配置变更。应用启动后，平台会检查分配的域名。'
-                        : '保存后会重启应用容器以应用运行配置。'}
+                        ? tr('在更新向导中由所选 AI 分析配置变更。应用启动后，平台会检查分配的域名。', 'AI analyzes config changes in the update wizard. Platform checks the assigned domain after startup.')
+                        : tr('保存后会重启应用容器以应用运行配置。', 'Saving restarts the container to apply runtime config.')}
                   </div>
                 </div>
                 {onlineRuntime ? (
                   <div className="oa-runtime-actions">
-                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>配置历史</button>
-                    <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>让 AI 分析配置更新</button>
+                    <button type="button" className="oa-btn oa-btn-xs" onClick={() => setShowRuntimeHistory(value => !value)} aria-expanded={showRuntimeHistory}>{tr('配置历史', 'Config History')}</button>
+                    <button type="button" className="oa-btn oa-btn-xs" disabled={runtimeBlocked} onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>{tr('让 AI 分析配置更新', 'AI Analyze Config Update')}</button>
                     <button type="button" className="oa-btn oa-btn-primary" disabled={!runtimeEditable || runtimeSubmitting || !Object.keys(runtimeChanges).length}
-                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'config', ...runtimeBaseline, changes: runtimeChanges })}>保存并重启</button>
+                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'config', ...runtimeBaseline, changes: runtimeChanges })}>{tr('保存并重启', 'Save & Restart')}</button>
                   </div>
                 ) : requiresAIUpdate ? (
                   <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy}
                     onClick={() => startWizardNew(detailApp, activeLocalJob, true)}>
-                    让 AI 分析配置更新
+                    {tr('让 AI 分析配置更新', 'AI Analyze Config Update')}
                   </button>
                 ) : api.appUpdateConfig && (
                   <button type="button" className="oa-btn oa-btn-primary" disabled={detailBusy} onClick={() => void handleSaveDetailConfig()}>
-                    {detailBusy ? '正在保存并重启…' : '保存配置并重启容器'}
+                    {detailBusy ? tr('正在保存并重启…', 'Saving & restarting...') : tr('保存配置并重启容器', 'Save Config & Restart')}
                   </button>
                 )}
               </div>
-              {onlineRuntime && runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>查看最近操作状态</button>}
+              {onlineRuntime && runtimeOperation && <button type="button" className="oa-btn oa-btn-link" onClick={() => openRuntimePanel(detailApp, false)}>{tr('查看最近操作状态', 'View recent operation status')}</button>}
               {onlineRuntime && showRuntimeHistory && <div className="oa-runtime-history">
-                {onlineRuntime.revisions.length === 0 && <div className="oa-hint">当前配置为此应用版本的初始配置。</div>}
+                {onlineRuntime.revisions.length === 0 && <div className="oa-hint">{tr('当前配置为此应用版本的初始配置。', 'Current config is the initial config for this app version.')}</div>}
                 {onlineRuntime.revisions.map(revision => {
                   const active = revision.state === 'succeeded' && revision.config_revision === onlineRuntime.config_revision
                   return <div className="oa-runtime-toolbar" key={revision.id}>
                     <div>
-                      <strong>配置第 {revision.config_number} 版{active ? ' · 正在使用' : ''}</strong>
-                      <div className="oa-hint">{revision.changed_keys || '初始配置'}{revision.created_at ? ' · ' + new Date(revision.created_at).toLocaleString('zh-CN') : ''}</div>
+                      <strong>{tr('配置第 {num} 版', 'Config rev {num}', { num: revision.config_number })}{active ? tr(' · 正在使用', ' · Active') : ''}</strong>
+                      <div className="oa-hint">{revision.changed_keys || tr('初始配置', 'Initial config')}{revision.created_at ? ' · ' + new Date(revision.created_at).toLocaleString(locale === 'en' ? 'en-US' : 'zh-CN') : ''}</div>
                       <div className="oa-hint">{revision.created_by} {revision.message}</div>
                     </div>
                     {revision.state === 'succeeded' && !active && <button type="button" className="oa-btn oa-btn-xs" disabled={!runtimeEditable || runtimeSubmitting}
-                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'restore', ...runtimeBaseline, operation_id: revision.id })}>恢复并重启</button>}
+                      onClick={() => void submitRuntimeChange(detailApp, { kind: 'restore', ...runtimeBaseline, operation_id: revision.id })}>{tr('恢复并重启', 'Restore & Restart')}</button>}
                   </div>
                 })}
               </div>}
 
               <div className="oa-field" style={{ maxWidth: 260 }}>
-                <label className="oa-label" htmlFor={`${formId}-edit-port`}>容器监听端口</label>
+                <label className="oa-label" htmlFor={`${formId}-edit-port`}>{tr('容器监听端口', 'Container Listen Port')}</label>
                 <input id={`${formId}-edit-port`}
                   className={`oa-input oa-mono${onlineRuntime ? ' oa-cfg-readonly' : ''}`}
                   type="number"
@@ -3332,15 +3355,15 @@ export function AppsPanel({
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                 <div className="oa-grid-3" style={{ flex: 1, minWidth: 300 }}>
                   <div className="oa-subcard">
-                    <div className="oa-hint">持久化挂载点</div>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? `${storageOverview.mounts_count} 个` : '—'}</div>
+                    <div className="oa-hint">{tr('持久化挂载点', 'Mounts')}</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? tr('{n} 个', '{n}', { n: storageOverview.mounts_count }) : '—'}</div>
                   </div>
                   <div className="oa-subcard">
-                    <div className="oa-hint">文件总数</div>
+                    <div className="oa-hint">{tr('文件总数', 'Total Files')}</div>
                     <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? storageOverview.total_files : '—'}</div>
                   </div>
                   <div className="oa-subcard">
-                    <div className="oa-hint">总占用空间</div>
+                    <div className="oa-hint">{tr('总占用空间', 'Total Size')}</div>
                     <div style={{ fontSize: 20, fontWeight: 700, color: '#0f172a', marginTop: 4 }}>{storageOverview ? storageOverview.total_human : '—'}</div>
                   </div>
                 </div>
@@ -3348,39 +3371,39 @@ export function AppsPanel({
                   <button
                     type="button"
                     className="oa-btn oa-btn-sm"
-                    onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true }, '全部存储卷备份')}
+                    onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true }, tr('全部存储卷备份', 'All Volume Backups'))}
                   >
                     <AppIcon name="archive" size={13} />
-                    <span>导出全部挂载卷</span>
+                    <span>{tr('导出全部挂载卷', 'Export All Volumes')}</span>
                   </button>
                 )}
               </div>
 
               {!storageOverview ? (
-                <div className="oa-alert oa-alert-info">暂无持久化存储统计信息。</div>
+                <div className="oa-alert oa-alert-info">{tr('暂无持久化存储统计信息。', 'No persistent storage stats available.')}</div>
               ) : (
                 <>
                   {storageOverview.object_storage && (
                     <div className="oa-subcard">
-                      <strong>对象存储</strong>
-                      <div className="oa-hint">资源 {storageOverview.object_storage.resource_id} · Bucket <code>{storageOverview.object_storage.bucket}</code></div>
+                      <strong>{tr('对象存储', 'Object Storage')}</strong>
+                      <div className="oa-hint">{tr('资源 {id} · Bucket', 'Resource {id} · Bucket', { id: storageOverview.object_storage.resource_id })} <code>{storageOverview.object_storage.bucket}</code></div>
                     </div>
                   )}
 
                   {storageOverview.mounts.length === 0 ? (
-                    <div className="oa-hint">此应用没有目录挂载。</div>
+                    <div className="oa-hint">{tr('此应用没有目录挂载。', 'This app has no directory mounts.')}</div>
                   ) : (
                     <div className="oa-table-box">
                       <div className="oa-storage-table-head">
-                        <span>容器挂载路径</span>
-                        <span>用途</span>
-                        <span style={{ textAlign: 'center' }}>状态</span>
-                        <span style={{ textAlign: 'right' }}>文件数</span>
-                        <span style={{ textAlign: 'right' }}>大小</span>
-                        <span style={{ textAlign: 'right' }}>操作</span>
+                        <span>{tr('容器挂载路径', 'Container Path')}</span>
+                        <span>{tr('用途', 'Purpose')}</span>
+                        <span style={{ textAlign: 'center' }}>{tr('状态', 'Status')}</span>
+                        <span style={{ textAlign: 'right' }}>{tr('文件数', 'Files')}</span>
+                        <span style={{ textAlign: 'right' }}>{tr('大小', 'Size')}</span>
+                        <span style={{ textAlign: 'right' }}>{tr('操作', 'Actions')}</span>
                       </div>
                       {storageOverview.mounts.map(m => {
-                        const statusText = m.status === 'mounted' ? '已挂载' : m.status === 'pending' ? '准备中' : m.status === 'mismatch' ? '不匹配' : m.status === 'missing' ? '未挂载' : (m.status || '-')
+                        const statusText = m.status === 'mounted' ? tr('已挂载', 'Mounted') : m.status === 'pending' ? tr('准备中', 'Pending') : m.status === 'mismatch' ? tr('不匹配', 'Mismatch') : m.status === 'missing' ? tr('未挂载', 'Missing') : (m.status || '-')
                         const statusClass = m.status === 'mounted' ? 'oa-pill-ok' : m.status === 'pending' ? 'oa-pill-warn' : m.status === 'mismatch' || m.status === 'missing' ? 'oa-pill-danger' : ''
                         return (
                           <div key={m.name} className="oa-storage-table-row">
@@ -3404,10 +3427,10 @@ export function AppsPanel({
                               <button
                                 type="button"
                                 className="oa-btn oa-btn-xs"
-                                onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, `卷 ${m.name} 备份`)}
+                                onClick={() => void handleDownloadPlatformArtifact(detailApp.slug, { storage: true, mount: m.name }, tr('卷 {name} 备份', 'Volume {name} backup', { name: m.name }))}
                               >
                                 <AppIcon name="download" size={11} />
-                                <span>下载</span>
+                                <span>{tr('下载', 'Download')}</span>
                               </button>
                             </div>
                           </div>
@@ -3447,19 +3470,25 @@ export function AppsPanel({
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={detailBusy} onClick={() => void handleConfirmRollback()}>
-                      {detailBusy ? '正在回滚…' : `确认回滚到 v${rollbackTarget.version}`}
+                      {detailBusy ? tr('正在回滚…', 'Rolling back...') : tr('确认回滚到 v{version}', 'Confirm rollback to v{version}', { version: rollbackTarget.version })}
                     </button>
                     <button type="button" className="oa-btn oa-btn-sm" disabled={detailBusy} onClick={() => setRollbackTarget(null)}>
-                      取消
+                      {tr('取消', 'Cancel')}
                     </button>
                   </div>
                 </div>
               )}
 
-              {versionsError ? (
-                <div role="alert" className="oa-alert oa-alert-danger">{versionsError}</div>
-              ) : visibleVersions.length === 0 ? (
-                <div className="oa-hint">暂无历史版本记录。</div>
+              <NoticeModal
+                open={Boolean(versionsError)}
+                variant="error"
+                title={tr('版本加载失败', 'Failed to load versions')}
+                message={versionsError ?? ''}
+                onClose={() => setVersionsError(null)}
+              />
+
+              {visibleVersions.length === 0 ? (
+                <div className="oa-hint">{tr('暂无历史版本记录。', 'No version history available.')}</div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {visibleVersions.map(ver => (
@@ -3467,11 +3496,11 @@ export function AppsPanel({
                       <div className="oa-subcard-head">
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           <strong style={{ fontSize: 13.5, color: '#0f172a' }}>v{ver.version}</strong>
-                          {currentVersion(ver) && <span className="oa-pill oa-pill-ok">当前运行</span>}
-                          {ver.status === 'failed' && <span className="oa-pill oa-pill-danger">失败版本（未上线）</span>}
-                          {ver.status && ver.status !== 'failed' && !currentVersion(ver) && <span className="oa-pill">{jobStatusTone(ver.status).text}</span>}
+                          {currentVersion(ver) && <span className="oa-pill oa-pill-ok">{tr('当前运行', 'Running')}</span>}
+                          {ver.status === 'failed' && <span className="oa-pill oa-pill-danger">{tr('失败版本（未上线）', 'Failed (Not Live)')}</span>}
+                          {ver.status && ver.status !== 'failed' && !currentVersion(ver) && <span className="oa-pill">{jobStatusTone(ver.status, locale).text}</span>}
                           <span className="oa-hint">{formatDateTime(ver.created_at)}</span>
-                          {ver.deployed_by && <span className="oa-hint">发布人：{ver.deployed_by}</span>}
+                          {ver.deployed_by && <span className="oa-hint">{tr('发布人：', 'By ')}{ver.deployed_by}</span>}
                         </div>
 
                         {!currentVersion(ver) && ver.status === 'running' && !readOnly && (requiresAIUpdate || ver.download_urls?.['delivery.json'] || api.appRollback) && (
@@ -3483,14 +3512,20 @@ export function AppsPanel({
                               if (requiresAIUpdate || ver.download_urls?.['delivery.json']) {
                                 const local = jobs.find(job => job.slug === detailApp.slug && job.published && job.version === ver.version)
                                 startWizardNew(detailApp, local, true)
-                                setWizardNotice(`使用 v${ver.version} 的源码发起更新，所选 AI 会以当前线上版本和实际数据为基线分析。${local ? '' : '请导入该历史版本的源码。'}`)
+                                setWizardNotice(
+                                  tr(
+                                    '使用 v{version} 的源码发起更新，所选 AI 会以当前线上版本和实际数据为基线分析。{extra}',
+                                    'Starting update from v{version} source; AI will analyze based on the current live version.{extra}',
+                                    { version: ver.version, extra: local ? '' : tr('请导入该历史版本的源码。', ' Please import the source of that version.') },
+                                  ),
+                                )
                               } else if (api.appRollback) {
                                 setRollbackTarget(ver)
                                 setRollbackReason('')
                               }
                             }}
                           >
-                            {requiresAIUpdate || ver.download_urls?.['delivery.json'] ? '用此版本源码发起更新' : '回滚到此版本'}
+                            {requiresAIUpdate || ver.download_urls?.['delivery.json'] ? tr('用此版本源码发起更新', 'Update from This Version') : tr('回滚到此版本', 'Rollback to This Version')}
                           </button>
                         )}
                       </div>
@@ -3556,8 +3591,8 @@ export function AppsPanel({
                         {ver.download_urls?.['confirmed-deployment.json'] && (
                           <button type="button" className="oa-btn oa-btn-xs"
                             onClick={() => void handleDownloadPlatformArtifact(detailApp.slug,
-                              { version: ver.version, artifact: 'confirmed-deployment.json' }, `v${ver.version} 已确认部署配置`)}>
-                            已确认部署配置
+                              { version: ver.version, artifact: 'confirmed-deployment.json' }, tr('v{version} 已确认部署配置', 'v{version} Confirmed Config', { version: ver.version }))}>
+                            {tr('已确认部署配置', 'Confirmed Config')}
                           </button>
                         )}
                       </div>
@@ -3568,7 +3603,6 @@ export function AppsPanel({
             </div>
           )}
 
-          {/* Tab 5: Logs & Dockerfile */}
           {detailTab === 'logs' && (
             <div className="oa-detail-log-card">
               <div className="oa-detail-log-toolbar">
@@ -3578,14 +3612,14 @@ export function AppsPanel({
                     className={`oa-segmented-btn ${detailLogsSubTab === 'runtime' ? 'active' : ''}`}
                     onClick={() => setDetailLogsSubTab('runtime')}
                   >
-                    运行日志（最近 500 行）
+                    {tr('运行日志（最近 500 行）', 'Runtime Logs (Last 500 lines)')}
                   </button>
                   <button
                     type="button"
                     className={`oa-segmented-btn ${detailLogsSubTab === 'build' ? 'active' : ''}`}
                     onClick={() => setDetailLogsSubTab('build')}
                   >
-                    构建日志
+                    {tr('构建日志', 'Build Logs')}
                   </button>
                   <button
                     type="button"
@@ -3604,22 +3638,28 @@ export function AppsPanel({
                     onClick={() => void copyText(`detail-log-${detailLogsSubTab}`, detailLog)}
                   >
                     <AppIcon name={copiedKey === `detail-log-${detailLogsSubTab}` ? 'check' : 'copy'} size={12} />
-                    <span>{copiedKey === `detail-log-${detailLogsSubTab}` ? '已复制' : '复制内容'}</span>
+                    <span>{copiedKey === `detail-log-${detailLogsSubTab}` ? tr('已复制', 'Copied') : tr('复制内容', 'Copy')}</span>
                   </button>
                   <button type="button" className="oa-btn oa-btn-xs" onClick={() => void refreshDetailLogs()}>
                     <AppIcon name="refresh" size={12} />
-                    <span>刷新日志</span>
+                    <span>{tr('刷新日志', 'Refresh Logs')}</span>
                   </button>
                 </div>
               </div>
 
               <div className="oa-detail-log-meta">
                 <span>{logSummary}</span>
-                <span>当前已加载 {detailLog ? detailLog.split('\n').length : 0} 行</span>
+                <span>{tr('当前已加载 {count} 行', '{count} lines loaded', { count: detailLog ? detailLog.split('\n').length : 0 })}</span>
               </div>
-              {logsError && <div role="alert" className="oa-alert oa-alert-danger">{logsError}</div>}
+              <NoticeModal
+                open={Boolean(logsError)}
+                variant="error"
+                title={tr('日志加载失败', 'Failed to load logs')}
+                message={logsError ?? ''}
+                onClose={() => setLogsError(null)}
+              />
               <pre className="oa-log-terminal" tabIndex={0} aria-label={logSummary}>
-                {detailLog || (logsError ? '日志暂不可用' : '暂无内容')}
+                {detailLog || (logsError ? tr('日志暂不可用', 'Logs unavailable') : tr('暂无内容', 'No content'))}
               </pre>
             </div>
           )}

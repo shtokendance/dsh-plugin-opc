@@ -6,6 +6,8 @@ import { AppIcon } from './AppIcon.tsx'
 import type { PrepareAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { OpcSettingsPanel } from './OpcSettingsPanel.tsx'
 import { McpServiceDetail, mcpDetailStyles } from './McpServiceDetail.tsx'
+import { NoticeModal } from './NoticeModal.tsx'
+import { useI18n } from './i18n.tsx'
 import { DEFAULT_PAGE_SIZE, Pagination, paginateItems, paginationStyles } from './Pagination.tsx'
 import { WorkbenchHome, WorkbenchNavigation, type PanelKind } from './Workbench.tsx'
 import { workbenchStyles } from './workbenchStyles.ts'
@@ -895,11 +897,13 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   prepareAnalysisNavigation?: PrepareAnalysisNavigation
   onOpenPluginDetail?: () => boolean
 }) {
+  const { tr } = useI18n()
   const [kind, setKind] = useState<PanelKind>(requestedPage ?? 'home')
   const [appsOpened, setAppsOpened] = useState(requestedPage === 'apps')
   const pageChosen = useRef(Boolean(requestedPage))
   const [state, setState] = useState<AuthState>({ signedIn: false, loginInProgress: false, context: null })
   const [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const [dismissedLoginErr, setDismissedLoginErr] = useState('')
   const [queries, setQueries] = useState({ knowledge: '', skills: '' })
   const searchKind = kind === 'knowledge' || kind === 'skills' ? kind : null
   const q = searchKind ? queries[searchKind] : ''
@@ -956,18 +960,18 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   const run = useCallback(async (action: () => Promise<void>) => {
     const version = epoch.current
     setBusy(true); setError('')
-    try { await action() } catch (e) { if (version === epoch.current) setError(e instanceof Error ? e.message : '操作失败，请重试。') }
+    try { await action() } catch (e) { if (version === epoch.current) setError(e instanceof Error ? e.message : tr('操作失败，请重试。', 'Operation failed, please retry.')) }
     finally { if (version === epoch.current) setBusy(false) }
-  }, [])
+  }, [tr])
 
   useEffect(() => {
     const controller = new AbortController()
     void (async () => {
       try { for await (const frame of api.watchState(controller.signal)) { if (!controller.signal.aborted) setState(JSON.parse(frame)) } }
-      catch (e) { if (!controller.signal.aborted) setError(`状态连接中断：${e instanceof Error ? e.message : '请重新打开面板'}`) }
+      catch (e) { if (!controller.signal.aborted) setError(tr('状态连接中断：{msg}', 'Connection lost: {msg}', { msg: e instanceof Error ? e.message : tr('请重新打开面板', 'Please reopen the panel') })) }
     })()
     return () => controller.abort()
-  }, [api])
+  }, [api, tr])
 
   const load = useCallback(async (query = q) => {
     const version = epoch.current
@@ -1044,27 +1048,27 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               if (kind !== 'apps') await api.syncSession()
               await load()
             })}
-            title="刷新"
+            title={tr('刷新', 'Refresh')}
           >
-            刷新
+            {tr('刷新', 'Refresh')}
           </button>}
         </>}
         <button
           type="button"
           className="btn-header"
           onClick={() => setShowSettings(prev => !prev)}
-          title={showSettings ? '返回工作台' : 'OPC 平台配置'}
+          title={showSettings ? tr('返回工作台', 'Back to Workbench') : tr('OPC 平台配置', 'OPC Settings')}
         >
-          {showSettings ? '返回' : '⚙ 设置'}
+          {showSettings ? tr('返回', 'Back') : tr('⚙ 设置', '⚙ Settings')}
         </button>
         {state.signedIn && context && (
           <button
             className="btn-header btn-logout"
             disabled={busy}
             onClick={action(() => api.logout())}
-            title="退出登录"
+            title={tr('退出登录', 'Sign out')}
           >
-            退出
+            {tr('退出', 'Sign Out')}
           </button>
         )}
       </div>
@@ -1079,27 +1083,26 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         />
       </main>
     ) : !state.signedIn || !context ? <div className="gate">
-      <h3>连接 OPC 工作空间</h3>
-      <p>登录后即可使用企业知识库、技能、MCP 和应用。</p>
+      <h3>{tr('连接 OPC 工作空间', 'Connect OPC Workspace')}</h3>
+      <p>{tr('登录后即可使用企业知识库、技能、MCP 和应用。', 'Sign in to access Enterprise KBs, Skills, MCP, and Apps.')}</p>
       {state.opcConfig?.platformBaseUrl && (
         <p style={{ fontSize: 12, color: '#64748b', marginTop: -8, marginBottom: 16, wordBreak: 'break-all' }}>
-          当前平台网关：<code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{state.opcConfig.platformBaseUrl}</code>
+          {tr('当前平台网关：', 'Platform Gateway: ')}<code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{state.opcConfig.platformBaseUrl}</code>
         </p>
       )}
       <div className="row" style={{ justifyContent: 'center' }}>
-        <button className="primary" style={{ padding: '8px 18px', fontSize: 13 }} disabled={busy || state.loginInProgress} onClick={action(async () => { await api.startLogin() })}>
-          企业微信 / SSO 登录
+        <button className="primary" style={{ padding: '8px 18px', fontSize: 13 }} disabled={busy || state.loginInProgress} onClick={action(async () => { setDismissedLoginErr(''); await api.startLogin() })}>
+          {tr('企业微信 / SSO 登录', 'WeCom / SSO Login')}
         </button>
         <button type="button" onClick={() => setShowSettings(true)}>
-          平台设置
+          {tr('平台设置', 'Settings')}
         </button>
       </div>
       {state.loginInProgress && <div className="notice" style={{ textAlign: 'left', marginTop: 16 }}>
-        请在浏览器完成授权。
-        {state.loginAuthorizeUrl && <p style={{ margin: '4px 0' }}><a href={state.loginAuthorizeUrl} target="_blank" rel="noreferrer">重新打开授权页</a></p>}
-        <button onClick={action(() => api.cancelLogin())} style={{ marginTop: 6 }}>取消登录</button>
+        {tr('请在浏览器完成授权。', 'Please complete authorization in your browser.')}
+        {state.loginAuthorizeUrl && <p style={{ margin: '4px 0' }}><a href={state.loginAuthorizeUrl} target="_blank" rel="noreferrer">{tr('重新打开授权页', 'Reopen Auth Page')}</a></p>}
+        <button onClick={action(() => api.cancelLogin())} style={{ marginTop: 6 }}>{tr('取消登录', 'Cancel')}</button>
       </div>}
-      {state.loginError && <p role="alert" className="error">{state.loginError.message}</p>}
     </div> : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
       {kind === 'home' && <WorkbenchHome onSelect={selectPage} api={api} visible={visible} onOpenPluginDetail={onOpenPluginDetail} />}
       {/* Apps View */}
@@ -1130,8 +1133,8 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               setTimeout(() => docInputRef.current?.focus(), 50)
             }}
           >
-            <AppIcon name="file" size={14} /><span>文档全文检索模式</span>
-            <span className="s2-badge-rec">推荐</span>
+            <AppIcon name="file" size={14} /><span>{tr('文档全文检索模式', 'Full-Text Search')}</span>
+            <span className="s2-badge-rec">{tr('推荐', 'Recommended')}</span>
             {hits.length > 0 && <span className="badge badge-ok" style={{ fontSize: 10, padding: '1px 5px' }}>{hits.length}</span>}
           </button>
           <button
@@ -1140,8 +1143,8 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             aria-pressed={kbSearchMode === 'kb'}
             onClick={() => setKbSearchMode('kb')}
           >
-            <AppIcon name="folder" size={14} /><span>知识库目录筛选模式</span>
-            {q && <span className="badge badge-warn" style={{ fontSize: 10, padding: '1px 5px' }}>已筛选</span>}
+            <AppIcon name="folder" size={14} /><span>{tr('知识库目录筛选模式', 'KB Catalog Filter')}</span>
+            {q && <span className="badge badge-warn" style={{ fontSize: 10, padding: '1px 5px' }}>{tr('已筛选', 'Filtered')}</span>}
           </button>
         </div>
 
@@ -1164,12 +1167,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             }}
           >
             <select
-              aria-label="检索知识库范围"
+              aria-label={tr('检索知识库范围', 'Knowledge base scope')}
               className="s2-scope-select"
               value={kb}
               onChange={e => setKb(e.target.value)}
             >
-              <option value="">全部可用知识库</option>
+              <option value="">{tr('全部可用知识库', 'All Available KBs')}</option>
               {items.map(item => {
                 const info = resolveSpaceInfo(item.tenant_id, item.tenant_name, item.source_tenant_id, item.source_tenant_name)
                 const optionLabel = context.spaces.length > 1 || info.isShared ? `${item.name}（${info.ownerName}）` : item.name
@@ -1180,12 +1183,12 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               ref={docInputRef}
               required
               className="s2-input-full"
-              aria-label="文档检索词"
-              placeholder="输入全文关键词或代码片段进行向量检索..."
+              aria-label={tr('文档检索词', 'Document search query')}
+              placeholder={tr('输入全文关键词或代码片段进行向量检索...', 'Enter keywords or code snippets to search...')}
               value={docQuery}
               onChange={e => setDocQuery(e.target.value)}
             />
-            <button className="s2-btn-blue" disabled={busy}>开始检索</button>
+            <button className="s2-btn-blue" disabled={busy}>{tr('开始检索', 'Search')}</button>
             {(docQuery || hits.length > 0 || hasSearchedDoc) && (
               <button
                 type="button"
@@ -1197,7 +1200,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                   setHasSearchedDoc(false)
                 }}
               >
-                清空
+                {tr('清空', 'Clear')}
               </button>
             )}
           </form>
@@ -1210,46 +1213,44 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
             onSubmit={e => { e.preventDefault(); setListPage(1); void run(load) }}
           >
             <input
-              aria-label="筛选知识库"
+              aria-label={tr('筛选知识库', 'Filter knowledge bases')}
               className="s2-input-catalog"
-              placeholder="输入知识库名称或描述进行快速过滤..."
+              placeholder={tr('输入知识库名称或描述进行快速过滤...', 'Filter by KB name or description...')}
               value={q}
               onChange={e => setQ(e.target.value)}
             />
-            <button className="s2-btn-amber" disabled={busy}>应用筛选</button>
+            <button className="s2-btn-amber" disabled={busy}>{tr('应用筛选', 'Filter')}</button>
             {q && (
               <button
                 type="button"
                 className="btn-sm"
                 onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}
               >
-                清除
+                {tr('清除', 'Clear')}
               </button>
             )}
           </form>
         )}
 
-        {/* Empty Doc Search Feedback */}
         {hasSearchedDoc && hits.length === 0 && !busy && (
           <div className="notice" style={{ background: '#f8fafc', borderColor: '#94a3b8', color: '#64748b', fontSize: 12, margin: '8px 0' }}>
-            未找到与“{docQuery}”相关的文档片段。可尝试更换检索词，或在上方选择「全部可用知识库」。
+            {tr('未找到与“{q}”相关的文档片段。可尝试更换检索词，或在上方选择「全部可用知识库」。', 'No matching snippets for "{q}". Try another query or select All Available KBs.', { q: docQuery })}
           </div>
         )}
 
-        {/* Document Search Hits */}
         {hits.length > 0 && (
           <div className="kb-results-card">
             <div className="kb-results-header">
               <div className="kb-results-title">
-                <span>📄 文档检索结果</span>
-                <span className="badge badge-ok">{hits.length} 条相关片段</span>
+                <span>{tr('📄 文档检索结果', '📄 Search Results')}</span>
+                <span className="badge badge-ok">{tr('{n} 条相关片段', '{n} snippets', { n: hits.length })}</span>
               </div>
               <button
                 type="button"
                 className="btn-sm"
                 onClick={() => { setHits([]); setDoc(''); setHasSearchedDoc(false) }}
               >
-                收起结果
+                {tr('收起结果', 'Collapse')}
               </button>
             </div>
             {hits.map((hit, i) => {
@@ -1275,7 +1276,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                   </button>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                     {hitInfo.ownerName && <span className="badge">{hitInfo.ownerName}</span>}
-                    {typeof hit.score === 'number' && <span className="badge">相关度: {hit.score.toFixed(2)}</span>}
+                    {typeof hit.score === 'number' && <span className="badge">{tr('相关度: {s}', 'Score: {s}', { s: hit.score.toFixed(2) })}</span>}
                   </div>
                 </div>
                 <p style={{ margin: '6px 0 0', fontSize: 12, color: '#64748b', lineHeight: 1.5 }}>
@@ -1287,12 +1288,11 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           </div>
         )}
 
-        {/* Document Full-text Reader */}
         {doc && (
           <div className="doc-box" style={{ marginTop: 0, marginBottom: 14 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <strong>📄 文档详情正文</strong>
-              <button onClick={() => setDoc('')}>关闭正文</button>
+              <strong>{tr('📄 文档详情正文', '📄 Document Content')}</strong>
+              <button onClick={() => setDoc('')}>{tr('关闭正文', 'Close')}</button>
             </div>
             <Markdown>{doc}</Markdown>
           </div>
@@ -1300,33 +1300,33 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
 
         {pin && (
           <div className="notice">
-            <strong>当前对话问答已限定范围：</strong>{(items.find(item => item.knowledge_base_id === pin && (!pinDetail || item.tenant_id === pinDetail.tenantId))?.name) ?? pin}
-            <button style={{ marginLeft: 8 }} onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, null, context.contextId, '') })}>取消限定</button>
+            <strong>{tr('当前对话问答已限定范围：', 'Pinned KB scope: ')}</strong>{(items.find(item => item.knowledge_base_id === pin && (!pinDetail || item.tenant_id === pinDetail.tenantId))?.name) ?? pin}
+            <button style={{ marginLeft: 8 }} onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, null, context.contextId, '') })}>{tr('取消限定', 'Unpin')}</button>
           </div>
         )}
 
         <div className="kb-section-header">
           <div className="kb-section-title">
-            <span>📚 知识库列表</span>
+            <span>{tr('📚 知识库列表', '📚 Knowledge Bases')}</span>
             <span className="badge">{knowledgeItems.length}</span>
-            {includesSharedKnowledge && <select aria-label="知识库来源" value={knowledgeFilter} onChange={e => { setKnowledgeFilter(e.target.value as typeof knowledgeFilter); setListPage(1) }}>
-              <option value="all">全部可用</option>
-              <option value="owned">自有</option>
-              <option value="shared">共享给我</option>
+            {includesSharedKnowledge && <select aria-label={tr('知识库来源', 'KB source')} value={knowledgeFilter} onChange={e => { setKnowledgeFilter(e.target.value as typeof knowledgeFilter); setListPage(1) }}>
+              <option value="all">{tr('全部可用', 'All')}</option>
+              <option value="owned">{tr('自有', 'Owned')}</option>
+              <option value="shared">{tr('共享给我', 'Shared')}</option>
             </select>}
           </div>
           {q ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="badge badge-warn">已按“{q}”过滤</span>
-              <button className="btn-sm" onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}>清除过滤</button>
+              <span className="badge badge-warn">{tr('已按“{q}”过滤', 'Filtered by "{q}"', { q })}</span>
+              <button className="btn-sm" onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}>{tr('清除过滤', 'Clear')}</button>
             </div>
           ) : (
-            <span style={{ fontSize: 11, color: '#94a3b8' }}>点击卡片「检索此库」可直接定位搜索</span>
+            <span style={{ fontSize: 11, color: '#94a3b8' }}>{tr('点击卡片「检索此库」可直接定位搜索', 'Click Search KB to focus search')}</span>
           )}
         </div>
 
-        {includesSharedKnowledge === false && <div className="notice">当前平台版本仅提供本空间知识库目录。</div>}
-        {items.length > 0 && knowledgeItems.length === 0 && <div className="notice">此来源下没有可用知识库。</div>}
+        {includesSharedKnowledge === false && <div className="notice">{tr('当前平台版本仅提供本空间知识库目录。', 'Current platform version only lists KBs in this space.')}</div>}
+        {items.length > 0 && knowledgeItems.length === 0 && <div className="notice">{tr('此来源下没有可用知识库。', 'No KBs under this filter.')}</div>}
         {(() => {
           const { pageItems, currentPage } = paginateItems(knowledgeItems, listPage, listPageSize)
           return <>
@@ -1342,15 +1342,15 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                         <h3 className="card-title">{item.name}</h3>
                       </div>
                       <span className={`badge ${item.availability === 'available' ? 'badge-ok' : ''}`}>
-                        {item.availability === 'available' ? '已就绪' : '未就绪'}
+                        {item.availability === 'available' ? tr('已就绪', 'Ready') : tr('未就绪', 'Unavailable')}
                       </span>
                     </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
                       <span className="badge">
-                        {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && item.permission === 'viewer' ? ' · 只读' : ''}
+                        {info.isShared ? tr('共享自 {name}', 'Shared by {name}', { name: info.ownerName }) : info.ownerName}{info.isShared && item.permission === 'viewer' ? tr(' · 只读', ' · Read-only') : ''}
                       </span>
                     </div>
-                    <p className="card-desc">{item.description || '暂无知识库描述'}</p>
+                    <p className="card-desc">{item.description || tr('暂无知识库描述', 'No description')}</p>
                   </div>
                   <div className="card-actions">
                     <button
@@ -1358,7 +1358,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                       disabled={busy || item.availability !== 'available'}
                       onClick={action(async () => { await api.setPinnedKnowledgeScope(sessionId, item.knowledge_base_id!, context.contextId, item.tenant_id) })}
                     >
-                      限定问答范围
+                      {tr('限定问答范围', 'Pin Scope')}
                     </button>
                     <button
                       style={{ background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0' }}
@@ -1371,7 +1371,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                         }, 50)
                       }}
                     >
-                      检索此库
+                      {tr('检索此库', 'Search KB')}
                     </button>
                   </div>
                 </article>
@@ -1407,9 +1407,9 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           >
             <span className="s2-command-icon"><AppIcon name="search" size={15} /></span>
             <input
-              aria-label="搜索技能"
+              aria-label={tr('搜索技能', 'Search skills')}
               className="s2-command-input"
-              placeholder="输入关键词查找技能组件、描述或指令..."
+              placeholder={tr('输入关键词查找技能组件、描述或指令...', 'Search skills by keyword, description, or command...')}
               value={q}
               onChange={e => setQ(e.target.value)}
             />
@@ -1418,45 +1418,45 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                 type="button"
                 className="s2-command-clear"
                 onClick={() => { setQ(''); setListPage(1); void run(() => load('')) }}
-                title="清除"
+                title={tr('清除', 'Clear')}
               >
                 ✕
               </button>
             )}
-            <button className="s2-command-btn" disabled={busy}>立即检索</button>
+            <button className="s2-command-btn" disabled={busy}>{tr('立即检索', 'Search')}</button>
           </form>
 
           <div className="s2-pills-row">
-            <span className="s2-pills-label">🏷️ 快捷标签：</span>
+            <span className="s2-pills-label">{tr('🏷️ 快捷标签：', '🏷️ Filter:')}</span>
             <button
               type="button"
               className={`s2-pill ${filter === 'all' ? 'active' : ''}`}
               onClick={() => { setFilter('all'); setListPage(1) }}
             >
-              全部 ({items.length})
+              {tr('全部', 'All')} ({items.length})
             </button>
             <button
               type="button"
               className={`s2-pill ${filter === 'installed' ? 'active' : ''}`}
               onClick={() => { setFilter('installed'); setListPage(1) }}
             >
-              已安装 ({installedCount})
+              {tr('已安装', 'Installed')} ({installedCount})
             </button>
             <button
               type="button"
               className={`s2-pill ${filter === 'new' ? 'active' : ''}`}
               onClick={() => { setFilter('new'); setListPage(1) }}
             >
-              未安装 ({uninstalledCount})
+              {tr('未安装', 'Not Installed')} ({uninstalledCount})
             </button>
             <a
               href={`${(state.opcConfig?.platformBaseUrl || 'https://aiwork.benlai.com').replace(/\/+$/, '')}/platform/toolbox/skills`}
               target="_blank"
               rel="noreferrer"
               className="s2-upload-link"
-              title="前往 OPC 平台工具箱添加或上传技能"
+              title={tr('前往 OPC 平台工具箱添加或上传技能', 'Open OPC Toolbox to add or upload skills')}
             >
-              <span>上传技能</span>
+              <span>{tr('上传技能', 'Upload Skill')}</span>
               <AppIcon name="external" size={12} />
             </a>
           </div>
@@ -1476,15 +1476,15 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                       </div>
                     </div>
                     <span className={`badge ${item.installed ? (item.installed.enabled ? 'badge-ok' : '') : ''}`}>
-                      {item.installed ? (item.installed.enabled ? '已启用' : '已停用') : '未安装'}
+                      {item.installed ? (item.installed.enabled ? tr('已启用', 'Enabled') : tr('已停用', 'Disabled')) : tr('未安装', 'Not Installed')}
                     </span>
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
                     <span className="badge">
-                      {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && item.permission === 'viewer' ? ' · 只读' : ''}
+                      {info.isShared ? tr('共享自 {name}', 'Shared by {name}', { name: info.ownerName }) : info.ownerName}{info.isShared && item.permission === 'viewer' ? tr(' · 只读', ' · Read-only') : ''}
                     </span>
                   </div>
-                  <p className="card-desc">{item.description || '暂无技能说明'}</p>
+                  <p className="card-desc">{item.description || tr('暂无技能说明', 'No description')}</p>
                 </div>
                 <div className="card-actions">
                   {(!item.installed || item.installed.active_sha256 !== item.bundle_sha256) && (
@@ -1493,7 +1493,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                       disabled={busy || item.availability !== 'available'}
                       onClick={action(async () => { await api.installSkill(item.catalog_id!, item.bundle_sha256!, context.contextId, item.tenant_id); await load() })}
                     >
-                      {item.installed ? '更新版本' : '下载安装'}
+                      {item.installed ? tr('更新版本', 'Update') : tr('下载安装', 'Install')}
                     </button>
                   )}
                   {item.installed && <>
@@ -1501,14 +1501,14 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                       disabled={busy}
                       onClick={action(async () => { await api.setSkillEnabled(item.catalog_id!, !item.installed!.enabled, context.contextId, item.tenant_id); await load() })}
                     >
-                      {item.installed.enabled ? '停用' : '启用'}
+                      {item.installed.enabled ? tr('停用', 'Disable') : tr('启用', 'Enable')}
                     </button>
                     <button
                       disabled={busy}
                       style={{ color: '#dc2626', borderColor: '#fecaca', background: '#fef2f2' }}
                       onClick={action(async () => { await api.uninstallSkill(item.catalog_id!, context.contextId, item.tenant_id); await load() })}
                     >
-                      卸载
+                      {tr('卸载', 'Uninstall')}
                     </button>
                   </>}
                 </div>
@@ -1587,15 +1587,15 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
 
         return <div className="mcp-list-section">
           <p className="mcp-list-notice">
-            AI 可按权限调用以下企业服务（已自动挂载并保持连接），点击「工具与调试」可查看工具定义并在线调试。
+            {tr('AI 可按权限调用以下企业服务（已自动挂载并保持连接），点击「工具与调试」可查看工具定义并在线调试。', 'AI can invoke connected enterprise MCP services below. Click Tools & Debug to inspect schemas and test calls.')}
           </p>
 
           <div className="s2-command-bar">
             <span className="s2-command-icon"><AppIcon name="search" size={15} /></span>
             <input
-              aria-label="搜索 MCP 服务"
+              aria-label={tr('搜索 MCP 服务', 'Search MCP services')}
               className="s2-command-input"
-              placeholder="输入关键词查找企业 MCP 服务或工具名称..."
+              placeholder={tr('输入关键词查找企业 MCP 服务或工具名称...', 'Search MCP services or tool names...')}
               value={mcpSearch}
               onChange={e => { setMcpSearch(e.target.value); setListPage(1) }}
             />
@@ -1604,7 +1604,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                 type="button"
                 className="s2-command-clear"
                 onClick={() => { setMcpSearch(''); setListPage(1) }}
-                title="清除"
+                title={tr('清除', 'Clear')}
               >
                 ✕
               </button>
@@ -1614,32 +1614,32 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
               className="s2-command-btn"
               onClick={() => setListPage(1)}
             >
-              立即检索
+              {tr('立即检索', 'Search')}
             </button>
           </div>
 
           <div className="s2-pills-row">
-            <span className="s2-pills-label">🏷️ 快捷标签：</span>
+            <span className="s2-pills-label">{tr('🏷️ 快捷标签：', '🏷️ Filter:')}</span>
             <button
               type="button"
               className={`s2-pill ${mcpFilter === 'all' ? 'active' : ''}`}
               onClick={() => { setMcpFilter('all'); setListPage(1) }}
             >
-              全部 ({services.length})
+              {tr('全部', 'All')} ({services.length})
             </button>
             <button
               type="button"
               className={`s2-pill ${mcpFilter === 'connected' ? 'active' : ''}`}
               onClick={() => { setMcpFilter('connected'); setListPage(1) }}
             >
-              已连接 ({connectedCount})
+              {tr('已连接', 'Connected')} ({connectedCount})
             </button>
             <button
               type="button"
               className={`s2-pill ${mcpFilter === 'unmounted' ? 'active' : ''}`}
               onClick={() => { setMcpFilter('unmounted'); setListPage(1) }}
             >
-              未挂载 ({unmountedCount})
+              {tr('未挂载', 'Unmounted')} ({unmountedCount})
             </button>
           </div>
 
@@ -1666,17 +1666,17 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                     </div>
                     {state.mcpConnections?.[serviceId] && (
                       <span className={`badge ${state.mcpConnections[serviceId].state === 'connected' ? 'badge-ok' : ''}`}>
-                        {state.mcpConnections[serviceId].state === 'connected' ? `已连接 (${state.mcpConnections[serviceId].toolCount})` : state.mcpConnections[serviceId].state}
+                        {state.mcpConnections[serviceId].state === 'connected' ? tr('已连接 ({n})', 'Connected ({n})', { n: state.mcpConnections[serviceId].toolCount }) : state.mcpConnections[serviceId].state}
                       </span>
                     )}
                   </div>
                   <div className="mcp-card-meta">
                     {info.ownerName && (
                       <span className="badge">
-                        {info.isShared ? `共享自 ${info.ownerName}` : info.ownerName}{info.isShared && service.permission === 'viewer' ? ' · 只读' : ''}
+                        {info.isShared ? tr('共享自 {name}', 'Shared by {name}', { name: info.ownerName }) : info.ownerName}{info.isShared && service.permission === 'viewer' ? tr(' · 只读', ' · Read-only') : ''}
                       </span>
                     )}
-                    <span className="badge">{toolCount} 个工具</span>
+                    <span className="badge">{tr('{n} 个工具', '{n} tools', { n: toolCount })}</span>
                   </div>
                   {description && <p className="mcp-card-desc">{description}</p>}
                   <div className="mcp-card-actions">
@@ -1685,7 +1685,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                       className="primary"
                       onClick={() => setSelectedMcpServiceKey(serviceKey)}
                     >
-                      工具与调试 ({toolCount})
+                      {tr('工具与调试 ({n})', 'Tools & Debug ({n})', { n: toolCount })}
                     </button>
                     {state.mountAvailable && (
                       <button
@@ -1697,7 +1697,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
                           : api.mountMcpService(serviceId, context.contextId, serviceTenant),
                         )}
                       >
-                        {mounted ? '取消挂载' : '挂载到 DSH'}
+                        {mounted ? tr('取消挂载', 'Unmount') : tr('挂载到 DSH', 'Mount')}
                       </button>
                     )}
                   </div>
@@ -1717,13 +1717,25 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
 
       {kind !== 'home' && kind !== 'apps' && !busy && (kind === 'mcp' ? services.length === 0 : items.length === 0) && (
         <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94a3b8' }}>
-          <p style={{ fontSize: 14, margin: '0 0 6px' }}>当前没有可见资源</p>
-          <p style={{ fontSize: 12 }}>可点击右上角刷新目录</p>
+          <p style={{ fontSize: 14, margin: '0 0 6px' }}>{tr('当前没有可见资源', 'No visible resources')}</p>
+          <p style={{ fontSize: 12 }}>{tr('可点击右上角刷新目录', 'Click Refresh at top right')}</p>
         </div>
       )}
     </main>}
 
-    {busy && <div style={{ padding: '6px 16px', background: '#eff6ff', fontSize: 12, color: '#1d4ed8', borderTop: '1px solid #dbeafe' }}>正在同步最新状态…</div>}
-    {error && <div role="alert" className="error" style={{ margin: 0, borderRadius: 0 }}>{error}</div>}
+    {busy && <div style={{ padding: '6px 16px', background: '#eff6ff', fontSize: 12, color: '#1d4ed8', borderTop: '1px solid #dbeafe' }}>{tr('正在同步最新状态…', 'Syncing latest state…')}</div>}
+    <NoticeModal
+      open={Boolean(error)}
+      variant="error"
+      message={error}
+      onClose={() => setError('')}
+    />
+    <NoticeModal
+      open={Boolean(!state.signedIn && state.loginError?.message && state.loginError.message !== dismissedLoginErr)}
+      variant="error"
+      title={tr('登录失败', 'Sign In Failed')}
+      message={state.loginError?.message || ''}
+      onClose={() => setDismissedLoginErr(state.loginError?.message || '')}
+    />
   </section>
 }

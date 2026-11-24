@@ -11,6 +11,7 @@ import { contribution } from '../remote-contract.ts'
 import { Panel } from './Panel.tsx'
 import type { OpcApi } from './api.ts'
 import { registerAnalysisNavigation } from './app-analysis-navigation.tsx'
+import { bindDshLocaleRuntime, getActiveClientLocale, LocaleProvider, translatePair, type DshLocaleRuntime } from './i18n.tsx'
 import { modules, readWorkbenchPage, workbenchKind, workbenchTitle, type ModuleKind } from './Workbench.tsx'
 
 type WorkbenchBodyProps = Pick<React.ComponentProps<typeof Panel>, 'api' | 'sessionId' | 'prepareAnalysisNavigation' | 'onOpenPluginDetail'> &
@@ -18,7 +19,11 @@ type WorkbenchBodyProps = Pick<React.ComponentProps<typeof Panel>, 'api' | 'sess
 
 function WorkbenchBody({ useTabInfo, ...props }: WorkbenchBodyProps) {
   const { tab } = useTabInfo()
-  return <Panel {...props} requestedPage={readWorkbenchPage(tab.navigation.params)} navigationRevision={tab.navigation.revision} visible={tab.visible} />
+  return (
+    <LocaleProvider>
+      <Panel {...props} requestedPage={readWorkbenchPage(tab.navigation.params)} navigationRevision={tab.navigation.revision} visible={tab.visible} />
+    </LocaleProvider>
+  )
 }
 
 function LegacyModule({ useTabInfo, legacyPage }: PropsRuntime<'sidebar.right.pane.tab'> & { legacyPage: ModuleKind }) {
@@ -28,7 +33,7 @@ function LegacyModule({ useTabInfo, legacyPage }: PropsRuntime<'sidebar.right.pa
     tab.actions.openTab(workbenchKind, { replaceTab: true, params: { opcPage: legacyPage } })
     tab.actions.close()
   }, [tab.actions, tab.visible, legacyPage])
-  return <p role="status">正在打开 OPC 工作台…</p>
+  return <p role="status">{translatePair(getActiveClientLocale(), '正在打开 OPC 工作台…', 'Opening OPC Workbench…')}</p>
 }
 
 type WireApi = { [K in keyof OpcApi]: NonNullable<OpcApi[K]> extends (...args: infer A) => Promise<infer R> ? (...args: A) => Promise<RemoteResult<R>> : OpcApi[K] }
@@ -40,6 +45,12 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.plugin({ name: 'opc-enterprise-panels', inject: ['remote.opc', 'slots', 'sidebarRightTabs'], apply: registerPanels })
 }
 function registerPanels(ctx: Context): void {
+  const localeRuntime = (ctx as unknown as { locale?: DshLocaleRuntime }).locale
+  if (localeRuntime) bindDshLocaleRuntime(localeRuntime)
+  ctx.inject(['locale'] as never, (child: unknown) => {
+    const loc = (child as { locale?: DshLocaleRuntime }).locale
+    if (loc) bindDshLocaleRuntime(loc)
+  })
   const wire = ctx.remote.opc
   const unwrap = async <T,>(result: Promise<RemoteResult<T>>): Promise<T> => {
     const value = await result
@@ -134,12 +145,14 @@ function registerPanels(ctx: Context): void {
   }
   const prepareAnalysisNavigation = registerAnalysisNavigation(ctx, api)
   const id = 'dsh-plugin-opc/workbench'
+  const getTitle = () => translatePair(getActiveClientLocale(), workbenchTitle, 'OPC Workbench')
+  const getDesc = () => translatePair(getActiveClientLocale(), '知识库、技能、MCP 与应用', 'Knowledge Bases, Skills, MCP & Apps')
   ctx.effect(() => ctx.sidebarRightTabs.register({
-    id, kind: workbenchKind, priority: 'extension', title: () => workbenchTitle,
-    guide: [{ id: workbenchKind, order: 10, icon: OpcIcon, title: () => workbenchTitle, description: () => '知识库、技能、MCP 与应用' }],
+    id, kind: workbenchKind, priority: 'extension', title: getTitle,
+    guide: [{ id: workbenchKind, order: 10, icon: OpcIcon, title: getTitle, description: getDesc }],
   }))
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register(
-    { name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {workbenchTitle}</>,
+    { name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {getTitle()}</>,
   )))
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: id,

@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import type { AppDeliveryJob, OpcApi } from './api.ts'
 import { AppIcon } from './AppIcon.tsx'
+import { useI18n } from './i18n.tsx'
+import { NoticeModal } from './NoticeModal.tsx'
 
 type Capability = { id?: string; purpose: string; method?: string; path: string; effect?: string }
 
@@ -13,6 +15,7 @@ export function AppSkillPreview({
   contextId: string
   job: AppDeliveryJob
 }) {
+  const { tr } = useI18n()
   const [packageData, setPackageData] = useState<{
     markdown: string
     contract?: { apis?: Capability[]; pages?: Capability[]; workflows?: unknown[] }
@@ -47,7 +50,7 @@ export function AppSkillPreview({
   const purposes = [...new Set([...apis.filter(a => a.path !== healthPath), ...pages].map(c => c.purpose).filter(Boolean))]
 
   return (
-    <section style={{ display: 'flex', flexDirection: 'column', gap: 12 }} aria-label="应用业务技能预览">
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 12 }} aria-label={tr('应用业务技能预览', 'App Skill Preview')}>
       <div
         style={{
           borderRadius: 12,
@@ -63,34 +66,35 @@ export function AppSkillPreview({
       >
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontWeight: 600, fontSize: 13.5 }}>部署后，AI 能帮你做什么</span>
+            <span style={{ fontWeight: 600, fontSize: 13.5 }}>{tr('部署后，AI 能帮你做什么', 'What AI Can Do After Deployment')}</span>
             <code className="oa-code" style={{ background: 'var(--oa-accent-soft)', color: 'var(--oa-accent)', borderColor: 'var(--oa-accent-line)' }}>
               app-{job.slug}
             </code>
           </div>
           <p className="oa-hint" style={{ margin: '4px 0 0' }}>
             {packageData
-              ? '已生成业务技能包。部署并完成业务验证后，可在任意对话中直接调用。'
+              ? tr('已生成业务技能包。部署并完成业务验证后，可在任意对话中直接调用。', 'Skill package generated. Ready to invoke in chat after verification.')
               : error
-                ? '实际技能包暂时无法读取，不能以分析计划代替最终技能。'
-                : '正在读取实际技能包…'}
+                ? tr('实际技能包暂时无法读取，不能以分析计划代替最终技能。', 'Unable to read the generated skill package.')
+                : tr('正在读取实际技能包…', 'Loading skill package…')}
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className="oa-pill">{apis.length} 项接口操作</span>
-          <span className="oa-pill">{pages.length} 个业务页面</span>
+          <span className="oa-pill">{tr('{n} 项接口操作', '{n} APIs', { n: apis.length })}</span>
+          <span className="oa-pill">{tr('{n} 个业务页面', '{n} Pages', { n: pages.length })}</span>
         </div>
       </div>
 
-      {error && (
-        <div role="alert" className="oa-alert oa-alert-danger">
-          {error}
-        </div>
-      )}
+      <NoticeModal
+        open={Boolean(error)}
+        variant="error"
+        message={error}
+        onClose={() => setError('')}
+      />
 
       {!error && purposes.length > 0 && (
         <div style={{ borderRadius: 12, border: '1px solid var(--oa-line)', background: 'var(--oa-panel)', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div className="oa-hint" style={{ fontWeight: 600 }}>核心业务能力概览</div>
+          <div className="oa-hint" style={{ fontWeight: 600 }}>{tr('核心业务能力概览', 'Core Capabilities')}</div>
           <div className="oa-grid-2">
             {purposes.map(purpose => (
               <div
@@ -115,7 +119,7 @@ export function AppSkillPreview({
           </div>
           {!!apis.length && (
             <p className="oa-hint" style={{ margin: 0 }}>
-              💡 调用方式：在对话中直接说「使用 <code className="oa-code">app-{job.slug}</code> 帮我……」。原有登录要求保留；涉及修改或外部写操作时 AI 会先向你确认。
+              {tr('💡 调用方式：在对话中直接说「使用 app-{slug} 帮我……」。原有登录要求保留；涉及修改或外部写操作时 AI 会先向你确认。', '💡 Tip: Say "use app-{slug} to ..." in chat. Original auth is preserved; write operations require confirmation.', { slug: job.slug })}
             </p>
           )}
         </div>
@@ -123,7 +127,7 @@ export function AppSkillPreview({
 
       <details style={{ borderRadius: 12, border: '1px solid var(--oa-line)', background: 'var(--oa-panel)', padding: 14, fontSize: 12 }}>
         <summary style={{ cursor: 'pointer', fontWeight: 500, color: 'var(--oa-accent)' }}>
-          查看全部业务能力与使用条件（{apis.length} 项接口操作，{pages.length} 个页面）
+          {tr('查看全部业务能力与使用条件（{apis} 项接口操作，{pages} 个页面）', 'View All Capabilities ({apis} APIs, {pages} Pages)', { apis: apis.length, pages: pages.length })}
         </summary>
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--oa-line)', display: 'flex', flexDirection: 'column', gap: 12 }}>
           {apis.map((item, idx) => (
@@ -133,9 +137,9 @@ export function AppSkillPreview({
                 <span className={`oa-pill ${item.effect === 'read' ? 'oa-pill-ok' : 'oa-pill-warn'}`}>
                   {item.effect === 'read'
                     ? job.verification?.checks?.some(c => c.operation === item.id && c.passed)
-                      ? '只读查询 · 已验证'
-                      : '只读查询 · 待业务验证'
-                    : '写操作 · 执行前需确认'}
+                      ? tr('只读查询 · 已验证', 'Read · Verified')
+                      : tr('只读查询 · 待业务验证', 'Read · Pending Verification')
+                    : tr('写操作 · 执行前需确认', 'Write · Confirmation Required')}
                 </span>
               </div>
               <div className="oa-mono" style={{ color: 'var(--oa-muted)', fontSize: 11.5, marginTop: 4, wordBreak: 'break-all' }}>
@@ -143,7 +147,7 @@ export function AppSkillPreview({
                 {item.path}
               </div>
               <details style={{ marginTop: 6, color: 'var(--oa-muted)' }}>
-                <summary style={{ cursor: 'pointer' }}>技术信息：参数、返回结果与认证</summary>
+                <summary style={{ cursor: 'pointer' }}>{tr('技术信息：参数、返回结果与认证', 'Technical Details: Params, Response & Auth')}</summary>
                 <pre className="oa-mono" style={{ background: 'var(--oa-paper)', padding: 10, borderRadius: 8, overflow: 'auto', maxHeight: 220, marginTop: 6 }}>
                   {JSON.stringify(item, null, 2)}
                 </pre>
@@ -154,9 +158,9 @@ export function AppSkillPreview({
             <article key={`${page.path}-${i}`} style={{ paddingBottom: 10, borderBottom: '1px solid var(--oa-line)' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                 <div style={{ fontWeight: 600 }}>{page.purpose}</div>
-                <span className="oa-pill">页面交互 · 路径 {page.path}</span>
+                <span className="oa-pill">{tr('页面交互 · 路径 {path}', 'Page · {path}', { path: page.path })}</span>
               </div>
-              <div className="oa-hint" style={{ marginTop: 4 }}>需要浏览器能力；如应用要求登录，保留原登录方式。</div>
+              <div className="oa-hint" style={{ marginTop: 4 }}>{tr('需要浏览器能力；如应用要求登录，保留原登录方式。', 'Requires browser access; preserves original app login.')}</div>
             </article>
           ))}
         </div>
@@ -164,11 +168,11 @@ export function AppSkillPreview({
 
       {packageData && (
         <details style={{ borderRadius: 12, border: '1px solid var(--oa-line)', background: 'var(--oa-panel)', padding: 14, fontSize: 12 }}>
-          <summary style={{ cursor: 'pointer', fontWeight: 500, color: 'var(--oa-muted)' }}>查看完整技能文件 (SKILL.md)</summary>
+          <summary style={{ cursor: 'pointer', fontWeight: 500, color: 'var(--oa-muted)' }}>{tr('查看完整技能文件 (SKILL.md)', 'View Full SKILL.md')}</summary>
           <pre className="oa-mono" style={{ whiteSpace: 'pre-wrap', background: 'var(--oa-paper)', padding: 12, borderRadius: 8, marginTop: 10, maxHeight: 280, overflow: 'auto' }}>
             {packageData.markdown}
           </pre>
-          {packageData.sha256 && <div className="oa-hint oa-mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>文件校验：{packageData.sha256}</div>}
+          {packageData.sha256 && <div className="oa-hint oa-mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>{tr('文件校验：{sha}', 'SHA-256: {sha}', { sha: packageData.sha256 })}</div>}
         </details>
       )}
     </section>
