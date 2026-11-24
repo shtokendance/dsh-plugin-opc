@@ -605,6 +605,7 @@ export function AppsPanel({
   const draftTransition = useRef(false)
   const [aiConfigEdits, setAiConfigEdits] = useState<ConfigChatEdit[]>([])
   const [configChatStatus, setConfigChatStatus] = useState<'connecting' | 'ready' | 'unavailable'>('connecting')
+  const [configChatError, setConfigChatError] = useState('')
   const [configChatReconnect, setConfigChatReconnect] = useState(0)
   const [step3Load, setStep3Load] = useState<{ jobId: string; artifactHash?: string; contextId: string; status: 'loading' | 'ready' | 'failed'; error?: string }>()
   const step3Request = useRef(0)
@@ -1364,25 +1365,44 @@ export function AppsPanel({
     if (!configChatJobId || !configChatArtifact || !api.appWatchConfigChat || !api.appReplyConfigChat || !api.appSaveConfigDraft) return
     const controller = new AbortController()
     setConfigChatStatus('connecting')
+    setConfigChatError('')
     void (async () => {
-      try {
-        for await (const raw of api.appWatchConfigChat!(configChatJobId, configChatArtifact, sessionId, contextId, controller.signal)) {
-          if (controller.signal.aborted) return
-          const frame = JSON.parse(raw) as ConfigChatFrame
-          if (frame.type === 'ready') {
-            setConfigChatStatus('ready')
-            continue
-          }
-          let result: ConfigChatResult
-          try { result = await runConfigChatAction.current(frame.action) }
-          catch (error) { result = { error: readErrorMessage(error, '无法处理配置草稿') } }
-          if (controller.signal.aborted) return
-          await api.appReplyConfigChat!(configChatJobId, frame.id, JSON.stringify(result), contextId)
-        }
-      } catch {
+      const delays = [1000, 2000, 4000]
+      for (let attempt = 0; attempt <= delays.length; attempt += 1) {
         if (controller.signal.aborted) return
+        let lastError = ''
+        try {
+          for await (const raw of api.appWatchConfigChat!(configChatJobId, configChatArtifact, sessionId, contextId, controller.signal)) {
+            if (controller.signal.aborted) return
+            const frame = JSON.parse(raw) as ConfigChatFrame
+            if (frame.type === 'ready') {
+              setConfigChatStatus('ready')
+              setConfigChatError('')
+              attempt = 0
+              continue
+            }
+            let result: ConfigChatResult
+            try { result = await runConfigChatAction.current(frame.action) }
+            catch (error) { result = { error: readErrorMessage(error, '无法处理配置草稿') } }
+            if (controller.signal.aborted) return
+            await api.appReplyConfigChat!(configChatJobId, frame.id, JSON.stringify(result), contextId)
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return
+          lastError = readErrorMessage(error, '')
+        }
+        if (controller.signal.aborted) return
+        if (attempt < delays.length) {
+          setConfigChatStatus('connecting')
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, delays[attempt])
+            controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+          })
+          continue
+        }
+        setConfigChatError(lastError)
+        setConfigChatStatus('unavailable')
       }
-      if (!controller.signal.aborted) setConfigChatStatus('unavailable')
     })()
     return () => controller.abort()
   }, [api, configChatJobId, configChatArtifact, configChatReconnect, contextId, sessionId])
@@ -2480,41 +2500,53 @@ export function AppsPanel({
                 </div>
               )}
 
-              {step3Ready && (deliveryFiles.length > 0 || sourceChanges.length > 0) && (
-                <details className="oa-subcard oa-cfg-ref-details">
-                  <summary>交付文件与源码改动</summary>
-                  {deliveryFiles.length > 0 && (
-                    <div className="oa-delivery-file-actions">
-                      {deliveryFiles.map(filename => (
-                        <button key={filename} type="button" className="oa-btn oa-btn-sm"
-                          onClick={() => void handleSaveLocalArtifact(wizardJob.id, filename)}>
-                          <AppIcon name="fileCode" size={13} />
-                          <span className="oa-mono">{filename}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {sourceChanges.map((change, index) => (
-                    <div key={change.id || index} className="oa-cfg-ref-file">
-                      <code className="oa-code">{change.path}</code> {change.reason}
-                      {change.diff && (
-                        <details>
-                          <summary>查看文件差异</summary>
-                          <pre className="oa-dockerfile-source oa-mono">{change.diff}</pre>
-                        </details>
-                      )}
-                    </div>
-                  ))}
-                </details>
-              )}
+              {step3Ready && (deliveryFiles.length > 0 || sourceChanges.length > 0) && (() => {
+                const summaryParts = [
+                  deliveryFiles.length > 0 ? `${deliveryFiles.length} 个交付文件` : '',
+                  sourceChanges.length > 0 ? `${sourceChanges.length} 处源码改动` : '',
+                ].filter(Boolean)
+                return (
+                  <details className="oa-subcard oa-cfg-ref-details">
+                    <summary>
+                      <span>交付文件与源码改动{summaryParts.length > 0 ? `（${summaryParts.join(' · ')}）` : ''}</span>
+                      <span className="oa-cfg-ref-toggle" aria-hidden="true">
+                        <AppIcon name="chevronDown" size={14} />
+                      </span>
+                    </summary>
+                    {deliveryFiles.length > 0 && (
+                      <div className="oa-delivery-file-actions">
+                        {deliveryFiles.map(filename => (
+                          <button key={filename} type="button" className="oa-btn oa-btn-sm"
+                            onClick={() => void handleSaveLocalArtifact(wizardJob.id, filename)}>
+                            <AppIcon name="fileCode" size={13} />
+                            <span className="oa-mono">{filename}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {sourceChanges.map((change, index) => (
+                      <div key={change.id || index} className="oa-cfg-ref-file">
+                        <code className="oa-code">{change.path}</code> {change.reason}
+                        {change.diff && (
+                          <details>
+                            <summary>查看文件差异</summary>
+                            <pre className="oa-dockerfile-source oa-mono">{change.diff}</pre>
+                          </details>
+                        )}
+                      </div>
+                    ))}
+                  </details>
+                )
+              })()}
 
               {step3Ready && configSubTab === 'configs' && (
                 <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="运行时环境变量配置">
                   {api.appWatchConfigChat && wizardJob.analysisSessionId && (
                     <div className="oa-draft-banner">
                       <span>{wizardJob.analysisSessionId !== sessionId ? '在原部署会话中请 AI 协助核对配置。'
-                        : configChatStatus === 'ready' ? '可在左侧对话询问配置用途，或让 AI 修改本次草稿。'
-                        : configChatStatus === 'connecting' ? '正在连接左侧部署会话…' : '左侧配置会话暂不可用。'}</span>
+                        : configChatStatus === 'ready' ? '已联动左侧 AI：可在左侧提问配置用途，或让 AI 直接修改右侧草稿。'
+                        : configChatStatus === 'connecting' ? '正在连接左侧 AI 配置助手…'
+                        : `暂时无法联动右侧草稿（左侧对话仍可正常使用）${configChatError ? ` · ${configChatError}` : ''}`}</span>
                       {wizardJob.analysisSessionId !== sessionId && prepareAnalysisNavigation &&
                         <button type="button" className="oa-btn oa-btn-sm" onClick={() => beginAnalysisNavigation()?.(wizardJob)}>打开部署会话</button>}
                       {wizardJob.analysisSessionId === sessionId && configChatStatus === 'unavailable' &&
