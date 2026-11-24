@@ -11,7 +11,7 @@ export function NoticeModal({
   actions,
 }: {
   open: boolean
-  variant?: 'error' | 'warning' | 'info'
+  variant?: 'error' | 'warning' | 'info' | 'success'
   title?: string
   message: string
   onClose: () => void
@@ -31,14 +31,16 @@ export function NoticeModal({
   if (!open || !message) return null
 
   const defaultTitle =
-    variant === 'warning'
-      ? t("common.notice.warning")
-      : variant === 'info'
-        ? t("common.notice.notice")
-        : t("common.notice.error")
+    variant === 'success'
+      ? t("common.notice.success")
+      : variant === 'warning'
+        ? t("common.notice.warning")
+        : variant === 'info'
+          ? t("common.notice.notice")
+          : t("common.notice.error")
 
   const accentColor =
-    variant === 'warning' ? '#d97706' : variant === 'info' ? '#2563eb' : '#dc2626'
+    variant === 'success' ? '#059669' : variant === 'warning' ? '#d97706' : variant === 'info' ? '#2563eb' : '#dc2626'
 
   return (
     <div
@@ -84,7 +86,7 @@ export function NoticeModal({
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ color: accentColor, display: 'inline-flex' }}>
-              <AppIcon name="warning" size={16} />
+              <AppIcon name={variant === 'success' ? 'check' : 'warning'} size={16} />
             </span>
             <strong style={{ fontSize: 14, color: '#0f172a' }}>{title || defaultTitle}</strong>
           </div>
