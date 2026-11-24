@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { OpcApi } from './api.ts'
 import { AppIcon } from './AppIcon.tsx'
+import { useI18n } from './i18n.tsx'
+import { NoticeModal } from './NoticeModal.tsx'
 
 export interface NormalizedMcpTool {
   name: string
@@ -376,6 +378,7 @@ export function McpServiceDetail({
   onToggleMount: () => void
   onBack: () => void
 }) {
+  const { tr } = useI18n()
   const serviceId = String(service.service_id)
   const serviceName = String(service.name ?? service.service_id)
   const serviceDescription = String(service.description ?? '').trim()
@@ -442,7 +445,7 @@ export function McpServiceDetail({
       const parsed = JSON.parse(currentArgs)
       updateCurrentArgs(JSON.stringify(parsed, null, 2))
     } catch (error) {
-      setValidationError(`JSON 格式无效：${error instanceof Error ? error.message : String(error)}`)
+      setValidationError(tr('JSON 格式无效：{msg}', 'Invalid JSON: {msg}', { msg: error instanceof Error ? error.message : String(error) }))
     }
   }
 
@@ -451,11 +454,11 @@ export function McpServiceDetail({
     try {
       const parsed = JSON.parse(currentArgs)
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setValidationError('参数必须是 JSON 对象，例如 {}')
+        setValidationError(tr('参数必须是 JSON 对象，例如 {}', 'Arguments must be a JSON object, e.g. {}'))
         return
       }
     } catch (error) {
-      setValidationError(`JSON 格式无效：${error instanceof Error ? error.message : String(error)}`)
+      setValidationError(tr('JSON 格式无效：{msg}', 'Invalid JSON: {msg}', { msg: error instanceof Error ? error.message : String(error) }))
       return
     }
     const current = ++generation.current
@@ -496,7 +499,7 @@ export function McpServiceDetail({
         <div className="mcp-detail-top-left">
           <div>
             <button type="button" className="btn-back" onClick={onBack}>
-              ← 返回 MCP 列表
+              {tr('← 返回 MCP 列表', '← Back to MCP Services')}
             </button>
           </div>
           <div className="mcp-detail-title-row">
@@ -505,7 +508,7 @@ export function McpServiceDetail({
             {spaceLabel && <span className="badge">{spaceLabel}</span>}
             {connection && (
               <span className={`badge ${connection.state === 'connected' ? 'badge-ok' : ''}`}>
-                {connection.state === 'connected' ? `已连接 (${connection.toolCount})` : connection.state}
+                {connection.state === 'connected' ? tr('已连接 ({n})', 'Connected ({n})', { n: connection.toolCount }) : connection.state}
               </span>
             )}
           </div>
@@ -519,7 +522,7 @@ export function McpServiceDetail({
               style={mounted ? {} : { background: '#0f172a', color: '#ffffff', borderColor: '#0f172a' }}
               onClick={onToggleMount}
             >
-              {mounted ? '取消挂载' : '挂载到 DSH'}
+              {mounted ? tr('取消挂载', 'Unmount') : tr('挂载到 DSH', 'Mount')}
             </button>
           </div>
         )}
@@ -527,21 +530,21 @@ export function McpServiceDetail({
 
       {tools.length === 0 ? (
         <div className="mcp-detail-pane" style={{ textAlign: 'center', padding: '32px 16px', color: '#64748b' }}>
-          该 MCP 服务暂无可用工具
+          {tr('该 MCP 服务暂无可用工具', 'No tools available on this MCP service')}
         </div>
       ) : (
         <div className="mcp-detail-grid">
-          <section className="mcp-detail-pane" aria-label="可用工具">
+          <section className="mcp-detail-pane" aria-label={tr('可用工具', 'Available Tools')}>
             <div className="mcp-pane-head">
-              <h3 className="mcp-pane-title">可用工具</h3>
+              <h3 className="mcp-pane-title">{tr('可用工具', 'Available Tools')}</h3>
               <span className="badge">{tools.length}</span>
             </div>
             {tools.length > 5 && (
               <input
                 type="search"
                 className="mcp-tool-filter"
-                aria-label="筛选工具"
-                placeholder="筛选工具名称或说明..."
+                aria-label={tr('筛选工具', 'Filter tools')}
+                placeholder={tr('筛选工具名称或说明...', 'Filter by tool name or description...')}
                 value={toolFilter}
                 onChange={event => setToolFilter(event.target.value)}
               />
@@ -567,7 +570,7 @@ export function McpServiceDetail({
                       <span className="mcp-tool-name">{tool.name}</span>
                       {tool.risk && (
                         <span className={`badge ${tool.risk === 'read' ? 'badge-ok' : 'badge-warn'}`}>
-                          {tool.risk === 'read' ? '只读' : tool.risk}{tool.requireApproval ? ' · 需审批' : ''}
+                          {tool.risk === 'read' ? tr('只读', 'Read') : tool.risk}{tool.requireApproval ? tr(' · 需审批', ' · Approval') : ''}
                         </span>
                       )}
                     </div>
@@ -577,21 +580,21 @@ export function McpServiceDetail({
               })}
               {filteredTools.length === 0 && (
                 <div style={{ textAlign: 'center', padding: '16px 8px', fontSize: 12, color: '#94a3b8' }}>
-                  未找到匹配的工具
+                  {tr('未找到匹配的工具', 'No matching tools')}
                 </div>
               )}
             </div>
           </section>
 
-          <section className="mcp-detail-pane" aria-label="工具调试">
+          <section className="mcp-detail-pane" aria-label={tr('工具调试', 'Tool Debug')}>
             <div className="mcp-pane-head">
-              <h3 className="mcp-pane-title">工具调试</h3>
+              <h3 className="mcp-pane-title">{tr('工具调试', 'Tool Debug')}</h3>
               {selectedTool && (
                 <div className="mcp-debug-tool-head">
                   <code className="mcp-debug-tool-code">{selectedTool.name}</code>
                   {selectedTool.risk && (
                     <span className={`badge ${selectedTool.risk === 'read' ? 'badge-ok' : 'badge-warn'}`}>
-                      {selectedTool.risk === 'read' ? '只读' : selectedTool.risk}{selectedTool.requireApproval ? ' · 需审批' : ''}
+                      {selectedTool.risk === 'read' ? tr('只读', 'Read') : selectedTool.risk}{selectedTool.requireApproval ? tr(' · 需审批', ' · Approval') : ''}
                     </span>
                   )}
                 </div>
@@ -606,13 +609,13 @@ export function McpServiceDetail({
               {schemaProperties.length > 0 && (
                 <div className="mcp-schema-box">
                   <div className="mcp-pane-head">
-                    <span style={{ fontSize: 12, fontWeight: 600, color: '#334155' }}>参数定义</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: '#334155' }}>{tr('参数定义', 'Parameters')}</span>
                     <button
                       type="button"
                       className="btn-sm"
                       onClick={() => updateCurrentArgs(buildSchemaTemplate(selectedTool.inputSchema))}
                     >
-                      恢复默认参数
+                      {tr('恢复默认参数', 'Reset Template')}
                     </button>
                   </div>
                   <div className="mcp-schema-list">
@@ -620,7 +623,7 @@ export function McpServiceDetail({
                       <div key={prop.name} className="mcp-schema-row">
                         <span className="mcp-schema-key">{prop.name}</span>
                         <span className="mcp-schema-type">{prop.type}</span>
-                        {prop.required && <span className="mcp-schema-req">必填</span>}
+                        {prop.required && <span className="mcp-schema-req">{tr('必填', 'Required')}</span>}
                         {prop.description && <span className="mcp-schema-desc">{prop.description}</span>}
                       </div>
                     ))}
@@ -630,12 +633,17 @@ export function McpServiceDetail({
 
               <textarea
                 className="mcp-debug-textarea"
-                aria-label={`${selectedTool.name} JSON 参数`}
+                aria-label={tr('{name} JSON 参数', '{name} JSON arguments', { name: selectedTool.name })}
                 value={currentArgs}
                 onChange={event => updateCurrentArgs(event.target.value)}
               />
 
-              {validationError && <div role="alert" className="error" style={{ margin: 0 }}>{validationError}</div>}
+              <NoticeModal
+                open={Boolean(validationError)}
+                variant="warning"
+                message={validationError}
+                onClose={() => setValidationError('')}
+              />
 
               <div className="mcp-debug-actions">
                 <button
@@ -644,14 +652,14 @@ export function McpServiceDetail({
                   disabled={pending}
                   onClick={invokeSelectedTool}
                 >
-                  {pending ? '执行中…' : '调用工具'}
+                  {pending ? tr('执行中…', 'Running…') : tr('调用工具', 'Invoke Tool')}
                 </button>
                 <button type="button" className="btn-sm" disabled={pending} onClick={formatCurrentJson}>
-                  格式化 JSON
+                  {tr('格式化 JSON', 'Format JSON')}
                 </button>
                 {resultState && (
                   <button type="button" className="btn-sm" disabled={pending} onClick={() => setResultState(null)}>
-                    清空结果
+                    {tr('清空结果', 'Clear Result')}
                   </button>
                 )}
               </div>
@@ -660,10 +668,10 @@ export function McpServiceDetail({
                 <div className="mcp-debug-result">
                   <div className="mcp-debug-result-head">
                     <span className={`badge ${resultState.ok ? 'badge-ok' : 'badge-danger'}`}>
-                      {resultState.ok ? '调用成功' : '调用失败'}
+                      {resultState.ok ? tr('调用成功', 'Success') : tr('调用失败', 'Failed')}
                     </span>
                     <button type="button" className="btn-sm" onClick={() => void copyResult()}>
-                      <AppIcon name={copied ? 'check' : 'copy'} size={12} /> {copied ? '已复制' : '复制结果'}
+                      <AppIcon name={copied ? 'check' : 'copy'} size={12} /> {copied ? tr('已复制', 'Copied') : tr('复制结果', 'Copy Result')}
                     </button>
                   </div>
                   <pre className="mcp-debug-output">{resultState.text}</pre>

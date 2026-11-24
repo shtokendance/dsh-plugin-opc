@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react'
 import { AppIcon } from './AppIcon.tsx'
 import type { AppVolumeBackupItem, OpcApi } from './api.ts'
+import { useI18n, type ClientLocale } from './i18n.tsx'
+import { NoticeModal } from './NoticeModal.tsx'
 
 function parseJson<T>(raw: string | undefined | null, fallback: T): T {
   if (!raw || typeof raw !== 'string') return fallback
@@ -17,12 +19,12 @@ function readErrorMessage(error: unknown, fallback = '操作失败，请稍后�
   return raw.replace(/^Error:\s*/i, '').trim() || fallback
 }
 
-function formatDateTime(raw?: string | null): string {
+function formatDateTime(raw?: string | null, locale: ClientLocale = 'zh'): string {
   if (!raw) return '-'
   const ts = Date.parse(raw)
   if (Number.isNaN(ts)) return raw
   try {
-    return new Intl.DateTimeFormat('zh-CN', {
+    return new Intl.DateTimeFormat(locale === 'zh' ? 'zh-CN' : 'en-US', {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -61,6 +63,7 @@ export function DeletedAppBackupsView({
   onBack: () => void
   onRefresh: () => Promise<void>
 }) {
+  const { locale, tr } = useI18n()
   const [query, setQuery] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -91,7 +94,7 @@ export function DeletedAppBackupsView({
       const parsed = parseJson<{ path?: string }>(raw, {})
       setSavedPaths(prev => ({ ...prev, [bk.id]: parsed.path || bk.filename }))
     } catch (err) {
-      setErrorMsg(readErrorMessage(err, '下载备份失败'))
+      setErrorMsg(readErrorMessage(err, tr('下载备份失败', 'Failed to download backup')))
     } finally {
       setDownloadingId(null)
     }
@@ -106,7 +109,7 @@ export function DeletedAppBackupsView({
       setConfirmDeleteId(null)
       await onRefresh()
     } catch (err) {
-      setErrorMsg(readErrorMessage(err, '删除备份失败'))
+      setErrorMsg(readErrorMessage(err, tr('删除备份失败', 'Failed to delete backup')))
     } finally {
       setDeletingId(null)
     }
@@ -118,40 +121,39 @@ export function DeletedAppBackupsView({
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button type="button" className="oa-btn oa-btn-sm" onClick={onBack}>
             <AppIcon name="arrowLeft" size={13} />
-            <span>返回应用中心</span>
+            <span>{tr('返回应用中心', 'Back to Apps')}</span>
           </button>
-          <strong style={{ fontSize: 15, color: '#0f172a' }}>已删除应用备份</strong>
-          <span className="oa-pill">{backups.length} 份 · {formatBytes(totalBytes)}</span>
-          <span className="oa-pill">云端保留 30 天</span>
+          <strong style={{ fontSize: 15, color: '#0f172a' }}>{tr('已删除应用备份', 'Deleted App Backups')}</strong>
+          <span className="oa-pill">{tr('{n} 份 · {size}', '{n} backups · {size}', { n: backups.length, size: formatBytes(totalBytes) })}</span>
+          <span className="oa-pill">{tr('云端保留 30 天', 'Retained 30 days')}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input
             type="text"
             className="oa-input"
             style={{ width: 210, padding: '5px 10px', fontSize: 12 }}
-            placeholder="搜索应用名、slug 或路径"
+            placeholder={tr('搜索应用名、slug 或路径', 'Search app, slug, or path')}
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
           <button type="button" className="oa-btn oa-btn-sm" disabled={loading} onClick={() => void onRefresh()}>
             <AppIcon name="refresh" size={13} className={loading ? 'oa-spin' : ''} />
-            <span>刷新</span>
+            <span>{tr('刷新', 'Refresh')}</span>
           </button>
         </div>
       </div>
 
       <div className="oa-overlay-body">
-        {errorMsg && (
-          <div role="alert" className="oa-alert oa-alert-danger">
-            <AppIcon name="warning" size={16} />
-            <div style={{ flex: 1 }}>{errorMsg}</div>
-            <button type="button" className="oa-btn oa-btn-xs" onClick={() => setErrorMsg(null)}>关闭</button>
-          </div>
-        )}
+        <NoticeModal
+          open={Boolean(errorMsg)}
+          variant="error"
+          message={errorMsg || ''}
+          onClose={() => setErrorMsg(null)}
+        />
 
         {filtered.length === 0 ? (
           <div className="oa-form-card" style={{ textAlign: 'center', padding: '44px 20px', color: '#64748b' }}>
-            {backups.length === 0 ? '暂无已删除应用的挂载卷备份' : '没有匹配的备份记录'}
+            {backups.length === 0 ? tr('暂无已删除应用的挂载卷备份', 'No deleted app volume backups') : tr('没有匹配的备份记录', 'No matching backups')}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -189,15 +191,15 @@ export function DeletedAppBackupsView({
                           <span className="oa-code">{bk.app_slug}</span>
                           {bk.app_version > 0 && <span className="oa-hint">v{bk.app_version}</span>}
                           <span style={{ fontWeight: 600, fontSize: 12 }}>{bk.size_human}</span>
-                          <span className="oa-hint">({bk.file_count} 文件)</span>
+                          <span className="oa-hint">{tr('({n} 文件)', '({n} files)', { n: bk.file_count })}</span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
                           {bk.mounts.map(m => (
                             <span key={m.container_path} className="oa-code">{m.container_path}</span>
                           ))}
-                          <span className="oa-hint">归档于 {formatDateTime(bk.created_at)}</span>
+                          <span className="oa-hint">{tr('归档于 {time}', 'Archived {time}', { time: formatDateTime(bk.created_at, locale) })}</span>
                           <span className="oa-hint" style={bk.remain_days <= 10 ? { color: '#d97706', fontWeight: 500 } : undefined}>
-                            · 剩余 {bk.remain_days} 天
+                            {tr('· 剩余 {days} 天', '· {days}d left', { days: bk.remain_days })}
                           </span>
                         </div>
                       </div>
@@ -206,17 +208,17 @@ export function DeletedAppBackupsView({
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       {confirming ? (
                         <>
-                          <span style={{ fontSize: 12, color: '#dc2626', fontWeight: 500 }}>永久删除云端归档？</span>
+                          <span style={{ fontSize: 12, color: '#dc2626', fontWeight: 500 }}>{tr('永久删除云端归档？', 'Delete cloud archive?')}</span>
                           <button
                             type="button"
                             className="oa-btn oa-btn-xs oa-btn-danger"
                             disabled={isDel}
                             onClick={() => void handleDelete(bk.id)}
                           >
-                            {isDel ? '删除中…' : '确认删除'}
+                            {isDel ? tr('删除中…', 'Deleting…') : tr('确认删除', 'Confirm')}
                           </button>
                           <button type="button" className="oa-btn oa-btn-xs" onClick={() => setConfirmDeleteId(null)}>
-                            取消
+                            {tr('取消', 'Cancel')}
                           </button>
                         </>
                       ) : (
@@ -228,14 +230,14 @@ export function DeletedAppBackupsView({
                             onClick={() => void handleDownload(bk)}
                           >
                             <AppIcon name={isDl ? 'refresh' : 'download'} size={13} className={isDl ? 'oa-spin' : ''} />
-                            <span>{isDl ? '下载中…' : '下载备份'}</span>
+                            <span>{isDl ? tr('下载中…', 'Downloading…') : tr('下载备份', 'Download')}</span>
                           </button>
                           <button
                             type="button"
                             className="oa-btn oa-btn-sm oa-btn-danger"
                             onClick={() => setConfirmDeleteId(bk.id)}
                           >
-                            删除
+                            {tr('删除', 'Delete')}
                           </button>
                         </>
                       )}
@@ -244,7 +246,7 @@ export function DeletedAppBackupsView({
 
                   {savedPath && (
                     <div style={{ padding: '8px 16px', borderTop: '1px solid #e2e8f0', background: '#ecfdf5', color: '#059669', fontSize: 12 }}>
-                      已保存到本地：<span className="oa-mono">{savedPath}</span>
+                      {tr('已保存到本地：', 'Saved to: ')}<span className="oa-mono">{savedPath}</span>
                     </div>
                   )}
 
@@ -252,10 +254,10 @@ export function DeletedAppBackupsView({
                     <div style={{ padding: '12px 16px', borderTop: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', flexDirection: 'column', gap: 10 }}>
                       <div className="oa-table-box">
                         <div className="oa-storage-table-head">
-                          <span>原容器挂载路径</span>
-                          <span>压缩包内目录</span>
-                          <span style={{ textAlign: 'right' }}>文件数</span>
-                          <span style={{ textAlign: 'right' }}>占用大小</span>
+                          <span>{tr('原容器挂载路径', 'Container Path')}</span>
+                          <span>{tr('压缩包内目录', 'Archive Directory')}</span>
+                          <span style={{ textAlign: 'right' }}>{tr('文件数', 'Files')}</span>
+                          <span style={{ textAlign: 'right' }}>{tr('占用大小', 'Size')}</span>
                         </div>
                         {bk.mounts.map(m => (
                           <div key={m.container_path} className="oa-storage-table-row">
@@ -267,9 +269,9 @@ export function DeletedAppBackupsView({
                         ))}
                       </div>
                       <div className="oa-hint" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-                        <span>归档文件：<span className="oa-code">{bk.filename}</span></span>
+                        <span>{tr('归档文件：', 'Archive: ')}<span className="oa-code">{bk.filename}</span></span>
                         {bk.sha256 && <span>SHA-256：<span className="oa-code">{bk.sha256.slice(0, 16)}…</span></span>}
-                        <span>到期：{formatDateTime(bk.expires_at)}</span>
+                        <span>{tr('到期：{time}', 'Expires: {time}', { time: formatDateTime(bk.expires_at, locale) })}</span>
                       </div>
                     </div>
                   )}
