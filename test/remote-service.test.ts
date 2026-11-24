@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { pickSourceFolder, type ExecFileFn } from '../src/host/remote-service.ts'
+import { checkNpmPackageUpdate, pickSourceFolder, type ExecFileFn } from '../src/host/remote-service.ts'
 
 test('pickSourceFolder uses PowerShell STA FolderBrowserDialog on win32', async () => {
   const calls: Array<{ file: string; args: string[]; options: { timeout: number; windowsHide?: boolean } }> = []
@@ -41,4 +41,46 @@ test('pickSourceFolder strips trailing slashes on darwin and marks linux unsuppo
   assert.deepEqual(await pickSourceFolder('darwin', canceledExec), { cancelled: true })
 
   assert.deepEqual(await pickSourceFolder('linux', darwinExec), { cancelled: true, unsupported: true })
+})
+
+test('checkNpmPackageUpdate picks highest version across registries even when first mirror is stale', async () => {
+  const fetchMock: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('npmmirror')) {
+      return new Response(JSON.stringify({ version: '0.1.58' }), { status: 200 })
+    }
+    return new Response(JSON.stringify({ version: '0.1.59' }), { status: 200 })
+  }
+
+  const result = await checkNpmPackageUpdate('0.1.58', fetchMock, [
+    'https://registry.npmmirror.com/dsh-plugin-opc/latest',
+    'https://registry.npmjs.org/dsh-plugin-opc/latest',
+  ])
+
+  assert.deepEqual(result, {
+    currentVersion: '0.1.58',
+    latestVersion: '0.1.59',
+    hasUpdate: true,
+  })
+})
+
+test('checkNpmPackageUpdate still succeeds when one registry fails', async () => {
+  const fetchMock: typeof fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('npmjs.org')) {
+      throw new Error('timeout')
+    }
+    return new Response(JSON.stringify({ version: '0.1.59' }), { status: 200 })
+  }
+
+  const result = await checkNpmPackageUpdate('0.1.58', fetchMock, [
+    'https://registry.npmmirror.com/dsh-plugin-opc/latest',
+    'https://registry.npmjs.org/dsh-plugin-opc/latest',
+  ])
+
+  assert.deepEqual(result, {
+    currentVersion: '0.1.58',
+    latestVersion: '0.1.59',
+    hasUpdate: true,
+  })
 })
