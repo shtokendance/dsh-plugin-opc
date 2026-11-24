@@ -122,11 +122,11 @@ declare const __OPC_PLUGIN_VERSION__: string | undefined
 
 const PLUGIN_VERSION = typeof __OPC_PLUGIN_VERSION__ !== 'undefined' ? __OPC_PLUGIN_VERSION__ : ''
 
-const GUIDE_TABS: readonly { id: HomeGuideTab; label: string }[] = [
-  { id: 'apps', label: '应用交付 4 步走' },
+export const GUIDE_TABS: readonly { id: HomeGuideTab; label: string }[] = [
   { id: 'knowledge', label: '知识库用法' },
   { id: 'skills', label: '技能用法' },
   { id: 'mcp', label: 'MCP 用法' },
+  { id: 'apps', label: '应用交付 4 步走' },
   { id: 'faq', label: '常见问题' },
 ]
 
@@ -292,7 +292,7 @@ export function WorkbenchHome({ onSelect, api, visible = true, onOpenPluginDetai
   const heading = useId()
   const guideHeading = useId()
   const [guideOpen, setGuideOpen] = useState(false)
-  const [guideTab, setGuideTab] = useState<HomeGuideTab>('apps')
+  const [guideTab, setGuideTab] = useState<HomeGuideTab>('knowledge')
   const [modalModule, setModalModule] = useState<ModuleKind | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; cap: string } | null>(null)
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)

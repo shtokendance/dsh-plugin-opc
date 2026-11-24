@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { AuthManager, type StoredGrant } from '../src/host/auth.ts'
 import { PlatformHttp } from '../src/host/http.ts'
 import { McpBridge } from '../src/host/mcp.ts'
+import { buildSchemaTemplate } from '../src/client/McpServiceDetail.tsx'
 
 async function setup(resourceErrorCode?: string) {
   const calls: { path: string; body: Record<string, unknown> }[] = []
@@ -57,4 +58,37 @@ test('rejected approval submits deny exactly once', async () => {
   assert.equal(calls.filter(c => c.path.endsWith('/decision')).length, 1)
   assert.equal(calls.find(c => c.path.endsWith('/decision'))?.body.decision, 'deny')
   await auth.dispose()
+})
+
+test('buildSchemaTemplate generates editable JSON defaults from tool inputSchema', () => {
+  assert.equal(buildSchemaTemplate(undefined), '{}')
+  assert.equal(buildSchemaTemplate({ type: 'object', properties: {} }), '{}')
+  assert.deepEqual(
+    JSON.parse(buildSchemaTemplate({
+      type: 'object',
+      properties: {
+        order_id: { type: 'string', description: '订单编号' },
+        page: { type: 'integer', default: 1 },
+        status: { type: 'string', enum: ['open', 'closed'] },
+        keyword: { type: 'string', examples: ['SUP-001'] },
+        dry_run: { type: 'boolean' },
+        tags: { type: 'array' },
+        filter: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number' },
+          },
+        },
+      },
+    })),
+    {
+      order_id: '',
+      page: 1,
+      status: 'open',
+      keyword: 'SUP-001',
+      dry_run: false,
+      tags: [],
+      filter: { limit: 0 },
+    },
+  )
 })
