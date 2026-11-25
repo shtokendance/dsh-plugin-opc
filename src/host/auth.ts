@@ -49,6 +49,67 @@ function check(response: PlatformResponse): Record<string, unknown> {
   return response.body
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function renderCallbackHtml(options: { ok: boolean; title: string; subtitle: string; code?: string }): string {
+  const icon = options.ok
+    ? '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+    : '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
+  const statusClass = options.ok ? 'success' : 'error'
+  const codeHtml = options.code ? `<span class="error-code">${escapeHtml(options.code)}</span>` : ''
+  const footerHtml = options.ok
+    ? '<a class="btn-primary" href="dsh://open">返回 DeepSeek Harness</a><p class="subtle-note">若浏览器未自动跳转，可点击上方按钮或关闭此标签页切回客户端</p>'
+    : '<a class="btn-secondary" href="dsh://open">返回 DeepSeek Harness</a>'
+  const autoOpenScript = options.ok
+    ? "<script>setTimeout(function(){window.location.href='dsh://open'},180)</script>"
+    : ''
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escapeHtml(options.title)} - OPC 工作台</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;background:radial-gradient(circle at 50% 0%,#eff6ff 0%,#f4f6fa 65%);color:#0f172a}
+.card{width:100%;max-width:392px;background:#fff;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 32px -8px rgba(15,23,42,.08),0 2px 6px rgba(15,23,42,.03);overflow:hidden}
+.body{padding:28px 24px 22px;text-align:center}
+.circle{width:56px;height:56px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;justify-content:center}
+.circle.success{background:#ecfdf5;color:#10b981;box-shadow:0 0 0 6px rgba(16,185,129,.1)}
+.circle.error{background:#fef2f2;color:#ef4444;box-shadow:0 0 0 6px rgba(239,68,68,.1)}
+h1{margin:0 0 8px;font-size:18px;font-weight:700;color:#0f172a}
+p{margin:0;font-size:13px;color:#64748b;line-height:1.55}
+.error-code{display:inline-block;margin-top:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:2px 8px;border-radius:6px}
+.footer{padding:16px 24px 20px;background:#f8fafc;border-top:1px solid #f1f5f9;display:flex;flex-direction:column;gap:10px}
+.btn-primary{width:100%;height:42px;border:0;border-radius:10px;background:linear-gradient(180deg,#2563eb 0%,#1d4ed8 100%);color:#fff;font-size:13.5px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;box-shadow:0 4px 12px rgba(37,99,235,.25)}
+.btn-primary:hover{background:linear-gradient(180deg,#1d4ed8 0%,#1e40af 100%)}
+.btn-secondary{width:100%;height:38px;border:1px solid #e2e8f0;border-radius:9px;background:#fff;color:#475569;font-size:13px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;text-decoration:none}
+.btn-secondary:hover{background:#f1f5f9;color:#0f172a}
+.subtle-note{font-size:11.5px;color:#64748b;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="body">
+    <div class="circle ${statusClass}">${icon}</div>
+    <h1>${escapeHtml(options.title)}</h1>
+    <p>${escapeHtml(options.subtitle)}</p>
+    ${codeHtml}
+  </div>
+  <div class="footer">${footerHtml}</div>
+</div>
+${autoOpenScript}
+</body>
+</html>`
+}
+
 export class AuthManager extends EventEmitter {
   readonly contexts = new ContextStore()
   #access = ''
@@ -214,12 +275,21 @@ export class AuthManager extends EventEmitter {
           const result = check(await this.http.request('/integration/v1/auth/token', { signal: controller.signal, body: { grant_type: 'authorization_code', client_id: this.clientId, code, code_verifier: verifier, device: this.device, audience: 'work' } }))
           if (controller.signal.aborted) throw new OpcError('LOGIN_CANCELLED')
           await this.accept(result, revision, true)
-          response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }).end('登录成功，请返回 DSH。')
+          response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).end(renderCallbackHtml({
+            ok: true,
+            title: '登录成功',
+            subtitle: '已成功连接 OPC 企业工作空间，正在为您唤起 DeepSeek Harness 客户端…',
+          }))
         } catch (error) {
           const errorCode = error instanceof OpcError ? error.code : 'LOGIN_FAILED'
           const message = describeLoginError(errorCode)
           if (revision === this.#revision) this.#error = { code: errorCode, message }
-          response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }).end(`登录失败：${message}（${errorCode}）请返回 DSH。`)
+          response.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).end(renderCallbackHtml({
+            ok: false,
+            title: '授权未完成',
+            subtitle: message,
+            code: errorCode,
+          }))
         } finally { if (this.#login?.server === server) this.cancelLogin() }
       })()
     })

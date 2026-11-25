@@ -13,6 +13,7 @@ export const common = {
   "common.notice.warning": "Warning",
   "common.notice.notice": "Notice",
   "common.notice.error": "Error",
+  "common.notice.success": "Success",
   "common.pagination.pagination": "Pagination",
   "common.pagination.itemsPage": "{total} items · Page {page} / {pages}",
   "common.pagination.itemsPerPage": "Items per page",
