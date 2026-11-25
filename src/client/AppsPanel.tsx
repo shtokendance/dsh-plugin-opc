@@ -80,7 +80,6 @@ interface OpcRuntimeConfig {
 }
 
 const SLUG_RE = /^[a-z][a-z0-9-]{2,39}$/
-const MAX_ZIP_BYTES = 64 * 1024 * 1024
 const DRAFT_DISMISS_STORAGE_PREFIX = 'opc-apps-dismissed-draft:'
 const DEFAULT_OPC_CONFIG: OpcRuntimeConfig = {
   appDomainRoot: 'ai.benlai.com',
@@ -154,19 +153,6 @@ function formatFileSize(bytes?: number | null): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-}
-
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : ''
-      const idx = result.indexOf(',')
-      resolve(idx >= 0 ? result.slice(idx + 1) : result)
-    }
-    reader.onerror = () => reject(reader.error || new Error('读取 ZIP 文件失败'))
-    reader.readAsDataURL(file)
-  })
 }
 
 function triggerBrowserDownload(filename: string, base64: string) {
@@ -563,10 +549,9 @@ export function AppsPanel({
   const [appSlug, setAppSlug] = useState('')
   const [slugManual, setSlugManual] = useState(false)
   const [appDescription, setAppDescription] = useState('')
-  const [zipFile, setZipFile] = useState<File | null>(null)
   const [sourcePath, setSourcePath] = useState('')
   const [reuseSourceVersion, setReuseSourceVersion] = useState<number>()
-  const [dragActive, setDragActive] = useState(false)
+  const [undoingSync, setUndoingSync] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedEffort, setSelectedEffort] = useState('')
@@ -577,7 +562,6 @@ export function AppsPanel({
   const isSlugComposingRef = useRef(false)
   const sourcePathInputRef = useRef<HTMLInputElement>(null)
   const sourceSelection = useRef(0)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Step 2 Footer Bridge
   const [step2State, setStep2State] = useState<{ jobId: string; canContinue: boolean; triggerNext: () => void } | null>(null)
@@ -1067,9 +1051,7 @@ export function AppsPanel({
       setSlugManual(Boolean(upgradeApp || prevJob))
       setAppDescription(upgradeApp?.description ?? prevJob?.description ?? '')
       sourceSelection.current++
-      setDragActive(false)
-      setZipFile(null)
-      setSourcePath('')
+      setSourcePath(!reuseSource ? (prevJob?.sourcePath ?? '') : '')
       setReuseSourceVersion(reuseSource && upgradeApp ? prevJob?.version : undefined)
       setConfigSubTab('configs')
     },
@@ -1093,6 +1075,7 @@ export function AppsPanel({
         setAppSlug(fresh.slug)
         setSlugManual(true)
         setAppDescription(fresh.description ?? '')
+        setSourcePath(fresh.sourcePath ?? '')
       }
     },
     [apps, refreshWizardJob],
@@ -1158,8 +1141,8 @@ export function AppsPanel({
       setWizardError('请选择此次交付的 AI 模型，或沿用当前会话模型')
       return
     }
-    if (!reuseSourceVersion && !zipFile && !sourcePath.trim()) {
-      setWizardError('请选择源码文件夹或 ZIP，或者填写完整路径')
+    if (!reuseSourceVersion && !sourcePath.trim()) {
+      setWizardError('请选择源码文件夹，或者填写完整路径')
       return
     }
 
@@ -1183,8 +1166,6 @@ export function AppsPanel({
       }
       if (reuseSourceVersion) {
         payload.reuseSourceVersion = reuseSourceVersion
-      } else if (zipFile) {
-        payload.zip = await readFileAsBase64(zipFile)
       } else {
         payload.source = sourcePath.trim()
       }
@@ -1224,24 +1205,10 @@ export function AppsPanel({
     }
   }
 
-  const selectZip = (file: File) => {
-    if (wizardBusy) return
-    sourceSelection.current++
-    if (!/\.zip$/i.test(file.name) || file.size === 0 || file.size > MAX_ZIP_BYTES) {
-      setWizardError('请使用有效的 ZIP 压缩包，大小不能超过 64 MiB')
-      return
-    }
-    setWizardError(null)
-    setReuseSourceVersion(undefined)
-    setSourcePath('')
-    setZipFile(file)
-  }
-
   const selectSourcePath = (path: string) => {
     sourceSelection.current++
     setWizardError(null)
     setReuseSourceVersion(undefined)
-    setZipFile(null)
     setSourcePath(path)
   }
 
@@ -1260,12 +1227,28 @@ export function AppsPanel({
       if (request !== sourceSelection.current) return
       if (res.unsupported) {
         sourcePathInputRef.current?.focus()
-        setWizardError('此环境不支持原生文件夹选择，请填写完整路径或选择 ZIP 压缩包')
+        setWizardError('此环境不支持原生文件夹选择，请直接填写本机源码文件夹的完整路径')
       } else if (!res.cancelled && res.path) {
         selectSourcePath(res.path)
       }
     } catch (error) {
       if (request === sourceSelection.current) setWizardError(readErrorMessage(error, '打开目录选择器失败'))
+    }
+  }
+
+  const handleUndoSourceSync = async () => {
+    if (!wizardJob || !api.appUndoSourceSync || undoingSync) return
+    setUndoingSync(true)
+    setWizardError(null)
+    try {
+      const raw = await api.appUndoSourceSync(wizardJob.id, '{}', contextId)
+      const updated = parseJson<AppDeliveryJob | null>(raw, null)
+      if (updated) setWizardJob(updated)
+      setWizardNotice('已撤销本次对本机源码目录的改造写入，原文件已恢复')
+    } catch (error) {
+      setWizardError(readErrorMessage(error, '撤销本机源码同步失败'))
+    } finally {
+      setUndoingSync(false)
     }
   }
 
@@ -2001,7 +1984,7 @@ export function AppsPanel({
       slugValid &&
       (upgradingStep1 || slugCheck.available !== false) &&
       (!selectedProvider || Boolean(selectedModelItem)) &&
-      Boolean(reuseSourceVersion || zipFile || sourcePath.trim())
+      Boolean(reuseSourceVersion || sourcePath.trim())
 
     const dockerfile = preparedDockerfile?.jobId === wizardJob?.id && preparedDockerfile?.artifactHash === wizardJob?.artifactHash
       ? preparedDockerfile?.content : undefined
@@ -2254,23 +2237,7 @@ export function AppsPanel({
 
               <section className="oa-form-card" aria-labelledby={`${formId}-source-label`}>
                 <h3 id={`${formId}-source-label`} className="oa-source-label">{t("apps.selectAppSourceFolderOrZip")}<span aria-hidden="true"> *</span></h3>
-                <div
-                  className={`oa-dropzone${dragActive ? ' dragging' : ''}`}
-                  onDragOver={event => {
-                    event.preventDefault()
-                    if (!wizardBusy) setDragActive(true)
-                  }}
-                  onDragLeave={event => {
-                    if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragActive(false)
-                  }}
-                  onDrop={event => {
-                    event.preventDefault()
-                    setDragActive(false)
-                    const files = event.dataTransfer.files
-                    if (files.length === 1 && files[0]) selectZip(files[0])
-                    else if (files.length > 1) setWizardError(t("apps.onlyOneZipArchiveCanBe"))
-                  }}
-                >
+                <div className="oa-dropzone">
                   <span className="oa-source-icon"><AppIcon name="folder" size={22} /></span>
                   <strong>{t("apps.selectLocalAppSource")}</strong>
                   <div className="oa-hint">{t("apps.selectASourceFolderOrDrag")}</div>
@@ -2278,25 +2245,15 @@ export function AppsPanel({
                     <button type="button" className="oa-btn oa-btn-primary" disabled={wizardBusy} onClick={() => void handleBrowseFolder()}>
                       <AppIcon name="folder" size={15} /> {t("apps.selectFolder")}
                     </button>
-                    <button type="button" className="oa-btn" disabled={wizardBusy} onClick={() => fileInputRef.current?.click()}>
-                      <AppIcon name="archive" size={15} /> {t("apps.selectZip")}
-                    </button>
-                    <input ref={fileInputRef} type="file" accept=".zip,application/zip" hidden onChange={event => {
-                      const file = event.currentTarget.files?.[0]
-                      event.currentTarget.value = ''
-                      if (file) selectZip(file)
-                    }} />
                   </div>
                 </div>
-                {(reuseSourceVersion || zipFile || sourcePath.trim()) && (
+                {(reuseSourceVersion || sourcePath.trim()) && (
                   <div className="oa-source-choice" role="status">
                     <AppIcon name="check" size={16} />
                     <span>
                       {reuseSourceVersion
-                        ? t("apps.selectedLocalSavedVSource", { version: reuseSourceVersion })
-                        : zipFile
-                          ? t("apps.selected", { name: zipFile.name, size: formatFileSize(zipFile.size) })
-                          : t("apps.localSourcePathEntered")}
+                        ? `${t("apps.selectedLocalSavedVSource", { version: reuseSourceVersion })}（本次不同步回本机目录）`
+                        : t("apps.localSourcePathEntered")}
                     </span>
                     <button type="button" className="oa-btn oa-btn-xs" disabled={wizardBusy} onClick={() => selectSourcePath('')}>{t("apps.clear")}</button>
                   </div>
@@ -2330,6 +2287,7 @@ export function AppsPanel({
                 setAppSlug(wizardJob.slug)
                 setSlugManual(true)
                 setAppDescription(wizardJob.description ?? '')
+                setSourcePath(wizardJob.sourcePath ?? '')
                 if (wizardJob.upgrade || wizardJob.published) {
                   const target = apps.find(a => a.slug === wizardJob.slug && a.can_manage === true)
                   if (target) setUpgradeTarget(target)
@@ -2345,6 +2303,33 @@ export function AppsPanel({
           {/* STEP 3 */}
           {wizardStep === 3 && wizardJob && (
             <div className="oa-deploy-review">
+              {wizardJob.sourceSync && wizardJob.sourceSync.files.length > 0 && (
+                <div
+                  className="oa-source-choice"
+                  role="status"
+                  style={{ marginBottom: 10, justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                    <AppIcon name={wizardJob.sourceSync.undone ? 'refresh' : 'check'} size={15} />
+                    <span style={{ wordBreak: 'break-all' }}>
+                      {wizardJob.sourceSync.undone
+                        ? '已撤销本次对本机源码目录的改造写入，原文件已恢复'
+                        : `已自动同步 ${wizardJob.sourceSync.files.length} 个改造文件至本机源码目录：`}
+                      {!wizardJob.sourceSync.undone && <span className="oa-mono">{wizardJob.sourceSync.sourceRoot}</span>}
+                    </span>
+                  </div>
+                  {!wizardJob.sourceSync.undone && api.appUndoSourceSync && (
+                    <button
+                      type="button"
+                      className="oa-btn oa-btn-xs"
+                      disabled={undoingSync || wizardBusy}
+                      onClick={() => void handleUndoSourceSync()}
+                    >
+                      {undoingSync ? '正在撤销…' : '撤销本次写入'}
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="oa-form-card">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                   <div>
