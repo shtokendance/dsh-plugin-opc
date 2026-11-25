@@ -104,12 +104,6 @@ interface AnalysisSession {
   followupPrompt?: string
 }
 
-const configChatPrompt = [
-  '你正在协助用户核对当前应用的本次部署草稿。保持用户选定的模型和原部署会话，用普通用户听得懂的话回答。',
-  '先调用 opc_config_read 获取当前表单中的配置项、值和可编辑状态。用户询问时解释用途；明确要求修改时只调用 opc_config_edit 提交指定的配置项，不明确时先问清楚。',
-  '只在工具确认保存后说明已更新右侧草稿。配置由用户在右侧最终确认发布。源码、Dockerfile、已绑定资源、数据库连接、持久化挂载和新增配置项涉及改造方案，请解释影响并引导用户点击「返回核对方案」，在本会话继续分析。',
-].join('\n')
-
 const jsonOutput = { schema: { type: 'string' as const }, render: (_: unknown, value: string) => [{ type: 'text' as const, text: value }] }
 
 function deliveryAgentOptions(job: DeliveryJob) {
@@ -185,25 +179,10 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     const updating = job.deliveryMode ? job.deliveryMode === 'update' : Boolean(job.upgrade)
     const deliveryPrompt = loadBundledSkillText(updating ? 'UPDATE.md' : 'SKILL.md') + '\n' +
       loadBundledSkillText('references/delivery-files.md') + '\n' + loadBundledSkillText('references/assessment.md')
-    const inConfigChat = () => !live.round && delivery.configChat.has(job.id, live.context)
     const disposers = [
       child.tools.restrict({ allow: [] }),
       child.systemPrompt.section({ name: 'opc-delivery', order: 1,
-        text: () => inConfigChat() ? configChatPrompt : live.followupPrompt ?? deliveryPrompt, complete: true, interpolate: false }),
-      child.tools.register(defineTool({ name: 'opc_config_read', description: '读取本次部署右侧的配置草稿。', parameters: {}, output: jsonOutput,
-        async execute(_, { signal }) {
-          return JSON.stringify(await delivery.configChat.read(job.id, live.context, signal))
-        },
-      }), { when: inConfigChat }),
-      child.tools.register(defineTool({ name: 'opc_config_edit', description: '保存本次部署草稿中用户明确要求修改的现有配置项。先读取最新草稿。', parameters: {
-        changes: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
-          key: { type: 'string', required: true }, value: { type: 'string', required: true },
-        } } },
-      }, output: jsonOutput,
-        async execute({ changes }, { signal }) {
-          return JSON.stringify(await delivery.configChat.edit(job.id, live.context, changes, signal))
-        },
-      }), { when: inConfigChat }),
+        text: () => live.followupPrompt ?? deliveryPrompt, complete: true, interpolate: false }),
     ]
     const registered = new Set<string>()
     live.registerRound = round => {
@@ -220,7 +199,7 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
     if (live.round) live.registerRound(live.round)
     disposers.push(child.on('agent/pre-step', async ({ signal: turnSignal }, next) => {
       const decision = await next()
-      if (decision.kind !== 'enter' || !decision.messages.length || inConfigChat()) return decision
+      if (decision.kind !== 'enter' || !decision.messages.length) return decision
       if (!live.round && decision.messages.some(message => message.source.kind === 'user' && 'rpcId' in message.source)) {
         const deployed = await delivery.getDeploymentFollowup(job.id, live.context)
         turnSignal.throwIfAborted()
@@ -230,6 +209,17 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
             '用普通用户能理解的话说明登录入口、配置项用途、在哪里操作以及怎样确认结果。信息不足时说明需要核实的内容。',
             '部署记录中的 verified 表示发布流程已完成，awaiting_page_verification 表示部署已完成但仍待页面验证，superseded 表示这是历史部署。',
             `本会话关联的部署记录：${JSON.stringify(deployed)}`,
+          ].join('\n')
+          return decision
+        }
+        const configReview = await delivery.getConfigReviewContext(job.id, live.context)
+        turnSignal.throwIfAborted()
+        if (configReview && !live.round) {
+          live.followupPrompt = [
+            '你正在原部署会话中协助用户核对当前应用的第 3 步部署配置。用普通用户听得懂的话直接回答配置项用途、填写方式以及应该在右侧表单中修改哪一项。',
+            '你只能提供解答和修改建议，无法直接修改右侧表单；请引导用户在右侧配置表单中手动修改并最终确认发布。',
+            '如果用户要求修改源码、Dockerfile、监听端口、已绑定平台资源、数据库连接、持久化挂载或新增配置项，请解释影响并引导用户点击右侧的「返回核对方案」，返回第 2 步继续调整。',
+            `当前待发布配置概览：${JSON.stringify(configReview)}`,
           ].join('\n')
           return decision
         }
@@ -258,10 +248,6 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
       return messages.length ? { ...decision, messages } : { kind: 'reject' }
     }))
     return () => { for (const dispose of disposers.reverse()) dispose?.() }
-  }
-
-  delivery.attachConfigChat = async (job, context, signal) => {
-    await openSession(job, getSession(job.id, context), { agentOptions: deliveryAgentOptions(job), signal })
   }
 
   delivery.analyze = async (job, root, feedback, signal, onSessionReady, fromChat, assessment) => {
@@ -847,7 +833,6 @@ export function attachAppAgent(ctx: Context, delivery: AppDelivery) {
   }
   ctx.effect(() => async () => {
     delivery.analyze = undefined
-    delivery.attachConfigChat = undefined
     await Promise.allSettled([...sessions.values()].map(session => session.handle?.dispose()))
     sessions.clear()
   })

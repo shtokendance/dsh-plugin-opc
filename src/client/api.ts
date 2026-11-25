@@ -293,8 +293,6 @@ export interface OpcApi {
   appCancelAnalysis?(id: string, context: string): Promise<void>
   appConfigDraft?(id: string, context: string): Promise<string>
   appSaveConfigDraft?(id: string, body: string, context: string): Promise<void>
-  appWatchConfigChat?(id: string, artifact: string, session: string, context: string, signal: AbortSignal): AsyncIterable<string>
-  appReplyConfigChat?(id: string, request: string, body: string, context: string): Promise<void>
   appLocalArtifact?(id: string, filename: string, context: string): Promise<string>
   appSaveLocalArtifact?(id: string, filename: string, context: string): Promise<string>
   appHandoff?(id: string, context: string): Promise<string>
