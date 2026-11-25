@@ -10,6 +10,7 @@ import { NoticeModal } from './NoticeModal.tsx'
 import { useI18n } from './i18n.tsx'
 import { DEFAULT_PAGE_SIZE, Pagination, paginateItems, paginationStyles } from './Pagination.tsx'
 import { WorkbenchHome, WorkbenchNavigation, type PanelKind } from './Workbench.tsx'
+import { OpcIcon } from './branding.tsx'
 import { workbenchStyles } from './workbenchStyles.ts'
 
 const css = `
@@ -182,9 +183,168 @@ const css = `
 .opc-panel .badge-ok { color: #059669; background: #ecfdf5; border-color: #a7f3d0; }
 .opc-panel .badge-warn { color: #d97706; background: #fffbeb; border-color: #fde68a; }
 .opc-panel .badge-danger { color: #dc2626; background: #fef2f2; border-color: #fecaca; }
-.opc-panel .gate { padding: 40px 24px; text-align: center; max-width: 420px; margin: 0 auto; }
-.opc-panel .gate h3 { font-size: 18px; margin: 0 0 8px; font-weight: 650; }
-.opc-panel .gate p { color: #64748b; font-size: 13px; margin-bottom: 20px; }
+.opc-panel .opc-auth-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 18px;
+  background: radial-gradient(circle at 50% 0%, #eff6ff 0%, #f8fafc 65%);
+}
+.opc-panel .opc-auth-card {
+  width: 100%;
+  max-width: 392px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
+  box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.03);
+  overflow: hidden;
+}
+.opc-panel .opc-auth-body {
+  padding: 28px 24px 22px;
+  text-align: center;
+}
+.opc-panel .opc-auth-logo {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 14px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 18px -4px rgba(37, 99, 235, 0.35);
+}
+.opc-panel .opc-auth-card h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.opc-panel .opc-auth-subtitle {
+  margin: 0 0 18px;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.55;
+}
+.opc-panel .opc-gateway-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 5px 8px 5px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+}
+.opc-panel .opc-gateway-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  flex-shrink: 0;
+}
+.opc-panel .opc-gateway-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.opc-panel .opc-gateway-edit {
+  border: 0;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.opc-panel .opc-gateway-edit:hover { background: #cbd5e1; }
+.opc-panel .opc-auth-footer {
+  padding: 16px 24px 20px;
+  background: #f8fafc;
+  border-top: 1px solid #f1f5f9;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.opc-panel .opc-auth-btn-primary {
+  width: 100%;
+  height: 42px;
+  border: 0;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+  font-size: 13.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+}
+.opc-panel .opc-auth-btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #1d4ed8 0%, #1e40af 100%);
+}
+.opc-panel .opc-auth-btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.opc-panel .opc-auth-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: #64748b;
+  text-align: center;
+}
+.opc-panel .opc-auth-pulse {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 12px;
+  border-radius: 50%;
+  background: #eff6ff;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.opc-panel .opc-auth-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(37, 99, 235, 0.25);
+  animation: opc-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.opc-panel .opc-auth-waiting-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.opc-panel .opc-auth-btn-secondary {
+  width: 100%;
+  height: 36px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.opc-panel .opc-auth-btn-secondary:hover { background: #f1f5f9; color: #0f172a; }
 
 /* Cards Grid Layout (Matching work-opc) */
 .cards-grid {
@@ -1082,28 +1242,70 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
           onSaved={() => setAppsRefreshTrigger(prev => prev + 1)}
         />
       </main>
-    ) : !state.signedIn || !context ? <div className="gate">
-      <h3>{t("panel.connectOpcWorkspace")}</h3>
-      <p>{t("panel.signInToAccessEnterpriseKbs")}</p>
-      {state.opcConfig?.platformBaseUrl && (
-        <p style={{ fontSize: 12, color: '#64748b', marginTop: -8, marginBottom: 16, wordBreak: 'break-all' }}>
-          {t("panel.platformGateway")}<code style={{ background: '#f1f5f9', padding: '2px 6px', borderRadius: 4 }}>{state.opcConfig.platformBaseUrl}</code>
-        </p>
-      )}
-      <div className="row" style={{ justifyContent: 'center' }}>
-        <button className="primary" style={{ padding: '8px 18px', fontSize: 13 }} disabled={busy || state.loginInProgress} onClick={action(async () => { setDismissedLoginErr(''); await api.startLogin() })}>
-          {t("panel.wecomSsoLogin")}
-        </button>
-        <button type="button" onClick={() => setShowSettings(true)}>
-          {t("panel.settings_2")}
-        </button>
+    ) : !state.signedIn || !context ? (
+      <div className="opc-auth-viewport">
+        <div className="opc-auth-card">
+          {state.loginInProgress ? (
+            <>
+              <div className="opc-auth-body">
+                <div className="opc-auth-pulse" aria-hidden="true">
+                  <AppIcon name="refresh" size={20} className="oa-spin" />
+                </div>
+                <h3>{t("panel.waitingBrowserAuth")}</h3>
+                <p className="opc-auth-subtitle" style={{ marginBottom: 0 }}>{t("panel.waitingBrowserAuthHint")}</p>
+              </div>
+              <div className="opc-auth-footer">
+                <div className="opc-auth-waiting-actions">
+                  {state.loginAuthorizeUrl ? (
+                    <a className="opc-auth-btn-secondary" href={state.loginAuthorizeUrl} target="_blank" rel="noreferrer">
+                      {t("panel.reopenAuthPage")}
+                    </a>
+                  ) : (
+                    <button type="button" className="opc-auth-btn-secondary" disabled={busy} onClick={action(async () => { setDismissedLoginErr(''); await api.startLogin() })}>
+                      {t("panel.reopenAuthPage")}
+                    </button>
+                  )}
+                  <button type="button" className="opc-auth-btn-secondary" onClick={action(() => api.cancelLogin())}>
+                    {t("panel.cancel")}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="opc-auth-body">
+                <div className="opc-auth-logo" aria-hidden="true">
+                  <OpcIcon size={26} />
+                </div>
+                <h3>{t("panel.connectOpcWorkspace")}</h3>
+                <p className="opc-auth-subtitle">{t("panel.signInToAccessEnterpriseKbs")}</p>
+                {state.opcConfig?.platformBaseUrl && (
+                  <div className="opc-gateway-pill" title={`${t("panel.platformGateway")}${state.opcConfig.platformBaseUrl}`}>
+                    <span className="opc-gateway-dot" aria-hidden="true" />
+                    <span className="opc-gateway-url">{state.opcConfig.platformBaseUrl}</span>
+                    <button type="button" className="opc-gateway-edit" onClick={() => setShowSettings(true)}>
+                      {t("panel.switchGateway")}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="opc-auth-footer">
+                <button
+                  type="button"
+                  className="opc-auth-btn-primary"
+                  disabled={busy}
+                  onClick={action(async () => { setDismissedLoginErr(''); await api.startLogin() })}
+                >
+                  <AppIcon name="external" size={16} />
+                  <span>{t("panel.wecomSsoLogin")}</span>
+                </button>
+                <p className="opc-auth-note">{t("panel.loginOpenBrowserHint")}</p>
+              </div>
+            </>
+          )}
+        </div>
       </div>
-      {state.loginInProgress && <div className="notice" style={{ textAlign: 'left', marginTop: 16 }}>
-        {t("panel.pleaseCompleteAuthorizationInYourBrowser")}
-        {state.loginAuthorizeUrl && <p style={{ margin: '4px 0' }}><a href={state.loginAuthorizeUrl} target="_blank" rel="noreferrer">{t("panel.reopenAuthPage")}</a></p>}
-        <button onClick={action(() => api.cancelLogin())} style={{ marginTop: 6 }}>{t("panel.cancel")}</button>
-      </div>}
-    </div> : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
+    ) : <main className={kind === 'apps' ? 'opc-panel-main opc-panel-main-apps' : 'opc-panel-main'}>
       {kind === 'home' && <WorkbenchHome onSelect={selectPage} api={api} visible={visible} onOpenPluginDetail={onOpenPluginDetail} />}
       {/* Apps View */}
       {appsOpened && appContextId && (
