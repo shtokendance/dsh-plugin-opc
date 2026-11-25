@@ -218,6 +218,16 @@ export class OpcRemoteService extends TypertRemoteService {
   @Remote
   async appPrepare(id: string, proposalHash: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.prepare(id, proposalHash, expectedContextId)) }
   @Remote
+  async appPrepareWithOptions(id: string, proposalHash: string, optionsJson: string, expectedContextId: string): Promise<string> {
+    const options = optionsJson ? JSON.parse(optionsJson) : undefined
+    return JSON.stringify(await this.delivery.prepare(id, proposalHash, expectedContextId, options))
+  }
+  @Remote
+  async appUndoSourceSync(id: string, optionsJson: string, expectedContextId: string): Promise<string> {
+    const options = optionsJson ? JSON.parse(optionsJson) : undefined
+    return JSON.stringify(await this.delivery.undoSourceSync(id, expectedContextId, options))
+  }
+  @Remote
   async appReopenReview(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.reopenReview(id, expectedContextId)) }
   @Remote
   async appReopenDeployment(id: string, expectedContextId: string): Promise<string> { return JSON.stringify(await this.delivery.reopenDeployment(id, expectedContextId)) }

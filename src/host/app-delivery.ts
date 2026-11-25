@@ -26,8 +26,19 @@ export interface DeliveryAssessmentRun {
   phase: DeliveryAssessment['phase']
   result?: DeliveryAssessment
 }
+export interface SourceSyncRecord {
+  revision: string
+  sourceRoot: string
+  files: string[]
+  syncedAt: number
+  undone?: boolean
+  undoneAt?: number
+}
 export interface DeliveryJob {
   id: string; name: string; slug: string; url: string; session: string
+  sourcePath?: string
+  sourceSync?: SourceSyncRecord
+  sourceSyncConflicts?: string[]
   analysisSessionId?: string
   deliveryMode?: 'initial' | 'update'
   archivedRevision?: string
@@ -856,32 +867,33 @@ export class AppDelivery {
       conversation: previous?.conversation?.filter(message => message.role === 'user'),
       session,
       status: 'importing',
-      events: ['正在创建源码隔离副本'],
+      events: [reusedSource ? '正在复用历史发布版本源码副本' : '正在扫描本机源码目录'],
     }
     const root = join(scope.directory, job.id)
     await this.exclusive(job.id, async () => {
       await this.save(root, job)
       try {
         let source: string
+        let liveDirectory = false
         if (reusedSource) {
           source = reusedSource
         } else if (input.zip) {
-          if (typeof input.zip !== 'string' || input.zip.length > 90_000_000) throw new Error('ZIP 不能超过 64 MiB')
-          const bytes = Buffer.from(input.zip, 'base64')
-          if (bytes.length > 64 * 1024 * 1024) throw new Error('ZIP 不能超过 64 MiB')
-          source = join(root, 'uploaded.zip'); await writeFile(source, bytes, { mode: 0o600 })
+          throw new Error('不再支持 ZIP 压缩包上传，请直接选择本机源码文件夹路径')
         } else {
           const normalizedSource = normalizeLocalSourcePath(input.source)
-          if (!normalizedSource || !isAbsolute(normalizedSource)) throw new Error('请选择 ZIP 或填写本机源码目录的完整路径')
-          source = normalizedSource
+          if (!normalizedSource || !isAbsolute(normalizedSource)) throw new Error('请选择或填写本机源码文件夹的完整路径')
+          source = resolve(normalizedSource)
           const entry = await lstat(source)
-          if (entry.isSymbolicLink() || (!entry.isDirectory() && (!entry.isFile() || !/\.zip$/i.test(source)))) {
-            throw new Error('请输入本机源码文件夹或 ZIP 的完整路径')
+          if (entry.isSymbolicLink() || !entry.isDirectory()) {
+            throw new Error('请选择本机源码文件夹路径（不再支持 ZIP 压缩包）')
           }
-          if (entry.isFile() && entry.size > 64 * 1024 * 1024) throw new Error('ZIP 不能超过 64 MiB')
+          job.sourcePath = source
+          liveDirectory = true
         }
-        await worker({ action: 'prepare', root, source, slug: job.slug, url: job.url }, scope.signal)
-        scope.assertCurrent(); job.status = 'draft'; job.events.push('已导入独立副本，原项目保持不变')
+        await worker({ action: 'prepare', root, source, slug: job.slug, url: job.url, live_directory: liveDirectory }, scope.signal)
+        scope.assertCurrent()
+        job.status = 'draft'
+        job.events.push(liveDirectory ? '已关联本机源码目录，改造方案确认后将自动同步回该目录' : '已复用历史发布版本源码副本（本次不会写回本机目录）')
       } catch (error) { job.status = 'failed'; job.failureStage = 'import'; job.error = String(error) }
       await this.save(root, job)
     })
@@ -1404,10 +1416,11 @@ export class AppDelivery {
     const allowUnresolved = hasQuestions || adminAccountPending
     // A complete AI proposal can keep its validated artifacts for the review
     // step. Blocked proposals need only validation until the user can continue.
-    const preparedRevision = options?.dockerfileOnly && !allowUnresolved && proposal.config_format !== 1 ? randomUUID().replaceAll('-', '') : undefined
+    const preparedRevision = !job.sourcePath && options?.dockerfileOnly && !allowUnresolved && proposal.config_format !== 1 ? randomUUID().replaceAll('-', '') : undefined
     const validated = await worker({
       action: preparedRevision ? 'bundle' : 'validate',
       revision: preparedRevision,
+      sync_to_source: false,
       root,
       proposal,
       allow_unresolved: allowUnresolved,
@@ -1455,7 +1468,7 @@ export class AppDelivery {
       ? '等待你在左侧会话回复' : '改造方案已通过校验')
     await this.save(root, job)
   }
-  async prepare(id: string, proposalHash: string, expected: string) {
+  async prepare(id: string, proposalHash: string, expected: string, options?: { forceOverwrite?: boolean }) {
     const scope = this.scope(expected)
     return this.exclusive(id, async () => {
       const { root, job } = await this.open(scope.directory, id)
@@ -1464,23 +1477,45 @@ export class AppDelivery {
         throw new Error('方案已变化，请刷新后核对')
       }
       if (analysisQuestions(job.proposal).length) throw new Error('请先在左侧会话处理待确认事项')
-      await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected)
+      await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected, false, undefined, options?.forceOverwrite === true)
       return this.public(job, root)
     })
   }
 
-  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, expected: string, autoPrepared = false, confirmedConfigs?: AppDocument[]) {
+  async undoSourceSync(id: string, expected: string, options?: { force?: boolean }) {
+    const scope = this.scope(expected)
+    return this.exclusive(id, async () => {
+      const { root, job } = await this.open(scope.directory, id)
+      if (!job.sourceSync || job.sourceSync.undone) {
+        throw new Error('当前任务没有可撤销的本地源码同步记录')
+      }
+      await worker({
+        action: 'undo_source_sync',
+        root,
+        revision: job.sourceSync.revision,
+        force: options?.force === true,
+      }, scope.signal)
+      scope.assertCurrent()
+      job.sourceSync = { ...job.sourceSync, undone: true, undoneAt: Date.now() }
+      job.events.push('已撤销本次对本机源码目录的改造写入，原文件已恢复')
+      await this.save(root, job)
+      return this.public(job, root)
+    })
+  }
+
+  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, expected: string, autoPrepared = false, confirmedConfigs?: AppDocument[], forceOverwrite = false) {
     job.status = 'preparing'
     job.failureStage = undefined
     job.error = undefined
-    job.events.push('正在生成并检查交付包')
+    job.sourceSyncConflicts = undefined
+    job.events.push(job.sourcePath ? '正在同步改造至本机源码并生成定版交付包' : '正在生成并检查交付包')
     await this.save(root, job)
     try {
       if (job.proposal?.config_format === 1) {
         job.proposal = { ...job.proposal, effective_configs: confirmedConfigs ?? await this.previewDeliveryConfig(job, root, expected, signal, true) }
       }
       const prepared = this.preparedProposals.get(job.id)
-      const reusable = prepared && prepared.proposalHash === fingerprint(job.proposal) ? prepared : undefined
+      const reusable = !job.sourcePath && prepared && prepared.proposalHash === fingerprint(job.proposal) ? prepared : undefined
       const revision = reusable?.revision ?? randomUUID().replaceAll('-', '')
       const result = reusable?.result ?? await worker({
         action: 'bundle',
@@ -1495,12 +1530,23 @@ export class AppDelivery {
         expected_port: job.portAuto ? null : (job.port ?? 8080),
         revision_count: job.revisionCount ?? 1,
         feedback: job.feedbackHistory ?? '',
+        sync_to_source: Boolean(job.sourcePath),
+        force_overwrite: forceOverwrite,
       }, signal)
       signal.throwIfAborted(); assertCurrent()
       if (reusable) this.preparedProposals.delete(job.id)
       job.revision = revision
       job.hashes = result.summary.files
       job.proposal = result.proposal ?? job.proposal
+      if (result.source_sync?.synced) {
+        job.sourceSync = {
+          revision,
+          sourceRoot: result.source_sync.source_root,
+          files: Array.isArray(result.source_sync.files) ? result.source_sync.files : [],
+          syncedAt: Number(result.source_sync.synced_at) || Date.now(),
+        }
+        job.events.push(`已将 ${job.sourceSync.files.length} 个改造文件同步至本机源码目录，并生成定版交付快照`)
+      }
       const bundledPort = job.proposal?.contract?.runtime?.port
       if (Number.isInteger(bundledPort) && bundledPort >= 1 && bundledPort <= 65535) {
         job.port = bundledPort
@@ -1565,7 +1611,20 @@ export class AppDelivery {
       signal.throwIfAborted()
       job.status = 'failed'
       job.failureStage = 'preparation'
-      job.error = String(error)
+      const rawMsg = error instanceof Error ? error.message : String(error)
+      const conflictPrefix = 'SOURCE_CONFLICT:'
+      if (rawMsg.includes(conflictPrefix)) {
+        try {
+          const parsed = JSON.parse(rawMsg.slice(rawMsg.indexOf(conflictPrefix) + conflictPrefix.length))
+          const conflicts = Array.isArray(parsed?.conflicts) ? parsed.conflicts.map(String) : []
+          job.sourceSyncConflicts = conflicts
+          job.error = `本机源码目录中以下文件在分析期间已被修改：${conflicts.join('、')}。为避免覆盖你的改动，本次未自动写入；你可以确认覆盖后继续，或返回重新分析。`
+        } catch {
+          job.error = rawMsg
+        }
+      } else {
+        job.error = String(error)
+      }
     }
     await this.save(root, job)
   }

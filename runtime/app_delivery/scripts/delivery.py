@@ -189,22 +189,99 @@ def text_of(path):
 
 
 def inspect_source(source):
+    source = Path(source).resolve()
     files, findings = [], []
-    for path in sorted(source.rglob("*")):
-        require(not path.is_symlink(), "source contains symlink")
-        if not path.is_file():
-            continue
-        if any(path.name.lower().endswith(sfx) for sfx in TRANSIENT_FILE_SUFFIXES):
-            continue
-        rel = path.relative_to(source).as_posix()
-        raw = path.read_bytes()
-        files.append({"path": rel, "bytes": len(raw), "sha256": sha(raw)})
-        if len(raw) <= 5_000_000:
-            text = text_of(path)
-            if text is not None:
-                for line in secret_lines(text, rel):
-                    findings.append({"path": rel, "line": line, "kind": "possible-secret", "value": "[REDACTED]"})
+    count, total = 0, 0
+    for parent, dirs, names in os.walk(source, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED)
+        for name in dirs:
+            require(not (Path(parent) / name).is_symlink(), "source contains symlink")
+        for name in sorted(names):
+            if name in EXCLUDED or name.endswith(("-wal", "-shm")) or any(name.lower().endswith(sfx) for sfx in TRANSIENT_FILE_SUFFIXES):
+                continue
+            path = Path(parent) / name
+            require(not path.is_symlink() and path.is_file(), "source contains symlink or special file")
+            size = path.stat().st_size
+            count, total = count + 1, total + size
+            require(count <= 200000 and size <= 1024 * 1024 * 1024 and total <= 4 * 1024 * 1024 * 1024, "source directory exceeds snapshot limits")
+            rel = path.relative_to(source).as_posix()
+            raw = path.read_bytes()
+            files.append({"path": rel, "bytes": len(raw), "sha256": sha(raw)})
+            if len(raw) <= 5_000_000:
+                text = text_of(path)
+                if text is not None:
+                    for line in secret_lines(text, rel):
+                        findings.append({"path": rel, "line": line, "kind": "possible-secret", "value": "[REDACTED]"})
+    files.sort(key=lambda item: item["path"])
     return files, findings
+
+
+def scan_directory(work_dir, source_dir, slug, url):
+    work = Path(work_dir).resolve()
+    require(not work.exists(), "work directory already exists; choose a fresh directory")
+    require(SLUG.fullmatch(slug) and 3 <= len(slug) <= 40, "invalid slug")
+    valid_url(url)
+    source = Path(source_dir).resolve()
+    require(source.is_dir() and not source.is_symlink(), "source directory does not exist")
+    require(not work.is_relative_to(source), "work directory must be outside the source directory")
+    validate_sidecars(source)
+    files, findings = inspect_source(source)
+    work.mkdir(parents=True, mode=0o700)
+    inventory = {
+        "skill_version": VERSION,
+        "run_id": uuid.uuid4().hex,
+        "slug": slug,
+        "base_url": url.rstrip("/"),
+        "source_type": "live-directory",
+        "source_root": str(source),
+        "files": files,
+        "possible_secrets": findings,
+        "analysis_complete": False,
+    }
+    save(work / "inventory.json", inventory)
+    return {
+        "work_dir": str(work),
+        "source_root": str(source),
+        "file_count": len(files),
+        "possible_secret_locations": findings,
+        "next": "Agent must analyze source, ask the user, and author review.json/app-contract.json",
+    }
+
+
+def snapshot_directory(source_dir, target_work, review_dir):
+    source = Path(source_dir).resolve()
+    target = Path(target_work).resolve()
+    require(source.is_dir() and not source.is_symlink(), "source directory does not exist")
+    require(not target.is_relative_to(source), "work directory must be outside the source directory")
+    validate_sidecars(source)
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dest_source = target / "source"
+    dest_source.mkdir(parents=True, exist_ok=True, mode=0o700)
+    count, total = 0, 0
+    for parent, dirs, names in os.walk(source, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED)
+        for name in dirs:
+            require(not (Path(parent) / name).is_symlink(), "source directory contains a symlink; inspect it explicitly")
+        for name in sorted(names):
+            if name in EXCLUDED or name.endswith(("-wal", "-shm")) or any(name.lower().endswith(sfx) for sfx in TRANSIENT_FILE_SUFFIXES):
+                continue
+            item = Path(parent) / name
+            require(not item.is_symlink() and item.is_file(), "source contains a symlink or special file")
+            size = item.stat().st_size
+            count, total = count + 1, total + size
+            require(count <= 200000 and size <= 1024 * 1024 * 1024 and total <= 4 * 1024 * 1024 * 1024, "source directory exceeds snapshot limits")
+            rel = item.relative_to(source).as_posix()
+            dest = relative(dest_source, rel)
+            dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if is_sqlite(item):
+                snapshot_database(item, dest)
+            else:
+                shutil.copy2(item, dest)
+            dest.chmod(0o700 if (item.stat().st_mode & 0o111) else 0o600)
+    normalize_extracted_databases(dest_source)
+    inv_src = Path(review_dir) / "inventory.json"
+    if inv_src.is_file():
+        shutil.copy2(inv_src, target / "inventory.json")
 
 
 def zip_member_path(member):

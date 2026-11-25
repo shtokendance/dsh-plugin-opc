@@ -172,6 +172,16 @@ export interface AppDeliveryJob {
   assessmentPending?: boolean
   assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
   id: string
+  sourcePath?: string
+  sourceSync?: {
+    revision: string
+    sourceRoot: string
+    files: string[]
+    syncedAt: number
+    undone?: boolean
+    undoneAt?: number
+  }
+  sourceSyncConflicts?: string[]
   requestId?: string
   startupCheck?: AppDeploymentStartupCheck
   analysisSessionId?: string
@@ -287,6 +297,8 @@ export interface OpcApi {
   appAnalyze(id: string, feedback: string, session: string, context: string): Promise<string>
   appAnalyzeWithMode?(id: string, feedback: string, session: string, mode: string, context: string): Promise<string>
   appPrepare(id: string, hash: string, context: string): Promise<string>
+  appPrepareWithOptions?(id: string, hash: string, optionsJson: string, context: string): Promise<string>
+  appUndoSourceSync?(id: string, optionsJson: string, context: string): Promise<string>
   appReopenReview?(id: string, context: string): Promise<string>
   appReopenDeployment(id: string, context: string): Promise<string>
   appCancelDeployment?(id: string, requestId: string, context: string): Promise<string>

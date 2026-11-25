@@ -317,14 +317,16 @@ export function AppDeliveryReview({
     }
   }
 
-  const prepare = async () => {
+  const prepare = async (forceOverwrite = false) => {
     const pHash = currentRef.current?.proposalHash
     if (!pHash || inFlight.current) return
     inFlight.current = true
     setBusy(true)
     setError('')
     try {
-      const raw = await api.appPrepare(jobId, pHash, contextId)
+      const raw = forceOverwrite && api.appPrepareWithOptions
+        ? await api.appPrepareWithOptions(jobId, pHash, JSON.stringify({ forceOverwrite: true }), contextId)
+        : await api.appPrepare(jobId, pHash, contextId)
       const result = JSON.parse(raw) as AppDeliveryJob
       accept(result)
       if (result.status !== 'ready') setError(result.error || t("apps.review.deliveryBundlePreparationIncomplete"))
@@ -653,8 +655,13 @@ export function AppDeliveryReview({
                     : t("apps.review.pleaseRetryTheCurrentOperation")}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {job?.failureStage === 'preparation' && !!job?.sourceSyncConflicts?.length && api.appPrepareWithOptions && !questions.length && (
+                  <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void prepare(true)}>
+                    覆盖本地冲突文件并继续
+                  </button>
+                )}
                 {(job?.status === 'review' || job?.failureStage === 'preparation') && !questions.length && (
-                  <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={running} onClick={() => void prepare()}>
+                  <button type="button" className={`oa-btn oa-btn-sm${job?.sourceSyncConflicts?.length ? '' : ' oa-btn-primary'}`} disabled={running} onClick={() => void prepare(false)}>
                     {t("apps.review.retryPreparation")}
                   </button>
                 )}

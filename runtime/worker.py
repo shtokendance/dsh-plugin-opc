@@ -7,6 +7,7 @@ import difflib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import posixpath
 import re
@@ -79,6 +80,216 @@ def load_json_if_exists(path: Path, default):
         except Exception:
             return default
     return default
+
+
+def resolve_source_dir(root: Path, *, required: bool = True) -> tuple[Path, bool]:
+    """Resolve the active source directory. Returns (path, is_live_directory)."""
+    inv = load_json_if_exists(root / "review/inventory.json", {})
+    if isinstance(inv, dict) and inv.get("source_type") == "live-directory" and isinstance(inv.get("source_root"), str) and inv["source_root"]:
+        source = Path(inv["source_root"]).resolve()
+        if required and (not source.is_dir() or source.is_symlink()):
+            raise ValueError(f"本机源码目录不存在或不可访问：{source}")
+        return source, True
+    return root / "review/source", False
+
+
+def _atomic_write_text(target: Path, content: str, executable: bool) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent,
+            prefix=f".{target.name}-",
+            suffix=".tmp",
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(content)
+        tmp_path.chmod(0o755 if executable else 0o644)
+        d.atomic_replace(tmp_path, target)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def _refresh_live_inventory(root: Path, source_dir: Path) -> None:
+    inv_path = root / "review/inventory.json"
+    inv = load_json_if_exists(inv_path, {})
+    if not isinstance(inv, dict) or inv.get("source_type") != "live-directory":
+        return
+    files, findings = d.inspect_source(source_dir)
+    inv["files"] = files
+    inv["possible_secrets"] = findings
+    d.save(inv_path, inv)
+
+
+def sync_changes_to_live_source(
+    root: Path,
+    source_dir: Path,
+    revision: str,
+    changes: list[dict],
+    *,
+    force_overwrite: bool = False,
+) -> dict:
+    """Atomically write approved proposal changes back to the user's live source directory with backup and conflict check."""
+    d.require(isinstance(revision, str) and revision.isalnum(), "Invalid revision")
+    if not changes:
+        return {"synced": False, "revision": revision, "source_root": str(source_dir), "files": [], "synced_at": int(time.time() * 1000)}
+
+    inv = load_json_if_exists(root / "review/inventory.json", {})
+    baseline = {
+        item["path"]: item["sha256"]
+        for item in (inv.get("files") if isinstance(inv, dict) else []) or []
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and isinstance(item.get("sha256"), str)
+    }
+
+    seen = set()
+    plan_items = []
+    conflicts = []
+    for change in changes:
+        rel = change["path"]
+        d.require(rel not in seen, "Duplicate file change")
+        seen.add(rel)
+        d.require(not any(part in d.EXCLUDED or part == ".coworker" for part in Path(rel).parts), "禁止写入版本库或受保护目录：" + rel)
+        target = d.relative(source_dir, rel)
+        d.require(not target.is_symlink(), "拒绝写入符号链接：" + rel)
+        d.require(not target.exists() or target.is_file(), "同步目标必须是普通文件：" + rel)
+        content = change.get("content")
+        d.require(isinstance(content, str) and len(content.encode("utf-8")) <= 2_000_000, "Invalid complete file content")
+        new_bytes = content.encode("utf-8")
+        new_sha = d.sha(new_bytes)
+        existed = target.is_file()
+        current_sha = d.sha(target.read_bytes()) if existed else None
+        if not force_overwrite:
+            if rel in baseline:
+                if not existed or (current_sha != baseline[rel] and current_sha != new_sha):
+                    conflicts.append(rel)
+            elif existed and current_sha != new_sha:
+                conflicts.append(rel)
+        executable = bool((existed and target.stat().st_mode & 0o111) or change.get("executable") is True)
+        plan_items.append({
+            "path": rel,
+            "target": target,
+            "content": content,
+            "executable": executable,
+            "existed": existed,
+            "before_sha256": current_sha,
+            "after_sha256": new_sha,
+        })
+
+    if conflicts:
+        raise ValueError("SOURCE_CONFLICT:" + json.dumps({"conflicts": conflicts}, ensure_ascii=False))
+
+    backup_dir = root / "backups" / revision
+    backup_files_dir = backup_dir / "files"
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    manifest_files = []
+    for item in plan_items:
+        if item["existed"]:
+            bpath = d.relative(backup_files_dir, item["path"])
+            bpath.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(item["target"], bpath)
+        manifest_files.append({
+            "path": item["path"],
+            "existed": item["existed"],
+            "before_sha256": item["before_sha256"],
+            "after_sha256": item["after_sha256"],
+        })
+
+    synced_at = int(time.time() * 1000)
+    manifest = {
+        "revision": revision,
+        "source_root": str(source_dir),
+        "synced_at": synced_at,
+        "undone": False,
+        "files": manifest_files,
+    }
+    d.save(backup_dir / "manifest.json", manifest)
+
+    written = []
+    try:
+        for item in plan_items:
+            _atomic_write_text(item["target"], item["content"], item["executable"])
+            written.append(item)
+    except Exception:
+        for item in reversed(written):
+            try:
+                if item["existed"]:
+                    bpath = d.relative(backup_files_dir, item["path"])
+                    if bpath.is_file():
+                        shutil.copy2(bpath, item["target"])
+                else:
+                    item["target"].unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+    _refresh_live_inventory(root, source_dir)
+    return {
+        "synced": True,
+        "revision": revision,
+        "source_root": str(source_dir),
+        "files": [item["path"] for item in plan_items],
+        "synced_at": synced_at,
+    }
+
+
+def undo_source_sync(root: Path, revision: str, *, force: bool = False) -> dict:
+    """Restore user's live source directory from a revision backup created during sync."""
+    d.require(isinstance(revision, str) and revision.isalnum(), "无效的同步批次")
+    backup_dir = root / "backups" / revision
+    manifest_path = backup_dir / "manifest.json"
+    d.require(manifest_path.is_file(), "找不到该版本的本地源码同步备份")
+    manifest = d.load(manifest_path)
+    d.require(not manifest.get("undone"), "该批次的本地源码同步已经撤销")
+    source_dir = Path(manifest["source_root"]).resolve()
+    d.require(source_dir.is_dir() and not source_dir.is_symlink(), f"本机源码目录不存在或不可访问：{source_dir}")
+
+    entries = manifest.get("files") or []
+    conflicts = []
+    for entry in entries:
+        rel = entry["path"]
+        target = d.relative(source_dir, rel)
+        if not force and target.is_file():
+            current_sha = d.sha(target.read_bytes())
+            if current_sha != entry.get("after_sha256"):
+                conflicts.append(rel)
+    if conflicts:
+        raise ValueError("以下文件在同步后又被手动修改，已取消自动撤销以免覆盖你的新改动：" + "、".join(conflicts))
+
+    restored = []
+    removed = []
+    backup_files_dir = backup_dir / "files"
+    for entry in entries:
+        rel = entry["path"]
+        target = d.relative(source_dir, rel)
+        if entry.get("existed"):
+            bpath = d.relative(backup_files_dir, rel)
+            d.require(bpath.is_file(), "备份文件缺失，无法恢复：" + rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}-", suffix=".tmp", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                shutil.copy2(bpath, tmp_path)
+                d.atomic_replace(tmp_path, target)
+            finally:
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
+            restored.append(rel)
+        else:
+            if target.is_file() and not target.is_symlink():
+                target.unlink()
+            removed.append(rel)
+
+    manifest["undone"] = True
+    manifest["undone_at"] = int(time.time() * 1000)
+    d.save(manifest_path, manifest)
+    _refresh_live_inventory(root, source_dir)
+    return {"undone": True, "revision": revision, "restored": restored, "removed": removed}
 
 
 def validate_file_change(source: Path, change: dict, dockerfile_only=False):
@@ -450,7 +661,7 @@ def resolve_and_enrich_proposal(
                    if not isinstance(issue.get(key), str) or not issue[key].strip()]
         d.require(not missing, f"issues[{index}] 缺少有效字段：{', '.join(missing)}")
     d.require(isinstance(proposal.get("contract"), dict), "业务契约必须是对象")
-    source = root / "review/source"
+    source, _ = resolve_source_dir(root)
     skill_delivery = proposal.get("delivery_format") == 1
     draft_files = load_json_if_exists(root / "draft_files.json", {})
     resolved_changes = []
@@ -661,9 +872,11 @@ def resolve_and_enrich_proposal(
 
 def apply_plan(root, proposal, target, *, repair=False, failed_revision="", failure_feedback="", expected_port=None,
                revision_count=1, feedback_text="", admin_reply=None, previous_skill_markdown="", reuse_source_admin=False,
-               dockerfile_only=False):
+               dockerfile_only=False, revision="", sync_to_source=False, force_overwrite=False):
     original = root / "review"
-    d.require(d.inspect_source(original / "source")[0] == d.load(original / "inventory.json")["files"], "Source changed; import again")
+    source_dir, is_live = resolve_source_dir(root)
+    if not is_live:
+        d.require(d.inspect_source(original / "source")[0] == d.load(original / "inventory.json")["files"], "Source changed; import again")
     d.require(isinstance(proposal.get("summary"), str) and proposal["summary"].strip(), "summary required")
     proposal, discovery_report, transformation_report = resolve_and_enrich_proposal(
         root,
@@ -678,18 +891,44 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
         dockerfile_only=dockerfile_only,
     )
     d.require(not (proposal.get("unresolved") or proposal["contract"].get("unresolved")), "Resolve outstanding questions before preparation")
-    shutil.copytree(original, target)
-    seen = set()
-    for change in proposal.get("changes", []):
-        name = change["path"]
-        d.require(name not in seen, "Duplicate file change")
-        seen.add(name)
-        p = d.relative(target / "source", name)
-        executable = (p.exists() and p.stat().st_mode & 0o111) or change.get("executable") is True
-        d.require(isinstance(change.get("content"), str) and len(change["content"]) <= 2_000_000, "Invalid complete file content")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(change["content"], encoding="utf-8")
-        p.chmod(0o700 if executable else 0o600)
+    pre_sync_diffs = compute_change_diffs(source_dir, proposal.get("changes", []), values_visible=proposal.get("delivery_format") == 1)
+    sync_result = None
+    if is_live:
+        if sync_to_source and revision and proposal.get("changes"):
+            sync_result = sync_changes_to_live_source(
+                root,
+                source_dir,
+                revision,
+                proposal.get("changes", []),
+                force_overwrite=force_overwrite,
+            )
+            d.snapshot_directory(source_dir, target, original)
+        else:
+            d.snapshot_directory(source_dir, target, original)
+            seen = set()
+            for change in proposal.get("changes", []):
+                name = change["path"]
+                d.require(name not in seen, "Duplicate file change")
+                seen.add(name)
+                p = d.relative(target / "source", name)
+                executable = (p.exists() and p.stat().st_mode & 0o111) or change.get("executable") is True
+                d.require(isinstance(change.get("content"), str) and len(change["content"]) <= 2_000_000, "Invalid complete file content")
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(change["content"], encoding="utf-8")
+                p.chmod(0o700 if executable else 0o600)
+    else:
+        shutil.copytree(original, target)
+        seen = set()
+        for change in proposal.get("changes", []):
+            name = change["path"]
+            d.require(name not in seen, "Duplicate file change")
+            seen.add(name)
+            p = d.relative(target / "source", name)
+            executable = (p.exists() and p.stat().st_mode & 0o111) or change.get("executable") is True
+            d.require(isinstance(change.get("content"), str) and len(change["content"]) <= 2_000_000, "Invalid complete file content")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(change["content"], encoding="utf-8")
+            p.chmod(0o700 if executable else 0o600)
     contract = proposal["contract"]
     if proposal.get("delivery_format") == 1:
         inputs = d.context_files(target, contract)
@@ -697,13 +936,13 @@ def apply_plan(root, proposal, target, *, repair=False, failed_revision="", fail
             d.require(change["path"] in inputs, "交付文件未加入 build_context：" + change["path"])
     login = None
     if proposal.get("delivery_format") != 1:
-        login = resolve_account(original / "source", contract, admin_reply, previous_skill_markdown)
+        login = resolve_account(target / "source", contract, admin_reply, previous_skill_markdown)
         apply_account(target, contract, login)
     d.save(target / "app-contract.json", contract)
     d.save(target / "review.json", {"kind": "ai-technical", "scope": "deployment-adaptation", "source": "DSH isolated preparation; deployment requires separate user confirmation", "approved_issue_ids": [c["id"] for c in proposal.get("changes", [])] or ["NO_SOURCE_CHANGES"], "unresolved": []})
     (target / "analysis.md").write_text(proposal["summary"], encoding="utf-8")
     d.check_work(target, require_legacy_probe=proposal.get("delivery_format") != 1)
-    return proposal, discovery_report, transformation_report, login
+    return proposal, discovery_report, transformation_report, login, sync_result, pre_sync_diffs
 
 
 def read_skill_credentials(source, contract):
@@ -848,46 +1087,51 @@ def word_pattern(keys: set[str]) -> re.Pattern | None:
 
 
 def source_configuration(root: Path, origins=None, *, values_visible=False) -> dict:
-    source = root / "review/source"
+    source, _ = resolve_source_dir(root)
     generated_keys, original_sources = origins if origins is not None else historical_config_origins(root, source)
     files = []
     references = set()
-    for path in sorted(source.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        name = path.relative_to(source).as_posix()
-        stem = path.stem.lower()
-        suffix = path.suffix.lower()
-        is_config = path.name.startswith(".env") or suffix in {".properties", ".ini", ".conf", ".toml", ".yaml", ".yml"} or (
-            suffix == ".json" and (stem.startswith(("config", "settings", "appsettings")) or "config" in path.relative_to(source).parts[:-1])
-        )
-        if is_config:
-            before = original_sources.get(name)
-            if before is not None and not (before / name).is_file():
+    for parent, dirs, names in os.walk(source, followlinks=False):
+        dirs[:] = sorted(item for item in dirs if item not in d.EXCLUDED)
+        for fname in sorted(names):
+            if fname in d.EXCLUDED:
                 continue
-            fields = []
-            for field in original_fields(source, name):
-                ref = field["source"]
-                key = ".".join(map(str, ref["keys"]))
-                value = original_value(source, ref)
-                if key in generated_keys:
+            path = Path(parent) / fname
+            if path.is_symlink() or not path.is_file():
+                continue
+            name = path.relative_to(source).as_posix()
+            stem = path.stem.lower()
+            suffix = path.suffix.lower()
+            is_config = path.name.startswith(".env") or suffix in {".properties", ".ini", ".conf", ".toml", ".yaml", ".yml"} or (
+                suffix == ".json" and (stem.startswith(("config", "settings", "appsettings")) or "config" in path.relative_to(source).parts[:-1])
+            )
+            if is_config:
+                before = original_sources.get(name)
+                if before is not None and not (before / name).is_file():
                     continue
-                if before is not None:
-                    try:
-                        if original_value(before, ref) != value:
-                            continue
-                    except ValueError:
+                fields = []
+                for field in original_fields(source, name):
+                    ref = field["source"]
+                    key = ".".join(map(str, ref["keys"]))
+                    value = original_value(source, ref)
+                    if key in generated_keys:
                         continue
-                sensitive = SENSITIVE_KEY_RE.search(key)
-                if not values_visible and value and (sensitive or d.secret_lines(json.dumps(key) + ": " + json.dumps(value), name)):
-                    value = "[REDACTED]"
-                fields.append({"key": key, "value": value})
-            entry = {"path": name, "fields": fields}
-            if is_example_config_path(name):
-                entry["is_example"] = True
-            files.append(entry)
-        if suffix in ENV_REFERENCE_SUFFIXES or path.name == "Dockerfile":
-            references.update(environment_references(path, source_text(path) or ""))
+                    if before is not None:
+                        try:
+                            if original_value(before, ref) != value:
+                                continue
+                        except ValueError:
+                            continue
+                    sensitive = SENSITIVE_KEY_RE.search(key)
+                    if not values_visible and value and (sensitive or d.secret_lines(json.dumps(key) + ": " + json.dumps(value), name)):
+                        value = "[REDACTED]"
+                    fields.append({"key": key, "value": value})
+                entry = {"path": name, "fields": fields}
+                if is_example_config_path(name):
+                    entry["is_example"] = True
+                files.append(entry)
+            if suffix in ENV_REFERENCE_SUFFIXES or path.name == "Dockerfile":
+                references.update(environment_references(path, source_text(path) or ""))
     return {"files": files, "references": sorted(references - generated_keys)}
 
 
@@ -895,7 +1139,7 @@ def validate_config_origins(root: Path, contract: dict):
     configs = contract.get("configs", [])
     if not configs:
         return
-    source = root / "review/source"
+    source, _ = resolve_source_dir(root)
     origins = historical_config_origins(root, source)
     generated_keys, _ = origins
     references = set(source_configuration(root, origins)["references"])
@@ -951,7 +1195,8 @@ def main(body):
         return {"name": name, "start": start, "text": text[start - 1:page_end - 1],
                 "next_start": page_end if page_end <= len(text) else None}
     if action == "original_config_values":
-        values, _ = extract_original_config_values(root / "review/source", body.get("configs", []))
+        source_dir, _ = resolve_source_dir(root)
+        values, _ = extract_original_config_values(source_dir, body.get("configs", []))
         return values
     if action == "redact_feedback":
         return redact(str(body.get("text", "")), body.get("path", ""))
@@ -959,7 +1204,7 @@ def main(body):
         job = body["job"]
         revision = job.get("revision")
         d.require(not revision or (isinstance(revision, str) and revision.isalnum()), "Invalid revision")
-        source = root / revision / "approved/source" if revision else root / "review/source"
+        source = root / revision / "approved/source" if revision else resolve_source_dir(root)[0]
         inventory, _ = d.inspect_source(source)
         snapshot = root / "handoff" / uuid.uuid4().hex
         snapshot.mkdir(parents=True, mode=0o700)
@@ -998,12 +1243,13 @@ def main(body):
             errors = delivery_declaration_errors(proposal["contract"])
             d.require(not errors, "\n".join(errors))
         # Remote/restored version records can lack a local source snapshot.
-        if (root / "review/source").is_dir():
+        source_dir, _ = resolve_source_dir(root, required=False)
+        if source_dir.is_dir():
             for change in proposal.get("changes", []):
                 if proposal.get("delivery_format") == 1:
-                    validate_skill_file(root / "review/source", change)
+                    validate_skill_file(source_dir, change)
                 else:
-                    validate_file_change(root / "review/source", change)
+                    validate_file_change(source_dir, change)
             if proposal.get("delivery_format") != 1:
                 validate_config_origins(root, proposal["contract"])
         return {"valid": True}
@@ -1015,16 +1261,22 @@ def main(body):
         validate_auth_probe_coverage(body["contract"])
         return {"valid": True}
     if action == "prepare":
+        if body.get("live_directory") is True:
+            result = d.scan_directory(root / "review", body["source"], body["slug"], body["url"])
+            return {"imported": True, "live_directory": True, "source_root": result["source_root"], "file_count": result["file_count"]}
         with contextlib.redirect_stdout(io.StringIO()):
             d.prepare(argparse.Namespace(archive=body["source"], work_dir=str(root / "review"), slug=body["slug"], url=body["url"]))
         return {"imported": True}
+    if action == "undo_source_sync":
+        return undo_source_sync(root, str(body.get("revision") or ""), force=body.get("force") is True)
     if action == "source_configuration":
         return source_configuration(root, values_visible=body.get("values_visible") is True)
     if action == "inventory":
         files = d.load(root / "review/inventory.json")["files"]
         start = max(0, int(body.get("start", 1)) - 1)
         result: dict = {"files": [{"path": f["path"], "bytes": f["bytes"]} for f in files[start:start+500]], "total": len(files)}
-        if start == 0 and (root / "review/source").is_dir():
+        source_dir, _ = resolve_source_dir(root, required=False)
+        if start == 0 and source_dir.is_dir():
             try:
                 cfg = source_configuration(root)
                 result["source_configuration"] = {
@@ -1042,7 +1294,7 @@ def main(body):
                 pass
         return result
     if action == "read":
-        source_dir = root / "review/source"
+        source_dir, _ = resolve_source_dir(root)
         path = d.normalize_relative_path(body["path"])
         p = d.relative(source_dir, path)
         change = None
@@ -1105,18 +1357,22 @@ def main(body):
         d.require(body["name"] in {"contract.md", "delivery-files.md", "framework-checks.md", "preparation-checks.md", "integration.md"}, "Unknown reference")
         return {"text": (Path(__file__).parent / "app_delivery/references" / body["name"]).read_text(encoding="utf-8")}
     if action == "scan_routes_and_pages":
-        res = scan_app_routes_and_pages(root / "review/source")
+        source_dir, _ = resolve_source_dir(root)
+        res = scan_app_routes_and_pages(source_dir)
         d.save(root / "routes_scanned.json", {"scanned": True})
         res["analysis_hint"] = (
             "扫描结果是候选证据。核对真实路由、登录和权限后，把技能要使用的完整接口与页面列表写入契约。"
         )
         return res
     if action == "inspect_local_storage":
-        return inspect_local_sqlite_files(root / "review/source", str(body.get("path", "")))
+        source_dir, _ = resolve_source_dir(root)
+        return inspect_local_sqlite_files(source_dir, str(body.get("path", "")))
     if action == "read_source_connection":
-        return inspect_source_connection(root / "review/source", body.get("source"), body.get("table"), body.get("schema"), body.get("key"))
+        source_dir, _ = resolve_source_dir(root)
+        return inspect_source_connection(source_dir, body.get("source"), body.get("table"), body.get("schema"), body.get("key"))
     if action == "read_go_dependency":
-        target = dependency_path(root / "review/source", str(body.get("module", "")), str(body.get("path", "")))
+        source_dir, _ = resolve_source_dir(root)
+        target = dependency_path(source_dir, str(body.get("module", "")), str(body.get("path", "")))
         if not isinstance(target, Path):
             return {"entries": target}
         content = d.text_of(target)
@@ -1131,6 +1387,7 @@ def main(body):
         default_only = bool(body.get("default_only", False))
         return {"resources": select_and_filter_platform_resources(resources, slug, default_only=default_only)}
     if action == "propose_file":
+        source_dir, _ = resolve_source_dir(root)
         change = {
             "id": str(body.get("id") or body.get("path") or ""),
             "path": d.normalize_relative_path(str(body.get("path") or "")),
@@ -1140,9 +1397,9 @@ def main(body):
             "group": str(body.get("group") or ""),
         }
         if body.get("skill_delivery") is True:
-            validate_skill_file(root / "review/source", change)
+            validate_skill_file(source_dir, change)
         else:
-            validate_file_change(root / "review/source", change, body.get("dockerfile_only") is True)
+            validate_file_change(source_dir, change, body.get("dockerfile_only") is True)
         draft_path = root / "draft_files.json"
         drafts = load_json_if_exists(draft_path, {})
         cid = change["id"]
@@ -1158,7 +1415,7 @@ def main(body):
         failure_fb = str(body.get("failure_feedback") or "")
         rev_count = int(body.get("revision_count") or 1)
         fb_text = str(body.get("feedback") or "")
-        source_dir = root / "review/source"
+        source_dir, _ = resolve_source_dir(root)
         if body.get("allow_unresolved"):
             proposal, discovery_report, transformation_report = resolve_and_enrich_proposal(
                 root,
@@ -1185,7 +1442,7 @@ def main(body):
             }
         with tempfile.TemporaryDirectory(dir=root, prefix="check-") as temp:
             temp_path = Path(temp)
-            proposal, discovery_report, transformation_report, login = apply_plan(
+            proposal, discovery_report, transformation_report, login, _, pre_sync_diffs = apply_plan(
                 root,
                 proposal,
                 temp_path / "approved",
@@ -1199,12 +1456,12 @@ def main(body):
                 previous_skill_markdown=body.get("previous_skill_markdown", ""),
                 reuse_source_admin=body.get("reuse_source_admin") is True,
                 dockerfile_only=body.get("dockerfile_only") is True,
+                sync_to_source=False,
             )
             d.bundle_work(temp_path / "approved", temp_path / "bundle", login,
                           delivery_plan=proposal if proposal.get("delivery_format") == 1 else None)
             syntax_check = check_archive_syntax(temp_path / "bundle/app.tar")
         retain_proposal_changes(root, proposal)
-        diffs = compute_change_diffs(source_dir, proposal.get("changes", []), values_visible=proposal.get("delivery_format") == 1)
         _, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
         return {
             "valid": True,
@@ -1212,7 +1469,7 @@ def main(body):
             "syntax_check": syntax_check,
             "discovery_report": discovery_report,
             "transformation_report": transformation_report,
-            "diffs": diffs,
+            "diffs": pre_sync_diffs,
             "has_original_keys": has_orig,
         }
     if action == "bundle":
@@ -1221,7 +1478,7 @@ def main(body):
         d.require(body["revision"].isalnum(), "Invalid revision")
         dest.mkdir(mode=0o700)
         proposal = body["proposal"]
-        proposal, discovery_report, transformation_report, login = apply_plan(
+        proposal, discovery_report, transformation_report, login, source_sync, pre_sync_diffs = apply_plan(
             root,
             proposal,
             dest / "approved",
@@ -1235,6 +1492,9 @@ def main(body):
             previous_skill_markdown=body.get("previous_skill_markdown", ""),
             reuse_source_admin=body.get("reuse_source_admin") is True,
             dockerfile_only=body.get("dockerfile_only") is True,
+            revision=body["revision"],
+            sync_to_source=body.get("sync_to_source", True) is not False,
+            force_overwrite=body.get("force_overwrite") is True,
         )
         result = d.bundle_work(dest / "approved", dest / "bundle", login,
                                delivery_plan=proposal if proposal.get("delivery_format") == 1 else None)
@@ -1250,13 +1510,19 @@ def main(body):
             pass
         dockerfile_path = dest / "approved/source/Dockerfile"
         dockerfile_content = dockerfile_path.read_text(encoding="utf-8", errors="replace") if dockerfile_path.is_file() else ""
-        source_dir = root / "review/source"
-        orig_values, has_orig = extract_original_config_values(source_dir, (proposal.get("contract") or {}).get("configs", []))
-        skill_credentials = read_skill_credentials(source_dir, proposal["contract"]) if proposal.get("delivery_format") == 1 else {}
-        diffs = compute_change_diffs(source_dir, proposal.get("changes", []), values_visible=proposal.get("delivery_format") == 1)
+        source_dir, is_live = resolve_source_dir(root)
+        orig_values, has_orig = extract_original_config_values(dest / "approved/source", (proposal.get("contract") or {}).get("configs", []))
+        skill_credentials = read_skill_credentials(dest / "approved/source", proposal["contract"]) if proposal.get("delivery_format") == 1 else {}
+        source_integrity_detail = (
+            f"已将 {len(source_sync['files'])} 个改造文件同步至本机源码目录，并基于定版快照打包"
+            if source_sync and source_sync.get("synced")
+            else "已基于本机源码目录的定版快照打包"
+            if is_live
+            else "已核对分析时的源码摘要，改造在独立副本完成"
+        )
         preparation_checks = [
             syntax_check,
-            {"label": "原源码完整性", "status": "passed", "detail": "已核对分析时的源码摘要，改造在独立副本完成"},
+            {"label": "原源码完整性", "status": "passed", "detail": source_integrity_detail},
             {"label": "交付文件与业务技能契约", "status": "passed", "detail": "已通过打包器的构建输入、配置和业务契约校验；不是编译或运行测试"},
             {"label": "服务器构建、启动与业务访问", "status": "pending", "detail": "确认部署后在目标服务器验证"},
         ]
@@ -1272,7 +1538,8 @@ def main(body):
             "original_config_values": orig_values,
             "skill_credentials": skill_credentials,
             "has_original_keys": has_orig,
-            "diffs": diffs,
+            "diffs": pre_sync_diffs,
+            "source_sync": source_sync,
         }
     if action == "extract_skill_contract":
         zip_bytes = base64.b64decode(body["skill_zip_b64"], validate=True)
