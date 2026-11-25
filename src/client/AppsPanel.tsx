@@ -305,7 +305,7 @@ const attemptLabels: Record<DeploymentAttemptProgress['phase'], string> = {
   cleaning: '正在清理本次部署',
   cancelled: '已取消部署',
   restoring: '正在恢复应用服务',
-  restored: '已恢复上一版本',
+  restored: '本次更新失败（已恢复线上旧版）',
   failed: '部署失败',
   recovery_required: '需要平台处理后恢复',
 }
@@ -351,7 +351,7 @@ function deploymentProgress(job: AppDeliveryJob) {
   const attempt = displayedAttempt(job)
   if (attempt) {
     if (attempt.phase === 'succeeded' && job.status !== 'verified') return { label: attemptLabels.confirming, tone: 'warn' }
-    const tone = attempt.phase === 'succeeded' ? 'ok' : ['failed', 'recovery_required', 'submission_rejected'].includes(attempt.phase)
+    const tone = attempt.phase === 'succeeded' ? 'ok' : ['failed', 'restored', 'recovery_required', 'submission_rejected'].includes(attempt.phase)
       ? 'danger' : followsDeploymentAttempt(attempt) ? 'warn' : 'accent'
     return { label: attemptLabel(job, attempt.phase, attempt.stalled), tone }
   }
@@ -2660,6 +2660,9 @@ export function AppsPanel({
             const elapsed = elapsedAttemptTime(attempt?.phase_started_at)
             const previous = attempt?.blocking_request_id ? jobs.find(job => job.slug === wizardJob.slug && job.requestId === attempt.blocking_request_id) : undefined
             const recheck = startupRecheck?.key === progressRequestKey ? startupRecheck : undefined
+            const preferAiRepair = Boolean(attempt?.retry_safe && (attempt.failure_kind === 'build' || attempt.failure_kind === 'startup'))
+            const showAttemptFailureAlert = Boolean(attempt && (attempt.phase === 'restored' || (failed && wizardJob.error)))
+            const showActionGuide = Boolean(attempt?.retry_safe && (attempt.phase === 'failed' || attempt.phase === 'restored'))
             return (
               <div className="oa-deploy-progress">
                 <div className="oa-deploy-status" role="status">
@@ -2686,18 +2689,47 @@ export function AppsPanel({
                       {attempt.phase === 'submission_rejected' && (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => setWizardStep(3)}>{t("apps.backToStep3")}</button>
                       )}
-                      {attempt.retry_safe && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleRetryDeployment()}>{t("apps.retryDeployment")}</button>
+                      {preferAiRepair && (
+                        <button type="button" className="oa-btn oa-btn-sm oa-btn-primary" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>{t("apps.letAiDiagnoseAndFix")}</button>
                       )}
-                      {attempt.retry_safe && (attempt.failure_kind === 'build' || attempt.failure_kind === 'startup') && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleLaunchRepair()}>{t("apps.letAiDiagnoseAndFix")}</button>
+                      {attempt.retry_safe && (
+                        <button
+                          type="button"
+                          className={`oa-btn oa-btn-sm${preferAiRepair ? '' : ' oa-btn-primary'}`}
+                          disabled={wizardBusy}
+                          onClick={() => void handleRetryDeployment()}
+                        >
+                          {t("apps.retryDeployment")}
+                        </button>
                       )}
                       {attempt.phase === 'restored' && (
-                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">{t("apps.openCurrentVersion")}</a>
+                        <a href={wizardJob.url} target="_blank" rel="noreferrer" className="oa-btn oa-btn-sm">
+                          <AppIcon name="external" size={13} />{' '}
+                          {attempt.active_version
+                            ? t("apps.openPreviousLiveVersion", { version: attempt.active_version })
+                            : t("apps.openCurrentVersion")}
+                        </a>
                       )}
                     </div>
                   )}
                 </div>
+                {showAttemptFailureAlert && attempt && (
+                  <div className="oa-alert oa-alert-danger" role="alert">
+                    <AppIcon name="warning" size={16} />
+                    <div className="oa-deploy-message">
+                      {attempt.phase === 'restored' && (
+                        <div>
+                          <strong>
+                            {attempt.active_version
+                              ? t("apps.restoredNoticeWithVersion", { version: attempt.active_version })
+                              : t("apps.restoredNotice")}
+                          </strong>
+                        </div>
+                      )}
+                      {wizardJob.error && <div>{wizardJob.error}</div>}
+                    </div>
+                  </div>
+                )}
                 {attempt && (
                   <div className="oa-hint oa-deploy-message">
                     {attempt.phase === 'unknown' && <div>
@@ -2707,9 +2739,9 @@ export function AppsPanel({
                     </div>}
                     {attempt.phase === 'blocked_previous' && <div>{t("apps.onceThePreviousDeploymentFinishesCleanup")}</div>}
                     {attempt.stalled && elapsed && <div>{t("apps.elapsed", { elapsed })}{attempt.phase === 'starting' ? t("apps.appIsStillStarting") : '.'}</div>}
-                    {attempt.active_version && progress.tone !== 'ok' ? <div>{t("apps.latestLiveVersionV", { version: attempt.active_version })}</div> : null}
+                    {attempt.active_version && progress.tone !== 'ok' && attempt.phase !== 'restored' ? <div>{t("apps.latestLiveVersionV", { version: attempt.active_version })}</div> : null}
                     {attempt.phase === 'recovery_required' && <div>{t("apps.platformIsProtectingAppDataPlease")}</div>}
-                    {(failed || attempt.phase === 'restored') && wizardJob.error && <div>{wizardJob.error}</div>}
+                    {showActionGuide && <div>{preferAiRepair ? t("apps.failureActionGuide") : t("apps.retryActionGuide")}</div>}
                   </div>
                 )}
                 {wizardJob.assessment && (
