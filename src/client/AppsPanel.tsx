@@ -12,7 +12,6 @@ import type {
   OpcApi,
   ResourceSummary,
 } from './api.ts'
-import type { ConfigChatAction, ConfigChatFrame, ConfigChatResult, ConfigChatRow } from '../config-chat.ts'
 import { AppDeleteModal } from './AppDeleteModal.tsx'
 import { AppDeliveryArtifacts } from './AppDeliveryArtifacts.tsx'
 import { DeletedAppBackupsView } from './DeletedAppBackupsView.tsx'
@@ -73,23 +72,6 @@ function runtimeOperationNeedsCheck(operation?: RuntimeOperation | null) {
 
 type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
-
-type ConfigChatEdit = { before: AppConfigItem; after: AppConfigItem }
-
-function configChatRow(item: AppConfigItem, resources: ResourceSummary[], mounts: AppStorageMountDetail[]): ConfigChatRow {
-  const resource = resources.find(resource => resource.id === item.resource_id)
-  const preview = resource?.env_preview?.[item.resource_key || item.key]
-  const value = item.resource_id
-    ? preview && preview !== '[REDACTED]' ? preview : item.effective_value ?? ''
-    : item.value || (item.value_source !== 'generated' && item.value_source !== 'configured' ? item.app_default || '' : '')
-  let blocked: string | undefined
-  if (item.key === 'PORT' || ['HOST', 'BIND_HOST', 'LISTEN_HOST'].includes(item.key)) blocked = '监听地址和端口由改造方案确定，请返回核对方案'
-  else if (item.resource_id) blocked = '已绑定平台资源，请返回核对方案后变更'
-  else if (mounts.some(mount => value === mount.container_path || value.startsWith(mount.container_path + '/'))) {
-    blocked = '此值指向持久化目录，请返回核对方案后变更'
-  }
-  return { key: item.key, value, description: item.description, source: resource?.name || item.resource_id || item.value_source, blocked }
-}
 
 interface OpcRuntimeConfig {
   appDomainRoot: string
@@ -609,10 +591,6 @@ export function AppsPanel({
     setConfigDrafts(rows)
   }, [])
   const draftTransition = useRef(false)
-  const [aiConfigEdits, setAiConfigEdits] = useState<ConfigChatEdit[]>([])
-  const [configChatStatus, setConfigChatStatus] = useState<'connecting' | 'ready' | 'unavailable'>('connecting')
-  const [configChatError, setConfigChatError] = useState('')
-  const [configChatReconnect, setConfigChatReconnect] = useState(0)
   const [step3Load, setStep3Load] = useState<{ jobId: string; artifactHash?: string; contextId: string; status: 'loading' | 'ready' | 'failed'; error?: string }>()
   const step3Request = useRef(0)
   const currentStep3Load = step3Load?.contextId === contextId && step3Load.jobId === wizardJob?.id &&
@@ -865,7 +843,6 @@ export function AppsPanel({
         setPreparedDockerfile({ jobId: job.id, artifactHash: job.artifactHash, content: draft?.dockerfile ?? '' })
         setOriginalConfigs(originals)
         replaceConfigDrafts(configs)
-        setAiConfigEdits([])
         setVersionNote(draft?.versionNote ?? job.versionNote ?? '')
         setStorageBindings(draft?.storageBindings ?? {})
         setExistingStorage(detail?.storage_mounts ?? [])
@@ -1340,107 +1317,6 @@ export function AppsPanel({
     if (draftTransition.current) return
     replaceConfigDrafts(nextConfigs)
     if (wizardJob) scheduleDraftSave(wizardJob, nextConfigs, versionNote, storageBindings)
-  }
-
-  const saveChatEdits = async (edits: ConfigChatEdit[]) => {
-    if (!wizardJob || !step3Ready || draftTransition.current || wizardBusy) throw new Error('当前部署草稿暂时不可编辑')
-    const byKey = new Map(edits.map(edit => [edit.after.key, edit.after]))
-    const rows = latestConfigDrafts.current.map(row => byKey.get(row.key) ?? row)
-    if (draftSaveTimerRef.current !== null) window.clearTimeout(draftSaveTimerRef.current)
-    draftSaveTimerRef.current = null
-    replaceConfigDrafts(rows)
-    await saveDraft(wizardJob, rows, versionNote, storageBindings)
-  }
-
-  const runConfigChatAction = useRef<(action: ConfigChatAction) => Promise<ConfigChatResult>>(async () => ({ error: '正在加载配置草稿' }))
-  runConfigChatAction.current = async action => {
-    if (!active || viewMode !== 'wizard' || wizardStep !== 3 || wizardJob?.analysisSessionId !== sessionId ||
-        wizardBusy || draftTransition.current || !step3Ready) throw new Error('当前部署草稿暂时不可编辑')
-    const rows = latestConfigDrafts.current
-    const readRow = (row: AppConfigItem) => configChatRow(row, deploymentResources, [...volumeMounts, ...existingStorage])
-    if (action.type === 'read') return { rows: rows.filter(row => row.key).map(readRow) }
-    const expected = new Map(action.expected.map(row => [row.key, row]))
-    const edits = action.changes.flatMap(({ key, value }) => {
-      const before = rows.find(row => row.key === key)
-      if (!before || JSON.stringify(readRow(before)) !== JSON.stringify(expected.get(key))) {
-        throw new Error(`${key} 已变更，请重新读取右侧配置`)
-      }
-      const blocked = readRow(before).blocked
-      if (blocked) throw new Error(blocked)
-      if (value === before.value) return []
-      return [{ before, after: { ...before, value, value_source: 'manual', has_value: Boolean(value), local_connection_confirmed: false } }]
-    })
-    if (!edits.length) return { changed: [] }
-    setAiConfigEdits(edits)
-    setConfigSubTab('configs')
-    try {
-      await saveChatEdits(edits)
-    } catch (error) {
-      setWizardError(readErrorMessage(error, '配置草稿保存失败，请重试'))
-      throw error
-    }
-    return { changed: edits.map(edit => edit.after.key) }
-  }
-
-  const configChatJobId = active && viewMode === 'wizard' && wizardStep === 3 && step3Ready &&
-    wizardJob?.status === 'ready' && wizardJob.analysisSessionId === sessionId ? wizardJob.id : undefined
-  const configChatArtifact = configChatJobId ? wizardJob?.artifactHash : undefined
-  useEffect(() => {
-    if (!configChatJobId || !configChatArtifact || !api.appWatchConfigChat || !api.appReplyConfigChat || !api.appSaveConfigDraft) return
-    const controller = new AbortController()
-    setConfigChatStatus('connecting')
-    setConfigChatError('')
-    void (async () => {
-      const delays = [1000, 2000, 4000]
-      for (let attempt = 0; attempt <= delays.length; attempt += 1) {
-        if (controller.signal.aborted) return
-        let lastError = ''
-        try {
-          for await (const raw of api.appWatchConfigChat!(configChatJobId, configChatArtifact, sessionId, contextId, controller.signal)) {
-            if (controller.signal.aborted) return
-            const frame = JSON.parse(raw) as ConfigChatFrame
-            if (frame.type === 'ready') {
-              setConfigChatStatus('ready')
-              setConfigChatError('')
-              attempt = 0
-              continue
-            }
-            let result: ConfigChatResult
-            try { result = await runConfigChatAction.current(frame.action) }
-            catch (error) { result = { error: readErrorMessage(error, '无法处理配置草稿') } }
-            if (controller.signal.aborted) return
-            await api.appReplyConfigChat!(configChatJobId, frame.id, JSON.stringify(result), contextId)
-          }
-        } catch (error) {
-          if (controller.signal.aborted) return
-          lastError = readErrorMessage(error, '')
-        }
-        if (controller.signal.aborted) return
-        if (attempt < delays.length) {
-          setConfigChatStatus('connecting')
-          await new Promise<void>(resolve => {
-            const timer = setTimeout(resolve, delays[attempt])
-            controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
-          })
-          continue
-        }
-        setConfigChatError(lastError)
-        setConfigChatStatus('unavailable')
-      }
-    })()
-    return () => controller.abort()
-  }, [api, configChatJobId, configChatArtifact, configChatReconnect, contextId, sessionId])
-
-  const undoAiConfigEdits = async () => {
-    const undo = aiConfigEdits.filter(edit => latestConfigDrafts.current.includes(edit.after))
-      .map(edit => ({ before: edit.after, after: edit.before }))
-    if (!undo.length) return
-    try {
-      await saveChatEdits(undo)
-      setAiConfigEdits([])
-    } catch (error) {
-      setWizardError(readErrorMessage(error, '撤销后保存草稿失败，请重试'))
-    }
   }
 
   const handleStep3NoteChange = (nextNote: string) => {
@@ -2590,33 +2466,6 @@ export function AppsPanel({
 
               {step3Ready && configSubTab === 'configs' && (
                 <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }} aria-label={t("apps.runtimeEnvironmentConfig")}>
-                  {api.appWatchConfigChat && wizardJob.analysisSessionId && (
-                    <div className="oa-draft-banner">
-                      <span>{wizardJob.analysisSessionId !== sessionId ? t("apps.askAiInTheOriginalDeployment")
-                        : configChatStatus === 'ready' ? t("apps.linkedToLeftAiChatAsk")
-                        : configChatStatus === 'connecting' ? t("apps.connectingToLeftAiConfigAssistant")
-                        : t("apps.draftSyncTemporarilyUnavailableLeftChat") + (configChatError ? ` · ${configChatError}` : '')}</span>
-                      {wizardJob.analysisSessionId !== sessionId && prepareAnalysisNavigation &&
-                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => beginAnalysisNavigation()?.(wizardJob)}>{t("apps.openDeploymentChat")}</button>}
-                      {wizardJob.analysisSessionId === sessionId && configChatStatus === 'unavailable' &&
-                        <button type="button" className="oa-btn oa-btn-sm" onClick={() => setConfigChatReconnect(value => value + 1)}>{t("apps.reconnect")}</button>}
-                    </div>
-                  )}
-                  {aiConfigEdits.length > 0 && (
-                    <div className="oa-draft-banner" role="status">
-                      <div style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-                        <strong>{t("apps.aiUpdatedThisDraft")}</strong>
-                        {aiConfigEdits.map(edit => (
-                          <div key={edit.after.key} className="oa-hint">
-                            {edit.after.description || edit.after.key} · {configChatRow(edit.before, deploymentResources, volumeMounts).value || t("apps.empty")}
-                            {' → '}{configChatRow(edit.after, deploymentResources, volumeMounts).value || t("apps.empty")}
-                          </div>
-                        ))}
-                      </div>
-                      <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy || !aiConfigEdits.some(edit => configDrafts.includes(edit.after))}
-                        onClick={() => void undoAiConfigEdits()}>{t("apps.undoAiEdits")}</button>
-                    </div>
-                  )}
                   <AppDeliveryConfig
                     configs={configDrafts}
                     allowNew={wizardJob.proposal?.delivery_format !== 1}
