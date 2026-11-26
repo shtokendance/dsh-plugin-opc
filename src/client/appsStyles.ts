@@ -303,6 +303,30 @@ export const appsCss = `
 .oa-app-card-row > a { color: var(--oa-accent); text-decoration: none; }
 .oa-app-card-row > a:hover, .oa-app-card-row > a:focus-visible { text-decoration: underline; }
 .oa-app-card-row > code { background: var(--oa-panel); padding-block: 1px; }
+.oa-app-card-url-row { justify-content: flex-start; gap: 4px; }
+.oa-app-card-url-link { flex: 1; min-width: 0; }
+.oa-app-card-copy {
+  flex-shrink: 0;
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--oa-muted);
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.oa-app-card-copy:hover, .oa-app-card-copy:focus-visible {
+  background: var(--oa-panel);
+  border-color: var(--oa-line);
+  color: var(--oa-ink);
+}
+.oa-app-card-copy.is-copied { color: #15803d; }
 .oa-app-card-error { padding: 7px 9px; font-size: 11.5px; }
 .oa-app-card-actions {
   display: flex;

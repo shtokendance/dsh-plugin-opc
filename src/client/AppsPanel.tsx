@@ -1896,11 +1896,25 @@ export function AppsPanel({
                 <p className="oa-app-card-desc" title={app.description || undefined}>{app.description || t("apps.noDescription")}</p>
 
                 <div className="oa-app-card-meta">
-                  <div className="oa-app-card-row">
+                  <div className="oa-app-card-row oa-app-card-url-row">
                     <span><AppIcon name="cloud" size={13} />{t("apps.url")}</span>
-                    {app.app_url
-                      ? <a className="oa-mono" href={app.app_url} target="_blank" rel="noreferrer" title={app.app_url}>{app.app_url}</a>
-                      : <span>{t("apps.none")}</span>}
+                    {app.app_url ? (
+                      <>
+                        <a className="oa-mono oa-app-card-url-link" href={app.app_url} target="_blank" rel="noreferrer" title={app.app_url}>{app.app_url}</a>
+                        <button
+                          type="button"
+                          className={`oa-app-card-copy${copiedKey === `card-url-${app.slug}` ? ' is-copied' : ''}`}
+                          aria-label={copiedKey === `card-url-${app.slug}` ? t("common.copied") : t("apps.copyUrl")}
+                          title={copiedKey === `card-url-${app.slug}` ? t("common.copied") : t("apps.copyUrl")}
+                          onClick={e => {
+                            e.stopPropagation()
+                            void copyText(`card-url-${app.slug}`, app.app_url)
+                          }}
+                        >
+                          <AppIcon name={copiedKey === `card-url-${app.slug}` ? 'check' : 'copy'} size={13} />
+                        </button>
+                      </>
+                    ) : <span>{t("apps.none")}</span>}
                   </div>
                   {!readOnly && (
                     <div className="oa-app-card-row">
