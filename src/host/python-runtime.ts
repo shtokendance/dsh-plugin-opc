@@ -132,7 +132,8 @@ export function bundledPythonCandidates(options: {
   const homeDir = options.homeDir ?? homedir()
   const exists = options.exists ?? existsSync
   const executable = pathApi.dirname(execPath)
-  const dshHome = env.DSH_HOME?.trim() || pathApi.join(homeDir, '.dsh')
+  const workopcHome = env.DSH_HOME?.trim() || pathApi.join(homeDir, '.workopc')
+  const legacyDshHome = pathApi.join(homeDir, '.dsh')
 
   const runtimeDirs = [
     env.DSH_PRIMARY_RUNTIME_DIR?.trim(),
@@ -155,14 +156,16 @@ export function bundledPythonCandidates(options: {
       pathApi.join(executable, 'resources/runtime/primary-runtime/dependencies/python/python.exe'),
       pathApi.join(executable, '../resources/runtime/primary-runtime/dependencies/python/python.exe'),
       pathApi.join(executable, '../../python/python.exe'),
-      pathApi.join(dshHome, 'dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe'),
+      pathApi.join(workopcHome, 'dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe'),
+      pathApi.join(legacyDshHome, 'dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe'),
     )
   } else {
     paths.push(
       pathApi.join(executable, '../Resources/runtime/primary-runtime/dependencies/python/bin/python3'),
       pathApi.join(executable, '../resources/runtime/primary-runtime/dependencies/python/bin/python3'),
       pathApi.join(executable, '../../python/bin/python3'),
-      pathApi.join(dshHome, 'dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python3'),
+      pathApi.join(workopcHome, 'dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python3'),
+      pathApi.join(legacyDshHome, 'dsh-runtimes/dsh-primary-runtime/dependencies/python/bin/python3'),
     )
   }
 

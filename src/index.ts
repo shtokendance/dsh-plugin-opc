@@ -7,7 +7,7 @@ import type {} from '@deepseek-ai/dsh-plugin-manager/types'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import open from 'open'
-import { AuthManager, type StoredGrant } from './host/auth.ts'
+import { AuthManager, detectHostClientName, type StoredGrant } from './host/auth.ts'
 import { PlatformHttp } from './host/http.ts'
 import { OpcCore } from './host/core.ts'
 import { EnterpriseSkillProvider } from './host/skill-provider.ts'
@@ -41,7 +41,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     async write(payload) { await ctx.credentials.modifyRecord(key, async () => ({ kind: 'grant', payload })) },
     async delete() { await ctx.credentials.deleteRecord(key) },
-  }, async url => { await open(url) }, config.clientId)
+  }, async url => { await open(url) }, config.clientId, detectHostClientName({ homeDir: home }))
   const core = new OpcCore(auth, config.dataHome || resolveDshHome())
   const delivery = new AppDelivery(core, config.dataHome || resolveDshHome(), {
     async read(id) {
