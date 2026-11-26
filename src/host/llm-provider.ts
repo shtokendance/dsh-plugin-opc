@@ -19,19 +19,26 @@ import type { OpcCore } from './core.ts'
 
 export const BENLAI_PROVIDER_ID = 'opc-benlai-ai'
 export const DEFAULT_BENLAI_PROVIDER_NAME = '本来 AI'
+export const DEFAULT_LITELLM_PUBLIC_URL = 'https://opc-litellm.benlai.com'
 
 export interface PlatformLlmModelDescriptor {
   id: string
+  model_name?: string
   name?: string
+  base_url?: string
+  api_key?: string
   context_window?: number
   max_tokens?: number
   supports_vision?: boolean
   supports_reasoning?: boolean
+  is_default?: boolean
 }
 
 export interface BenlaiLlmClient {
   baseUrl(): string
   token(): Promise<string>
+  userId?(): string | undefined
+  defaultLiteLLMUrl?(): string | undefined
 }
 
 interface OpenAIMessage {
@@ -113,8 +120,18 @@ function mapHttpError(status: number, body: string): LlmError {
   return new LlmError(`本来 AI 服务异常：${detail}`, `HTTP_${status}`, { status })
 }
 
+function resolveDirectEndpoint(rawBaseUrl: string | undefined, fallbackPublicUrl: string): string {
+  const base = normalizeBaseUrl(rawBaseUrl?.trim() || '')
+  if (base) {
+    return base.endsWith('/chat/completions') ? base : `${base}/chat/completions`
+  }
+  const pub = normalizeBaseUrl(fallbackPublicUrl || DEFAULT_LITELLM_PUBLIC_URL)
+  return pub.endsWith('/v1') ? `${pub}/chat/completions` : `${pub}/v1/chat/completions`
+}
+
 export class BenlaiLlmAdapter extends LlmAdapter {
   private providerName = DEFAULT_BENLAI_PROVIDER_NAME
+  private defaultPublicUrl = DEFAULT_LITELLM_PUBLIC_URL
   private catalog: PlatformLlmModelDescriptor[] = []
 
   constructor(private readonly client: BenlaiLlmClient) {
@@ -148,6 +165,7 @@ export class BenlaiLlmAdapter extends LlmAdapter {
   clearModels(): void {
     this.catalog = []
     this.providerName = DEFAULT_BENLAI_PROVIDER_NAME
+    this.defaultPublicUrl = this.client.defaultLiteLLMUrl?.()?.trim() || DEFAULT_LITELLM_PUBLIC_URL
   }
 
   async refreshModels(signal?: AbortSignal): Promise<number> {
@@ -168,11 +186,15 @@ export class BenlaiLlmAdapter extends LlmAdapter {
     const payload = await response.json() as {
       configured?: boolean
       provider_name?: string
+      default_public_url?: string
       models?: PlatformLlmModelDescriptor[]
     }
     this.providerName = typeof payload.provider_name === 'string' && payload.provider_name.trim()
       ? payload.provider_name.trim()
       : DEFAULT_BENLAI_PROVIDER_NAME
+    this.defaultPublicUrl = typeof payload.default_public_url === 'string' && payload.default_public_url.trim()
+      ? normalizeBaseUrl(payload.default_public_url.trim())
+      : (this.client.defaultLiteLLMUrl?.()?.trim() || DEFAULT_LITELLM_PUBLIC_URL)
     this.catalog = payload.configured === false || !Array.isArray(payload.models)
       ? []
       : payload.models.filter((item): item is PlatformLlmModelDescriptor => Boolean(item && typeof item.id === 'string' && item.id.trim()))
@@ -180,14 +202,23 @@ export class BenlaiLlmAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const token = await this.client.token()
-    const base = normalizeBaseUrl(this.client.baseUrl())
+    let entry = this.catalog.find(item => item.id === options.model || item.model_name === options.model)
+    if (!entry) {
+      await this.refreshModels(options.signal)
+      entry = this.catalog.find(item => item.id === options.model || item.model_name === options.model)
+    }
+    if (!entry || !entry.api_key?.trim()) {
+      throw new LlmError(`本来 AI 模型未配置或已失效：${options.model}`, 'AUTH', { status: 401 })
+    }
+    const endpoint = resolveDirectEndpoint(entry.base_url, this.defaultPublicUrl)
     const requestBody: Record<string, unknown> = {
-      model: options.model,
+      model: entry.model_name?.trim() || entry.id,
       messages: serializeMessages(options),
       stream: true,
       stream_options: { include_usage: true },
     }
+    const userId = this.client.userId?.()?.trim()
+    if (userId) requestBody.user = userId
     if (options.tools && options.tools.length > 0) {
       requestBody.tools = options.tools.map(tool => ({
         type: 'function',
@@ -202,10 +233,10 @@ export class BenlaiLlmAdapter extends LlmAdapter {
     if (typeof options.maxTokens === 'number') requestBody.max_tokens = options.maxTokens
     if (options.stop && options.stop.length > 0) requestBody.stop = options.stop
 
-    const response = await fetch(`${base}/integration/v1/llm/v1/chat/completions`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${entry.api_key.trim()}`,
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
         ...attributionHeaders(),
@@ -404,6 +435,8 @@ export function mountBenlaiLlmProvider(ctx: Context, auth: AuthManager, core: Op
   const adapter = new BenlaiLlmAdapter({
     baseUrl: () => auth.http.base.origin,
     token: () => auth.token(),
+    userId: () => auth.state.context?.subject,
+    defaultLiteLLMUrl: () => process.env.LITELLM_PUBLIC_URL?.trim() || DEFAULT_LITELLM_PUBLIC_URL,
   })
   let registration: AdapterRegistrationHandle | undefined
   let active = false
