@@ -72,6 +72,18 @@ def _fallback_template(language: str, version: str) -> dict:
                 "COPY package*.json ./\nRUN npm install\nCOPY . .\nEXPOSE 8080\nCMD [\"npm\", \"start\"]"
             ),
         }
+    if "go" in lang:
+        return {
+            "language": "go",
+            "runtime_version": ver,
+            "base_image": f"golang:{ver}-alpine",
+            "template_content": (
+                f"FROM golang:{ver}-alpine\nWORKDIR /app\n"
+                "ENV GOPROXY=https://goproxy.cn,direct\n"
+                "COPY go.mod go.sum* ./\nRUN go mod download\n"
+                "COPY . .\nRUN go build -o /app/server .\nEXPOSE 8080\nCMD [\"/app/server\"]"
+            ),
+        }
     return {
         "language": lang or "generic",
         "runtime_version": ver,

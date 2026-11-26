@@ -54,3 +54,26 @@
 - 新增持久目录时，用 `resources` 核对卷类型和默认资源，选择与应用读写方式兼容的卷，填写每项 `storage_mounts.resource_id`。SQLite 使用本地磁盘卷。升级中的同路径挂载沿用线上绑定。
 - 在 `contract.resources` 列出选中的平台资源，每项原样填写目录返回的 `id` 和 `type`。没有使用平台资源时填 `[]`。
 - 已核实的选择随提案直接进入第三步供用户核对和更换。资源不可用或需要用户决定数据归属时，写入 `unresolved`，说明具体缺项和可选方案。
+
+## 构建镜像源
+
+构建环境位于国内网络。检查已有或新增的 Dockerfile 时，若构建步骤使用默认或海外官方包源导致下载缓慢或超时，按以下规则最小化切换为国内镜像源，并在 `changes[].reason` 与 `summary` 中说明「将构建依赖源切换为国内镜像以加速构建」：
+
+| 生态 / 层级 | 包管理器 | 推荐国内镜像源与 Dockerfile 写法 |
+| --- | --- | --- |
+| Python | `pip` | `ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ PIP_TRUSTED_HOST=mirrors.aliyun.com` |
+| Python | `uv` | `ENV UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/`（旧版 `UV_INDEX_URL`） |
+| Python | `poetry` | 在 `poetry install` 前设置 primary source 为 `https://mirrors.aliyun.com/pypi/simple/` |
+| Node.js | `npm` / `pnpm` | `ENV npm_config_registry=https://registry.npmmirror.com` 或 `RUN npm config set registry https://registry.npmmirror.com` |
+| Node.js | `yarn` | Yarn v1：`yarn config set registry https://registry.npmmirror.com`；Yarn v2+：`ENV YARN_NPM_REGISTRY_SERVER=https://registry.npmmirror.com` |
+| Go | `go mod` | `ENV GOPROXY=https://goproxy.cn,direct`（仅在 `sum.golang.org` 超时时补充 `GOSUMDB=sum.golang.google.cn`） |
+| 系统包 | Debian / Ubuntu (`apt`) | 仅在 Dockerfile 调用 `apt-get` 时，将 `/etc/apt/sources.list` 或 Debian 12+ `/etc/apt/sources.list.d/debian.sources` 替换为 `mirrors.aliyun.com` |
+| 系统包 | Alpine (`apk`) | 仅在 Dockerfile 调用 `apk add` 时，执行 `sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories` |
+| Java / JVM | Maven / Gradle | 构建期使用 `https://maven.aliyun.com/repository/public`（通过构建层 `settings.xml` 或 Gradle init script，不污染业务代码） |
+| 其他常见 | Rust / Composer / Ruby | 按需使用 `rsproxy.cn`、`https://mirrors.aliyun.com/composer/`、`https://gems.ruby-china.com/` |
+
+安全边界：
+
+1. **保留私有源与已有国内源**：Dockerfile、`.npmrc`、`pip.conf`、`settings.xml`、`GOPRIVATE` 等已显式指向企业内网制品库、私有 Registry 或其他国内镜像时，保持原样，不覆盖。
+2. **不破坏锁文件**：优先通过 `ENV` 或构建期命令切源，不改写 `package-lock.json`、`pnpm-lock.yaml`、`poetry.lock`、`go.sum` 等锁文件。
+3. **不擅自改写 `FROM` 基础镜像前缀**：构建机通常已在 Docker Daemon 层配置镜像加速；仅在构建日志明确报基础镜像拉取超时时，才在修复阶段调整。
