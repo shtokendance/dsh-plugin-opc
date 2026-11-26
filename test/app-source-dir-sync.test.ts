@@ -245,3 +245,64 @@ test('live directory: detects external IDE edits before sync and allows explicit
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('autoPrepared leaves local source untouched until user confirms sync to Step 3', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-auto-defer-sync-'))
+  try {
+    const userSource = join(home, 'my-app')
+    await mkdir(userSource, { recursive: true })
+    const originalServer = 'const host = "127.0.0.1";\n'
+    const adaptedServer = 'const host = "0.0.0.0";\n'
+    const dockerfile = 'FROM node:20-alpine\nCOPY server.js /app/server.js\nCMD ["node", "/app/server.js"]\n'
+    await writeFile(join(userSource, 'server.js'), originalServer, 'utf8')
+
+    const appUrl = 'http://sync-app.apps.opc.test'
+    const { delivery, expected } = createTestDelivery(home, appUrl)
+    const created = await delivery.create({ name: '延迟同步确认测试', slug: 'sync-app', source: userSource }, 's1', expected)
+
+    let resolveAnalyze!: (err?: unknown) => void
+    const analyzeFinished = new Promise<void>((resolveOk, rejectErr) => {
+      resolveAnalyze = err => (err ? rejectErr(err) : resolveOk())
+    })
+    delivery.analyze = async (job, root, _feedback, signal, onSessionReady) => {
+      try {
+        await onSessionReady('analysis-session-1')
+        await delivery.submit(job, root, makeProposal(appUrl, adaptedServer, dockerfile), signal)
+        resolveAnalyze()
+      } catch (err) {
+        resolveAnalyze(err)
+        throw err
+      }
+    }
+    await delivery.startAnalysis(created.id, '', expected, 's1')
+    await analyzeFinished
+
+    // Wait for autoPrepared background step to finish
+    let afterAuto = await delivery.getJob(created.id, expected)
+    for (let i = 0; i < 60 && afterAuto.status !== 'ready'; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      afterAuto = await delivery.getJob(created.id, expected)
+    }
+    assert.equal(afterAuto.status, 'ready')
+    assert.equal(afterAuto.pendingSourceSync, true)
+    assert.equal(afterAuto.sourceSync, undefined)
+    // User's local directory MUST still be untouched after autoPrepared!
+    assert.equal(await readFile(join(userSource, 'server.js'), 'utf8'), originalServer)
+    assert.equal(existsSync(join(userSource, 'Dockerfile')), false)
+
+    // User clicks "Confirm Sync & Enter Step 3"
+    const synced = await delivery.prepare(created.id, afterAuto.proposalHash, expected, { syncToSource: true })
+    assert.equal(synced.status, 'ready')
+    assert.equal(synced.pendingSourceSync, false)
+    assert.equal(synced.sourceSync.proposalHash, synced.proposalHash)
+    assert.equal(await readFile(join(userSource, 'server.js'), 'utf8'), adaptedServer)
+    assert.equal(await readFile(join(userSource, 'Dockerfile'), 'utf8'), dockerfile)
+
+    // Undoing flips pendingSourceSync back to true
+    const undone = await delivery.undoSourceSync(created.id, expected)
+    assert.equal(undone.pendingSourceSync, true)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
