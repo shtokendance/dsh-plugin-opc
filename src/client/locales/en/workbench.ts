@@ -2,11 +2,11 @@ import type { workbench as zhWorkbench } from '../zh/workbench.ts'
 
 export const workbench = {
   "workbench.switchOpcPageCurrent": "Switch OPC page, current: {name}",
-  "workbench.opcWorkbench": "OPC Workbench",
+  "workbench.opcWorkbench": "Benlai Workbench",
   "workbench.switchOpcModule": "Switch OPC module",
   "workbench.clickToEnlarge": "Click to enlarge",
   "workbench.copy": "Copy",
-  "workbench.enterpriseWorkbench": "Enterprise Workbench",
+  "workbench.enterpriseWorkbench": "Benlai Workbench",
   "workbench.chooseAModuleBelowToManage": "Choose a module below to manage, or invoke enterprise capabilities directly in chat.",
   "workbench.modules": "Modules",
   "workbench.clickCardToOpenClickFor": "Click card to open · Click ? for guide",
@@ -26,7 +26,7 @@ export const workbench = {
   "workbench.openPluginsDshPluginOpcOn": "Open Plugins -> dsh-plugin-opc on the left to update.",
   "workbench.later": "Later",
   "workbench.update": "Update",
-  "workbench.openingOpcWorkbench": "Opening OPC Workbench…",
+  "workbench.openingOpcWorkbench": "Opening Benlai Workbench…",
   "workbench.knowledgeBasesSkillsMcpAndApps": "Knowledge Bases, Skills, MCP & Apps",
 
   // Pages & Module Cards

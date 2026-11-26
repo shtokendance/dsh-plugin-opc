@@ -7,17 +7,20 @@ import { parsePlatformBaseUrl } from './http.ts'
 export const DEFAULT_PLATFORM_BASE = 'https://aiwork.benlai.com'
 export const DEFAULT_APP_DOMAIN_ROOT = 'ai.benlai.com'
 export const DEFAULT_APP_DEFAULT_PORT = 8080
+export const DEFAULT_WORKBENCH_NAME = '本来工作台'
 
 export interface StoredOpcConfig {
   platform_base: string
   app_domain_root: string
   app_default_port: number
+  workbench_name: string
 }
 
 export interface OpcPlatformConfigPayload extends StoredOpcConfig {
   default_platform_base: string
   default_app_domain_root: string
   default_app_default_port: number
+  default_workbench_name: string
   effective_app_domain_root: string
 }
 
@@ -50,6 +53,15 @@ export function validateAppDefaultPort(raw: unknown): number {
   return num
 }
 
+export function sanitizeWorkbenchName(raw: unknown, fallback = DEFAULT_WORKBENCH_NAME): string {
+  const normalized = String(raw ?? '').replace(/[\r\n\t]+/g, ' ').trim()
+  if (!normalized) return fallback
+  if (normalized.length > 64) {
+    throw new Error('工作台名称不能超过 64 个字符')
+  }
+  return normalized
+}
+
 export class OpcConfigStore {
   readonly filePath: string
   readonly #fallback: StoredOpcConfig
@@ -57,7 +69,7 @@ export class OpcConfigStore {
 
   constructor(
     readonly home: string,
-    initial: { platformBaseUrl?: string; appDomainRoot?: string; appDefaultPort?: number } = {},
+    initial: { platformBaseUrl?: string; appDomainRoot?: string; appDefaultPort?: number; workbenchName?: string } = {},
     private readonly fetcher: typeof fetch = fetch,
   ) {
     this.filePath = join(this.home, 'opc', 'platform-config.json')
@@ -79,10 +91,17 @@ export class OpcConfigStore {
     } catch {
       defaultPort = DEFAULT_APP_DEFAULT_PORT
     }
+    let workbenchName = DEFAULT_WORKBENCH_NAME
+    try {
+      if (initial.workbenchName?.trim()) workbenchName = sanitizeWorkbenchName(initial.workbenchName, DEFAULT_WORKBENCH_NAME)
+    } catch {
+      workbenchName = DEFAULT_WORKBENCH_NAME
+    }
     this.#fallback = {
       platform_base: platformBase,
       app_domain_root: domainRoot,
       app_default_port: defaultPort,
+      workbench_name: workbenchName,
     }
     this.#current = { ...this.#fallback }
   }
@@ -100,7 +119,6 @@ export class OpcConfigStore {
           platform_base = normalizePlatformBaseUrl(parsed.platform_base)
         }
       } catch {
-        /* keep fallback */
       }
       let app_domain_root = this.#fallback.app_domain_root
       try {
@@ -108,7 +126,6 @@ export class OpcConfigStore {
           app_domain_root = sanitizeDomainRoot(parsed.app_domain_root)
         }
       } catch {
-        /* keep fallback */
       }
       let app_default_port = this.#fallback.app_default_port
       try {
@@ -116,9 +133,15 @@ export class OpcConfigStore {
           app_default_port = validateAppDefaultPort(parsed.app_default_port)
         }
       } catch {
-        /* keep fallback */
       }
-      this.#current = { platform_base, app_domain_root, app_default_port }
+      let workbench_name = this.#fallback.workbench_name
+      try {
+        if (typeof parsed.workbench_name === 'string') {
+          workbench_name = sanitizeWorkbenchName(parsed.workbench_name, this.#fallback.workbench_name)
+        }
+      } catch {
+      }
+      this.#current = { platform_base, app_domain_root, app_default_port, workbench_name }
     } catch {
       this.#current = { ...this.#fallback }
     }
@@ -135,9 +158,11 @@ export class OpcConfigStore {
       platform_base,
       app_domain_root: this.#current.app_domain_root,
       app_default_port: this.#current.app_default_port,
+      workbench_name: this.#current.workbench_name,
       default_platform_base: DEFAULT_PLATFORM_BASE,
       default_app_domain_root: DEFAULT_APP_DOMAIN_ROOT,
       default_app_default_port: DEFAULT_APP_DEFAULT_PORT,
+      default_workbench_name: this.#fallback.workbench_name,
       effective_app_domain_root: this.#current.app_domain_root || DEFAULT_APP_DOMAIN_ROOT,
     }
   }
@@ -154,6 +179,7 @@ export class OpcConfigStore {
     platform_base?: unknown
     app_domain_root?: unknown
     app_default_port?: unknown
+    workbench_name?: unknown
   }): Promise<{ config: OpcPlatformConfigPayload; platform_base_changed: boolean }> {
     const prevBase = this.#current.platform_base
     const nextBase = patch.platform_base !== undefined
@@ -165,10 +191,14 @@ export class OpcConfigStore {
     const nextDefaultPort = patch.app_default_port !== undefined
       ? validateAppDefaultPort(patch.app_default_port)
       : this.#current.app_default_port
+    const nextWorkbenchName = patch.workbench_name !== undefined
+      ? sanitizeWorkbenchName(patch.workbench_name, this.#fallback.workbench_name)
+      : this.#current.workbench_name
     const next: StoredOpcConfig = {
       platform_base: nextBase,
       app_domain_root: nextDomainRoot,
       app_default_port: nextDefaultPort,
+      workbench_name: nextWorkbenchName,
     }
     await this.persist(next)
     this.#current = next
@@ -183,6 +213,7 @@ export class OpcConfigStore {
       platform_base: DEFAULT_PLATFORM_BASE,
       app_domain_root: '',
       app_default_port: DEFAULT_APP_DEFAULT_PORT,
+      workbench_name: this.#fallback.workbench_name,
     })
   }
 

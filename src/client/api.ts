@@ -268,9 +268,11 @@ export interface OpcPlatformConfig {
   platform_base: string
   app_domain_root: string
   app_default_port: number
+  workbench_name?: string
   default_platform_base: string
   default_app_domain_root: string
   default_app_default_port?: number
+  default_workbench_name?: string
   effective_app_domain_root: string
   platform_base_changed?: boolean
 }
@@ -368,7 +370,7 @@ export interface AuthState {
   approvals?: { id: string; contextId: string; serviceId: string; toolName: string; arguments: Record<string, unknown> }[]
   signedIn: boolean; loginInProgress: boolean; loginAuthorizeUrl?: string; loginError?: { code: string; message: string }
   hostClientName?: 'WorkOPC' | 'DeepSeek Harness'
-  opcConfig?: { platformBaseUrl: string; appDomainRoot: string; rawAppDomainRoot?: string; defaultPort: number }
+  opcConfig?: { platformBaseUrl: string; appDomainRoot: string; rawAppDomainRoot?: string; defaultPort: number; workbenchName?: string }
   context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; applicationContextId?: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
 }
 export interface Resource { name: string; description?: string; tenant_id: string; tenant_name?: string; source_tenant_id?: string; source_tenant_name?: string; permission?: string; knowledge_base_id?: string; catalog_id?: string; version?: string; bundle_sha256?: string; availability: string; installed?: { enabled: boolean; active_sha256: string } }

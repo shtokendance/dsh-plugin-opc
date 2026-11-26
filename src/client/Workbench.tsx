@@ -3,9 +3,10 @@ import type { OpcApi } from './api.ts'
 import { AppIcon, type AppIconName } from './AppIcon.tsx'
 import { getModuleLabel, OpcIcon, type BrandModuleKind } from './branding.tsx'
 import { useI18n, type MessageKey } from './i18n.tsx'
+import { DEFAULT_WORKBENCH_NAME, useWorkbenchName } from './workbench-name.ts'
 
 export const workbenchKind = 'opc-workbench'
-export const workbenchTitle = 'OPC 工作台'
+export const workbenchTitle = DEFAULT_WORKBENCH_NAME
 export type ModuleKind = BrandModuleKind
 export type PanelKind = 'home' | ModuleKind
 
@@ -66,6 +67,7 @@ export function readWorkbenchPage(params: unknown): PanelKind | undefined {
 
 export function WorkbenchNavigation({ kind, onSelect }: { kind: PanelKind; onSelect: (kind: PanelKind) => void }) {
   const { locale, t } = useI18n()
+  const workbenchName = useWorkbenchName()
   const [open, setOpen] = useState(false)
   const container = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -102,8 +104,8 @@ export function WorkbenchNavigation({ kind, onSelect }: { kind: PanelKind; onSel
         aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
         <span className="brand-icon-wrap"><OpcIcon size={18} /></span>
         <span className="brand-text">
-          <span className="brand-title">{kind === 'home' ? t("workbench.opcWorkbench") : getModuleLabel(kind, locale)}</span>
-          {kind !== 'home' && <span className="brand-sub">{t("workbench.opcWorkbench")}</span>}
+          <span className="brand-title">{kind === 'home' ? workbenchName : getModuleLabel(kind, locale)}</span>
+          {kind !== 'home' && <span className="brand-sub">{workbenchName}</span>}
         </span>
         <AppIcon name="chevronDown" size={13} />
       </button>
@@ -300,6 +302,7 @@ export function WorkbenchHome({ onSelect, api, visible = true, onOpenPluginDetai
   onOpenPluginDetail?: () => boolean
 }) {
   const { t } = useI18n()
+  const workbenchName = useWorkbenchName()
   const heading = useId()
   const guideHeading = useId()
   const [guideOpen, setGuideOpen] = useState(false)
@@ -460,7 +463,7 @@ export function WorkbenchHome({ onSelect, api, visible = true, onOpenPluginDetai
       <div className="opc-home-intro">
         <div className="opc-home-intro-copy">
           <div className="opc-home-intro-title-row">
-            <h2 id={heading}>{t("workbench.enterpriseWorkbench")}</h2>
+            <h2 id={heading}>{workbenchName}</h2>
             {PLUGIN_VERSION && <span className="opc-home-version">v{PLUGIN_VERSION}</span>}
           </div>
           <p>{t("workbench.chooseAModuleBelowToManage")}</p>

@@ -14,6 +14,7 @@ export const settings = {
   "settings.primaryEntry": "主服务入口",
   "settings.usedForWecomSsoLoginEnterprise": "用于企业微信扫码授权登录、企业知识库检索、租户共享技能中心及 MCP 网关。",
   "settings.platformBaseUrl": "网关服务地址 (Platform Base)",
+  "settings.workbenchName": "工作台名称 (Workbench Name)",
   "settings.testing": "测试中...",
   "settings.testConnection": "测试连接",
   "settings.connectedMsHttp": "连接成功 ({ms}ms, HTTP {code})",

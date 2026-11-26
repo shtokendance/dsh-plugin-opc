@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useId, useState } from 'react'
 import type { OpcApi, OpcConnectionTestResult, OpcPlatformConfig } from './api.ts'
 import { useI18n } from './i18n.tsx'
 import { NoticeModal } from './NoticeModal.tsx'
+import { DEFAULT_WORKBENCH_NAME, setWorkbenchName as syncWorkbenchName } from './workbench-name.ts'
 
 const settingsCss = `
 .opc-settings-wrap {
@@ -213,9 +214,11 @@ export function OpcSettingsPanel({
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [platformBase, setPlatformBase] = useState('https://aiwork.benlai.com')
+  const [workbenchName, setWorkbenchName] = useState(DEFAULT_WORKBENCH_NAME)
   const [appDomainRoot, setAppDomainRoot] = useState('')
   const [appDefaultPort, setAppDefaultPort] = useState('8080')
   const [defaultPlatformBase, setDefaultPlatformBase] = useState('https://aiwork.benlai.com')
+  const [defaultWorkbenchName, setDefaultWorkbenchName] = useState(DEFAULT_WORKBENCH_NAME)
   const [defaultAppDomainRoot, setDefaultAppDomainRoot] = useState('ai.benlai.com')
   const [testResult, setTestResult] = useState<OpcConnectionTestResult | null>(null)
   const [error, setError] = useState('')
@@ -230,9 +233,12 @@ export function OpcSettingsPanel({
     setError('')
     try {
       const cfg = JSON.parse(await api.opcConfigGet()) as OpcPlatformConfig
+      const fallbackName = cfg.default_workbench_name || DEFAULT_WORKBENCH_NAME
       setDefaultPlatformBase(cfg.default_platform_base || 'https://aiwork.benlai.com')
+      setDefaultWorkbenchName(fallbackName)
       setDefaultAppDomainRoot(cfg.default_app_domain_root || 'ai.benlai.com')
       setPlatformBase(cfg.platform_base || cfg.default_platform_base || 'https://aiwork.benlai.com')
+      setWorkbenchName(cfg.workbench_name || fallbackName)
       setAppDomainRoot(cfg.app_domain_root ?? '')
       setAppDefaultPort(String(cfg.app_default_port ?? 8080))
     } catch (e) {
@@ -266,6 +272,7 @@ export function OpcSettingsPanel({
 
   const handleReset = () => {
     setPlatformBase(defaultPlatformBase)
+    setWorkbenchName(defaultWorkbenchName)
     setAppDomainRoot('')
     setAppDefaultPort('8080')
     setTestResult(null)
@@ -293,12 +300,15 @@ export function OpcSettingsPanel({
         await api.opcConfigUpdate(
           JSON.stringify({
             platform_base: trimmedBase,
+            workbench_name: workbenchName.trim(),
             app_domain_root: appDomainRoot.trim(),
             app_default_port: parsedPort,
           }),
         ),
       ) as OpcPlatformConfig
       setPlatformBase(updated.platform_base)
+      setWorkbenchName(updated.workbench_name || defaultWorkbenchName)
+      syncWorkbenchName(updated.workbench_name)
       setAppDomainRoot(updated.app_domain_root)
       setAppDefaultPort(String(updated.app_default_port))
       setNotice({
@@ -385,6 +395,21 @@ export function OpcSettingsPanel({
                 : t("settings.connectionFailed", { err: testResult.error || t("settings.unreachable") })}
             </div>
           )}
+        </div>
+        <div className="opc-settings-field">
+          <label className="opc-settings-label" htmlFor={`${formId}-workbench-name`}>
+            {t("settings.workbenchName")}
+          </label>
+          <input
+            id={`${formId}-workbench-name`}
+            type="text"
+            maxLength={64}
+            className="opc-settings-input"
+            placeholder={defaultWorkbenchName}
+            value={workbenchName}
+            disabled={loading || saving}
+            onChange={e => setWorkbenchName(e.target.value)}
+          />
         </div>
       </section>
 

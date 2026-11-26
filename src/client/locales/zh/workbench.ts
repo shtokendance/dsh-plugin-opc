@@ -1,10 +1,10 @@
 export const workbench = {
   "workbench.switchOpcPageCurrent": "切换 OPC 页面，当前{name}",
-  "workbench.opcWorkbench": "OPC 工作台",
+  "workbench.opcWorkbench": "本来工作台",
   "workbench.switchOpcModule": "切换 OPC 模块",
   "workbench.clickToEnlarge": "点击放大查看截图",
   "workbench.copy": "复制示例",
-  "workbench.enterpriseWorkbench": "企业能力工作台",
+  "workbench.enterpriseWorkbench": "本来工作台",
   "workbench.chooseAModuleBelowToManage": "选择下方功能模块进入管理，或在左侧对话中直接调用企业能力。",
   "workbench.modules": "功能模块入口",
   "workbench.clickCardToOpenClickFor": "点击卡片进入模块 · 点击 ? 查看图文指南",
@@ -24,7 +24,7 @@ export const workbench = {
   "workbench.openPluginsDshPluginOpcOn": "请在左侧「插件」列表中找到 dsh-plugin-opc 进入详情页更新。",
   "workbench.later": "稍后再说",
   "workbench.update": "去更新",
-  "workbench.openingOpcWorkbench": "正在打开 OPC 工作台…",
+  "workbench.openingOpcWorkbench": "正在打开本来工作台…",
   "workbench.knowledgeBasesSkillsMcpAndApps": "知识库、技能、MCP 与应用",
 
   // Pages & Module Cards

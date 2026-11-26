@@ -4,6 +4,7 @@
       name: 'dsh-plugin-opc'
       config:
         platformBaseUrl: https://aiwork.benlai.com
+        workbenchName: 本来工作台
         clientId: work-desktop
         # 留空使用 DSH home；可显式指定本机受管技能目录。
         dataHome: ''
