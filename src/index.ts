@@ -17,6 +17,7 @@ import { registerTools } from './host/tools.ts'
 import { AppDelivery } from './host/app-delivery.ts'
 import { attachAppAgent } from './host/app-agent.ts'
 import { AppSkillProvider, registerAppTools } from './host/app-skills.ts'
+import { mountBenlaiLlmProvider } from './host/llm-provider.ts'
 
 export const name = 'dsh-plugin-opc'
 export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert', 'llm']
@@ -84,6 +85,7 @@ export function apply(ctx: Context, config: Config): void {
       })
     },
   }))
+  ctx.effect(() => mountBenlaiLlmProvider(ctx, auth, core))
   ctx.effect(() => { void auth.restore().catch(() => core.emit('change')); return () => auth.dispose() })
 }
 
