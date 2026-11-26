@@ -9,6 +9,7 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { contribution } from '../remote-contract.ts'
 import { Panel } from './Panel.tsx'
+import { OpcAccountLauncher, type OpcAccountLauncherProps } from './OpcAccountLauncher.tsx'
 import type { OpcApi } from './api.ts'
 import { registerAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { bindDshLocaleRuntime, getActiveClientLocale, LocaleProvider, translate, type DshLocaleRuntime } from './i18n.tsx'
@@ -141,6 +142,17 @@ function registerPanels(ctx: Context): void {
     if (!openPluginDetail) return false
     openPluginDetail()
     return true
+  }
+  const isWorkOpcHost = Boolean((globalThis as { __WORKOPC_OWNED_LAUNCHER__?: boolean }).__WORKOPC_OWNED_LAUNCHER__)
+  if (isWorkOpcHost) {
+    ctx.effect(() => ctx.slots.inject('settings.launcher' as never, () => ctx.slots.register({
+      name: 'settings.launcher' as never,
+      inject: () => ({ api }),
+    }, ((props: OpcAccountLauncherProps) => (
+      <LocaleProvider>
+        <OpcAccountLauncher {...props} />
+      </LocaleProvider>
+    )) as never)))
   }
   const prepareAnalysisNavigation = registerAnalysisNavigation(ctx, api)
   const id = 'dsh-plugin-opc/workbench'
