@@ -12,6 +12,7 @@ export interface PublicAuthState {
   signedIn: boolean; loginInProgress: boolean; loginAuthorizeUrl?: string
   loginError?: { code: string; message: string }
   context: EnterpriseContext | null
+  hostClientName: HostClientName
 }
 function text(value: unknown): string { return typeof value === 'string' ? value : '' }
 
@@ -86,16 +87,17 @@ export function detectHostClientName(options: {
 export function renderCallbackHtml(options: { ok: boolean; title: string; subtitle: string; code?: string; clientName?: HostClientName }): string {
   const clientName = options.clientName ?? detectHostClientName()
   const escapedClientName = escapeHtml(clientName)
+  const returnHref = clientName === 'WorkOPC' ? 'workopc://open' : 'dsh://open'
   const icon = options.ok
     ? '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
     : '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
   const statusClass = options.ok ? 'success' : 'error'
   const codeHtml = options.code ? `<span class="error-code">${escapeHtml(options.code)}</span>` : ''
   const footerHtml = options.ok
-    ? `<a class="btn-primary" href="dsh://open">返回 ${escapedClientName}</a><p class="subtle-note">若浏览器未自动跳转，可点击上方按钮或关闭此标签页切回客户端</p>`
-    : `<a class="btn-secondary" href="dsh://open">返回 ${escapedClientName}</a>`
+    ? `<a class="btn-primary" href="${returnHref}">返回 ${escapedClientName}</a><p class="subtle-note">若浏览器未自动跳转，可点击上方按钮或关闭此标签页切回客户端</p>`
+    : `<a class="btn-secondary" href="${returnHref}">返回 ${escapedClientName}</a>`
   const autoOpenScript = options.ok
-    ? "<script>setTimeout(function(){window.location.href='dsh://open'},180)</script>"
+    ? `<script>setTimeout(function(){window.location.href='${returnHref}'},180)</script>`
     : ''
   return `<!doctype html>
 <html lang="zh-CN">
@@ -154,7 +156,7 @@ export class AuthManager extends EventEmitter {
     this.#refreshFlight = new TokenRefresh(() => this.refresh())
   }
   get state(): PublicAuthState {
-    return { signedIn: this.contexts.current !== null, loginInProgress: !!this.#login, loginAuthorizeUrl: this.#login?.url, loginError: this.#error, context: this.contexts.current }
+    return { signedIn: this.contexts.current !== null, loginInProgress: !!this.#login, loginAuthorizeUrl: this.#login?.url, loginError: this.#error, context: this.contexts.current, hostClientName: this.hostClientName }
   }
   private changed(): void { this.emit('change', this.state) }
   private persist(action: () => Promise<void>): Promise<void> {

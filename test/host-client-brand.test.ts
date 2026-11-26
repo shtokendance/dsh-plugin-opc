@@ -48,6 +48,8 @@ test('renderCallbackHtml uses the detected host client name on return links', ()
     clientName: 'WorkOPC',
   })
   assert.match(workopcHtml, /返回 WorkOPC/)
+  assert.match(workopcHtml, /workopc:\/\/open/)
+  assert.doesNotMatch(workopcHtml, /dsh:\/\/open/)
   assert.doesNotMatch(workopcHtml, /DeepSeek Harness/)
 
   const dshHtml = renderCallbackHtml({
@@ -57,6 +59,8 @@ test('renderCallbackHtml uses the detected host client name on return links', ()
     clientName: 'DeepSeek Harness',
   })
   assert.match(dshHtml, /返回 DeepSeek Harness/)
+  assert.match(dshHtml, /dsh:\/\/open/)
+  assert.doesNotMatch(dshHtml, /workopc:\/\/open/)
   assert.doesNotMatch(dshHtml, /返回 WorkOPC/)
 })
 

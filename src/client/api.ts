@@ -367,6 +367,7 @@ export interface AuthState {
   mountedServices?: string[]
   approvals?: { id: string; contextId: string; serviceId: string; toolName: string; arguments: Record<string, unknown> }[]
   signedIn: boolean; loginInProgress: boolean; loginAuthorizeUrl?: string; loginError?: { code: string; message: string }
+  hostClientName?: 'WorkOPC' | 'DeepSeek Harness'
   opcConfig?: { platformBaseUrl: string; appDomainRoot: string; rawAppDomainRoot?: string; defaultPort: number }
   context: null | { subject: string; tenant: string; spaces: string[]; contextId: string; applicationContextId?: string; displayName?: string; email?: string; spacesDetail?: { id: string; name: string }[] }
 }

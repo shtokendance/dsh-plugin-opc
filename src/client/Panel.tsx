@@ -1189,18 +1189,21 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   }, [api, appContextId, selectPage, sessionId, state.signedIn, visible])
 
   const action = (fn: () => Promise<void>) => () => void run(fn)
+  const hideHeaderAccount = state.hostClientName === 'WorkOPC'
+    || Boolean((globalThis as { __WORKOPC_OWNED_LAUNCHER__?: boolean }).__WORKOPC_OWNED_LAUNCHER__)
 
   return <section className="opc-panel">
     <style>{css + workbenchStyles + paginationStyles + mcpDetailStyles}</style>
-    {/* Title Bar with Integrated Auth, Space Switcher, Refresh, Settings, and Logout */}
     <header className="opc-header-bar">
       <WorkbenchNavigation kind={kind} onSelect={selectPage} />
       <div className="header-actions">
         {state.signedIn && context && <>
-          <div className="user-pill" title={context.email ? `${context.displayName || context.subject} (${context.email})` : (context.displayName || context.subject)}>
-            <span className="user-avatar">{((context.displayName || context.subject)[0] || 'U').toUpperCase()}</span>
-            <span className="user-name">{context.displayName || context.subject}</span>
-          </div>
+          {!hideHeaderAccount && (
+            <div className="user-pill" title={context.email ? `${context.displayName || context.subject} (${context.email})` : (context.displayName || context.subject)}>
+              <span className="user-avatar">{((context.displayName || context.subject)[0] || 'U').toUpperCase()}</span>
+              <span className="user-name">{context.displayName || context.subject}</span>
+            </div>
+          )}
           {!showSettings && kind !== 'home' && <button
             className="btn-header"
             disabled={busy}
@@ -1221,7 +1224,7 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         >
           {showSettings ? t("panel.back") : t("panel.settings")}
         </button>
-        {state.signedIn && context && (
+        {state.signedIn && context && !hideHeaderAccount && (
           <button
             className="btn-header btn-logout"
             disabled={busy}
