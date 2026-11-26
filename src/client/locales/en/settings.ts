@@ -16,6 +16,7 @@ export const settings = {
   "settings.primaryEntry": "Primary Entry",
   "settings.usedForWecomSsoLoginEnterprise": "Used for WeCom/SSO login, enterprise KB search, skill catalog, and MCP gateway.",
   "settings.platformBaseUrl": "Platform Base URL",
+  "settings.workbenchName": "Workbench Name",
   "settings.testing": "Testing...",
   "settings.testConnection": "Test Connection",
   "settings.connectedMsHttp": "Connected ({ms}ms, HTTP {code})",

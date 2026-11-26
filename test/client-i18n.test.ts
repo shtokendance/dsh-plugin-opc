@@ -37,8 +37,8 @@ test('getIntlLocale returns BCP-47 tags for registered locales', () => {
 })
 
 test('translate resolves dictionary entries by locale and formats placeholders', () => {
-  assert.equal(translate('zh', 'workbench.opcWorkbench'), 'OPC 工作台')
-  assert.equal(translate('en', 'workbench.opcWorkbench'), 'OPC Workbench')
+  assert.equal(translate('zh', 'workbench.opcWorkbench'), '本来工作台')
+  assert.equal(translate('en', 'workbench.opcWorkbench'), 'Benlai Workbench')
   assert.equal(
     translate('zh', 'workbench.viewGuide', { name: '知识库' }),
     '查看知识库图文指南',

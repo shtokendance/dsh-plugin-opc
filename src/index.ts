@@ -21,8 +21,8 @@ import { mountBenlaiLlmProvider } from './host/llm-provider.ts'
 
 export const name = 'dsh-plugin-opc'
 export const inject = ['credentials', 'authorization', 'skills', 'tools', 'agents', 'approval', 'typert', 'llm']
-export interface Config { platformBaseUrl: string; clientId: string; dataHome: string; appDomainRoot?: string; appDefaultPort?: number }
-export const Config = z.object({ platformBaseUrl: z.string().default('https://aiwork.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default(''), appDomainRoot: z.string().default(''), appDefaultPort: z.number().default(8080) })
+export interface Config { platformBaseUrl: string; clientId: string; dataHome: string; appDomainRoot?: string; appDefaultPort?: number; workbenchName?: string }
+export const Config = z.object({ platformBaseUrl: z.string().default('https://aiwork.benlai.com'), clientId: z.string().default('work-desktop'), dataHome: z.string().default(''), appDomainRoot: z.string().default(''), appDefaultPort: z.number().default(8080), workbenchName: z.string().default('本来工作台') })
 export function apply(ctx: Context, config: Config): void {
   const key = credentialKey(name, 'enterprise')
   const home = config.dataHome || resolveDshHome()
@@ -30,6 +30,7 @@ export function apply(ctx: Context, config: Config): void {
     platformBaseUrl: config.platformBaseUrl,
     appDomainRoot: config.appDomainRoot,
     appDefaultPort: config.appDefaultPort,
+    workbenchName: config.workbenchName,
   })
   const initialConfig = configStore.loadSync()
   const auth = new AuthManager(new PlatformHttp(initialConfig.platform_base), {

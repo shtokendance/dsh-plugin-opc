@@ -10,6 +10,7 @@ import { NoticeModal } from './NoticeModal.tsx'
 import { useI18n } from './i18n.tsx'
 import { DEFAULT_PAGE_SIZE, Pagination, paginateItems, paginationStyles } from './Pagination.tsx'
 import { WorkbenchHome, WorkbenchNavigation, type PanelKind } from './Workbench.tsx'
+import { setWorkbenchName } from './workbench-name.ts'
 import { OpcIcon } from './branding.tsx'
 import { workbenchStyles } from './workbenchStyles.ts'
 
@@ -1189,6 +1190,9 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
   }, [api, appContextId, selectPage, sessionId, state.signedIn, visible])
 
   const action = (fn: () => Promise<void>) => () => void run(fn)
+  useEffect(() => {
+    if (state.opcConfig?.workbenchName) setWorkbenchName(state.opcConfig.workbenchName)
+  }, [state.opcConfig?.workbenchName])
   const hideHeaderAccount = state.hostClientName === 'WorkOPC'
     || Boolean((globalThis as { __WORKOPC_OWNED_LAUNCHER__?: boolean }).__WORKOPC_OWNED_LAUNCHER__)
 
@@ -1242,7 +1246,10 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
         <OpcSettingsPanel
           api={api}
           onClose={() => setShowSettings(false)}
-          onSaved={() => setAppsRefreshTrigger(prev => prev + 1)}
+          onSaved={cfg => {
+            if (cfg.workbench_name) setWorkbenchName(cfg.workbench_name)
+            setAppsRefreshTrigger(prev => prev + 1)
+          }}
         />
       </main>
     ) : !state.signedIn || !context ? (

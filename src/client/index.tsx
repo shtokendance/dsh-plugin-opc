@@ -14,6 +14,12 @@ import type { OpcApi } from './api.ts'
 import { registerAnalysisNavigation } from './app-analysis-navigation.tsx'
 import { bindDshLocaleRuntime, getActiveClientLocale, LocaleProvider, translate, type DshLocaleRuntime } from './i18n.tsx'
 import { modules, readWorkbenchPage, workbenchKind, type ModuleKind } from './Workbench.tsx'
+import { getWorkbenchName, setWorkbenchName, useWorkbenchName } from './workbench-name.ts'
+
+function WorkbenchTabTitle() {
+  const title = useWorkbenchName()
+  return <><OpcIcon /> {title}</>
+}
 
 type WorkbenchBodyProps = Pick<React.ComponentProps<typeof Panel>, 'api' | 'sessionId' | 'prepareAnalysisNavigation' | 'onOpenPluginDetail'> &
   PropsRuntime<'sidebar.right.pane.tab'>
@@ -155,15 +161,19 @@ function registerPanels(ctx: Context): void {
     )) as never)))
   }
   const prepareAnalysisNavigation = registerAnalysisNavigation(ctx, api)
+  void api.opcConfigGet?.().then(raw => {
+    const cfg = JSON.parse(raw) as { workbench_name?: string }
+    if (cfg.workbench_name) setWorkbenchName(cfg.workbench_name)
+  }).catch(() => {})
   const id = 'dsh-plugin-opc/workbench'
-  const getTitle = () => translate(getActiveClientLocale(), "workbench.opcWorkbench")
+  const getTitle = () => getWorkbenchName()
   const getDesc = () => translate(getActiveClientLocale(), "workbench.knowledgeBasesSkillsMcpAndApps")
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id, kind: workbenchKind, priority: 'extension', title: getTitle,
     guide: [{ id: workbenchKind, order: 10, icon: OpcIcon, title: getTitle, description: getDesc }],
   }))
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register(
-    { name: 'sidebar.right.pane.tab.title', key: id }, () => <><OpcIcon /> {getTitle()}</>,
+    { name: 'sidebar.right.pane.tab.title', key: id }, WorkbenchTabTitle,
   )))
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: id,

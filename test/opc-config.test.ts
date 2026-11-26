@@ -14,6 +14,7 @@ import {
   DEFAULT_APP_DEFAULT_PORT,
   DEFAULT_APP_DOMAIN_ROOT,
   DEFAULT_PLATFORM_BASE,
+  DEFAULT_WORKBENCH_NAME,
   OpcConfigStore,
 } from '../src/host/opc-config.ts'
 
@@ -32,33 +33,42 @@ test('OpcConfigStore loads defaults, validates, persists, and resets config clea
       platform_base: DEFAULT_PLATFORM_BASE,
       app_domain_root: '',
       app_default_port: DEFAULT_APP_DEFAULT_PORT,
+      workbench_name: DEFAULT_WORKBENCH_NAME,
     })
+    assert.equal(DEFAULT_WORKBENCH_NAME, '本来工作台')
     assert.equal(store.getPayload().effective_app_domain_root, DEFAULT_APP_DOMAIN_ROOT)
+    assert.equal(store.getPayload().workbench_name, '本来工作台')
+    assert.equal(store.getPayload().default_workbench_name, '本来工作台')
 
     const updated = await store.update({
       platform_base: 'https://pre.opc.example.com/',
       app_domain_root: 'https://10.101.102.200.nip.io:8080/',
       app_default_port: 3000,
+      workbench_name: '  星辰工作台  ',
     })
     assert.equal(updated.platform_base_changed, true)
     assert.equal(updated.config.platform_base, 'https://pre.opc.example.com')
     assert.equal(updated.config.app_domain_root, '10.101.102.200.nip.io:8080')
     assert.equal(updated.config.app_default_port, 3000)
     assert.equal(updated.config.effective_app_domain_root, '10.101.102.200.nip.io:8080')
+    assert.equal(updated.config.workbench_name, '星辰工作台')
 
-    // Re-loading from disk preserves persisted overrides
     const reloaded = new OpcConfigStore(home)
     assert.deepEqual(reloaded.loadSync(), {
       platform_base: 'https://pre.opc.example.com',
       app_domain_root: '10.101.102.200.nip.io:8080',
       app_default_port: 3000,
+      workbench_name: '星辰工作台',
     })
 
-    // Validation guards
+    const clearedName = await store.update({ workbench_name: '   ' })
+    assert.equal(clearedName.config.workbench_name, DEFAULT_WORKBENCH_NAME)
+
     await assert.rejects(store.update({ platform_base: 'http://remote.example' }), { code: 'INSECURE_PLATFORM_URL' })
     await assert.rejects(store.update({ platform_base: 'https://user:pass@opc.example' }), { code: 'INVALID_PLATFORM_URL' })
     await assert.rejects(store.update({ app_domain_root: 'bad domain/path' }), /根域名后缀格式无效/)
     await assert.rejects(store.update({ app_default_port: 70000 }), /1 至 65535/)
+    await assert.rejects(store.update({ workbench_name: 'x'.repeat(65) }), /64/)
 
     const reset = await store.reset()
     assert.equal(reset.platform_base_changed, true)
@@ -66,6 +76,26 @@ test('OpcConfigStore loads defaults, validates, persists, and resets config clea
     assert.equal(reset.config.app_domain_root, '')
     assert.equal(reset.config.app_default_port, DEFAULT_APP_DEFAULT_PORT)
     assert.equal(reset.config.effective_app_domain_root, DEFAULT_APP_DOMAIN_ROOT)
+    assert.equal(reset.config.workbench_name, DEFAULT_WORKBENCH_NAME)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('OpcConfigStore supports company-specific workbenchName default from plugin config', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'opc-cfg-brand-'))
+  try {
+    const store = new OpcConfigStore(home, { workbenchName: '  未来科技工作台  ' })
+    assert.equal(store.loadSync().workbench_name, '未来科技工作台')
+    assert.equal(store.getPayload().workbench_name, '未来科技工作台')
+    assert.equal(store.getPayload().default_workbench_name, '未来科技工作台')
+
+    const custom = await store.update({ workbench_name: '临时名称' })
+    assert.equal(custom.config.workbench_name, '临时名称')
+    assert.equal(custom.config.default_workbench_name, '未来科技工作台')
+
+    const restored = await store.reset()
+    assert.equal(restored.config.workbench_name, '未来科技工作台')
   } finally {
     await rm(home, { recursive: true, force: true })
   }

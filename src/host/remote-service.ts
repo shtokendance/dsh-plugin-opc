@@ -357,6 +357,7 @@ export class OpcRemoteService extends TypertRemoteService {
       appDefaultPort: config.app_default_port,
     })
     if (platform_base_changed) this.core.emit('skills-changed')
+    this.core.emit('change')
     return JSON.stringify({ ...config, platform_base_changed })
   }
   @Remote
@@ -370,6 +371,7 @@ export class OpcRemoteService extends TypertRemoteService {
       platform_base: parsed.platform_base,
       app_domain_root: parsed.app_domain_root,
       app_default_port: parsed.app_default_port,
+      workbench_name: parsed.workbench_name,
     }))
   }
   @Remote
@@ -415,7 +417,7 @@ export class OpcRemoteService extends TypertRemoteService {
     const state = this.core.auth.state
     const mounted = this.mounts?.list() ?? []
     const cfg = this.configStore.getPayload(this.core.auth.http.base.href)
-    return JSON.stringify({ ...state, knowledgeMentionScopeVersion: 1, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), pinnedScopeDetails: this.core.scopes.pinDetails(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), opcConfig: { platformBaseUrl: cfg.platform_base, appDomainRoot: cfg.effective_app_domain_root, rawAppDomainRoot: cfg.app_domain_root, defaultPort: cfg.app_default_port }, context: state.context ? { ...state.context, contextId: contextId(state.context), applicationContextId: this.core.auth.contexts.applicationContextId, epoch: this.core.auth.contexts.epoch } : null })
+    return JSON.stringify({ ...state, knowledgeMentionScopeVersion: 1, mountAvailable: !!this.mounts, mcpConnections: Object.fromEntries(mounted.map(id => { const status = this.manager?.list().find(item => item.name === mcpMountName(id))?.status; return [id, { state: status?.state ?? 'connecting', toolCount: status?.state === 'connected' ? status.toolCount : 0 }] })), pinnedScopes: this.core.scopes.pins(), pinnedScopeDetails: this.core.scopes.pinDetails(), mountedServices: mounted, approvals: [...this.pendingApprovals].map(([id, pending]) => ({ id, contextId: pending.contextId, ...pending.prompt })), opcConfig: { platformBaseUrl: cfg.platform_base, appDomainRoot: cfg.effective_app_domain_root, rawAppDomainRoot: cfg.app_domain_root, defaultPort: cfg.app_default_port, workbenchName: cfg.workbench_name }, context: state.context ? { ...state.context, contextId: contextId(state.context), applicationContextId: this.core.auth.contexts.applicationContextId, epoch: this.core.auth.contexts.epoch } : null })
   }
   @Remote({ mode: 'stream' })
   async *watchState(signal: AbortSignal): AsyncIterable<string> {
