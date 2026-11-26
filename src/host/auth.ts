@@ -58,15 +58,42 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;')
 }
 
-function renderCallbackHtml(options: { ok: boolean; title: string; subtitle: string; code?: string }): string {
+export type HostClientName = 'WorkOPC' | 'DeepSeek Harness'
+
+export function detectHostClientName(options: {
+  homeDir?: string
+  execPath?: string
+  resourcesPath?: string
+  env?: NodeJS.ProcessEnv
+} = {}): HostClientName {
+  const env = options.env ?? process.env
+  const explicit = env.WORKOPC_BRAND_NAME?.trim()
+  if (explicit === 'WorkOPC' || explicit === 'DeepSeek Harness') return explicit
+  const probes = [
+    options.homeDir ?? '',
+    options.execPath ?? process.execPath,
+    options.resourcesPath ?? (process as { resourcesPath?: string }).resourcesPath ?? '',
+    env.DSH_HOME ?? '',
+  ]
+  for (const probe of probes) {
+    if (/(?:^|[\\/])\.workopc(?:[\\/]|$)/i.test(probe) || /workopc/i.test(probe)) {
+      return 'WorkOPC'
+    }
+  }
+  return 'DeepSeek Harness'
+}
+
+export function renderCallbackHtml(options: { ok: boolean; title: string; subtitle: string; code?: string; clientName?: HostClientName }): string {
+  const clientName = options.clientName ?? detectHostClientName()
+  const escapedClientName = escapeHtml(clientName)
   const icon = options.ok
     ? '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
     : '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
   const statusClass = options.ok ? 'success' : 'error'
   const codeHtml = options.code ? `<span class="error-code">${escapeHtml(options.code)}</span>` : ''
   const footerHtml = options.ok
-    ? '<a class="btn-primary" href="dsh://open">返回 DeepSeek Harness</a><p class="subtle-note">若浏览器未自动跳转，可点击上方按钮或关闭此标签页切回客户端</p>'
-    : '<a class="btn-secondary" href="dsh://open">返回 DeepSeek Harness</a>'
+    ? `<a class="btn-primary" href="dsh://open">返回 ${escapedClientName}</a><p class="subtle-note">若浏览器未自动跳转，可点击上方按钮或关闭此标签页切回客户端</p>`
+    : `<a class="btn-secondary" href="dsh://open">返回 ${escapedClientName}</a>`
   const autoOpenScript = options.ok
     ? "<script>setTimeout(function(){window.location.href='dsh://open'},180)</script>"
     : ''
@@ -122,7 +149,7 @@ export class AuthManager extends EventEmitter {
   #error: PublicAuthState['loginError']
   #refreshFlight: TokenRefresh
   readonly device = createHash('sha256').update(`${hostname()}:${platform()}:${arch()}`).digest('hex').slice(0, 32)
-  constructor(readonly http: PlatformHttp, private readonly grants: GrantStore, private readonly openBrowser: (url: string) => Promise<void>, readonly clientId = 'work-desktop') {
+  constructor(readonly http: PlatformHttp, private readonly grants: GrantStore, private readonly openBrowser: (url: string) => Promise<void>, readonly clientId = 'work-desktop', private readonly hostClientName: HostClientName = detectHostClientName()) {
     super()
     this.#refreshFlight = new TokenRefresh(() => this.refresh())
   }
@@ -278,7 +305,8 @@ export class AuthManager extends EventEmitter {
           response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).end(renderCallbackHtml({
             ok: true,
             title: '登录成功',
-            subtitle: '已成功连接 OPC 企业工作空间，正在为您唤起 DeepSeek Harness 客户端…',
+            subtitle: `已成功连接 OPC 企业工作空间，正在为您唤起 ${this.hostClientName} 客户端…`,
+            clientName: this.hostClientName,
           }))
         } catch (error) {
           const errorCode = error instanceof OpcError ? error.code : 'LOGIN_FAILED'
@@ -289,6 +317,7 @@ export class AuthManager extends EventEmitter {
             title: '授权未完成',
             subtitle: message,
             code: errorCode,
+            clientName: this.hostClientName,
           }))
         } finally { if (this.#login?.server === server) this.cancelLogin() }
       })()
