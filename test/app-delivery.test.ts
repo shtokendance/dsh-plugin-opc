@@ -339,6 +339,7 @@ test('analysis replies preserve the bound task and only a complete proposal is b
   const allowReply = Promise.withResolvers<void>()
   const question = '保留现在使用的数据源吗？'
   let id: string | undefined
+  let jobRoot = ''
   const waitFor = async (condition: (job: Record<string, any>) => boolean, options?: { requireIdle?: boolean }) => {
     const deadline = Date.now() + 5_000
     for (;;) {
@@ -360,6 +361,7 @@ test('analysis replies preserve the bound task and only a complete proposal is b
     const created = await delivery.create({ name: '测试会话', slug: 'test-app', source }, 'origin', expected)
     id = created.id
     delivery.analyze = async (job, root, _feedback, signal, onSessionReady) => {
+      jobRoot = root
       await onSessionReady(analysisSessionId)
       const blocked = proposal(url)
       await delivery.submit(job, root, { ...blocked, contract: { ...blocked.contract, unresolved: [question] } }, signal)
@@ -373,9 +375,8 @@ test('analysis replies preserve the bound task and only a complete proposal is b
         /只能修改根目录 Dockerfile/,
       )
       await delivery.submit(job, root, submitted, signal, { dockerfileOnly: true })
-      const revisions = (await readdir(root)).filter(name => /^[a-f0-9]{32}$/.test(name))
-      assert.equal(revisions.length, 1)
-      assert.ok(await stat(join(root, revisions[0], 'bundle', 'app.tar')))
+      const preBundleRevisions = (await readdir(root)).filter(name => /^[a-f0-9]{32}$/.test(name))
+      assert.equal(preBundleRevisions.length, 0)
     }
     await delivery.startAnalysis(created.id, '', expected)
     const waiting = await waitFor(job => job.status === 'review')
@@ -387,6 +388,9 @@ test('analysis replies preserve the bound task and only a complete proposal is b
     allowReply.resolve()
     const ready = await waitFor(job => job.status === 'ready' && !job.analysisChatActive, { requireIdle: true })
     assert.equal(ready.status, 'ready', ready.error)
+    const revisions = (await readdir(jobRoot)).filter(name => /^[a-f0-9]{32}$/.test(name))
+    assert.equal(revisions.length, 1)
+    assert.ok(await stat(join(jobRoot, revisions[0], 'bundle', 'app.tar')))
     assert.equal(ready.analysisSessionId, analysisSessionId)
     assert.equal(ready.revisionCount, 2)
     assert.match(ready.feedbackHistory, /保留现在使用的数据源/)
