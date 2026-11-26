@@ -31,6 +31,7 @@ export interface SourceSyncRecord {
   sourceRoot: string
   files: string[]
   syncedAt: number
+  proposalHash?: string
   undone?: boolean
   undoneAt?: number
 }
@@ -698,6 +699,12 @@ export class AppDelivery {
         .map(name => [name, root ? join(root, job.revision!, 'bundle', name) : join(job.revision!, 'bundle', name)]))
       : undefined
     const artifactHash = job.hashes ? fingerprint(job.hashes) : undefined
+    const proposalHash = proposal ? fingerprint(proposal) : undefined
+    const pendingSourceSync = Boolean(
+      job.sourcePath &&
+      (proposal?.changes?.length ?? 0) > 0 &&
+      (!job.sourceSync || job.sourceSync.undone || (proposalHash && job.sourceSync.proposalHash !== proposalHash)),
+    )
     return {
       ...rest,
       analysisChatStarting: !job.analysisSessionId && this.analyses.has(job.id),
@@ -709,8 +716,9 @@ export class AppDelivery {
       analysis_failure: job.analysisFailure,
       pages_verified: job.pagesVerified,
       artifactHash,
+      pendingSourceSync,
       deploymentReviewPending: Boolean(job.status === 'ready' && autoPrepared && artifactHash && (configDraft?.protectedOnly || configDraft?.artifactHash !== artifactHash)),
-      proposalHash: proposal ? fingerprint(proposal) : undefined,
+      proposalHash,
       artifacts: artifactFiles,
       runtime_configs: runtimeConfigs,
       verification: {
@@ -1468,16 +1476,33 @@ export class AppDelivery {
       ? '等待你在左侧会话回复' : '改造方案已通过校验')
     await this.save(root, job)
   }
-  async prepare(id: string, proposalHash: string, expected: string, options?: { forceOverwrite?: boolean }) {
+  async prepare(id: string, proposalHash: string, expected: string, options?: { forceOverwrite?: boolean; syncToSource?: boolean }) {
     const scope = this.scope(expected)
     return this.exclusive(id, async () => {
       const { root, job } = await this.open(scope.directory, id)
       const retry = job.status === 'failed' && job.failureStage === 'preparation'
-      if ((job.status !== 'review' && !retry) || !job.proposal || fingerprint(job.proposal) !== proposalHash) {
+      const currentHash = job.proposal ? fingerprint(job.proposal) : undefined
+      const pendingSync = Boolean(
+        job.status === 'ready' &&
+        job.sourcePath &&
+        (job.proposal?.changes?.length ?? 0) > 0 &&
+        (!job.sourceSync || job.sourceSync.undone || job.sourceSync.proposalHash !== currentHash),
+      )
+      if ((job.status !== 'review' && !retry && !pendingSync) || !job.proposal || currentHash !== proposalHash) {
         throw new Error('方案已变化，请刷新后核对')
       }
       if (analysisQuestions(job.proposal).length) throw new Error('请先在左侧会话处理待确认事项')
-      await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected, false, undefined, options?.forceOverwrite === true)
+      await this.prepareJob(
+        root,
+        job,
+        scope.signal,
+        scope.assertCurrent,
+        expected,
+        false,
+        undefined,
+        options?.forceOverwrite === true,
+        options?.syncToSource,
+      )
       return this.public(job, root)
     })
   }
@@ -1503,12 +1528,14 @@ export class AppDelivery {
     })
   }
 
-  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, expected: string, autoPrepared = false, confirmedConfigs?: AppDocument[], forceOverwrite = false) {
+  private async prepareJob(root: string, job: DeliveryJob, signal: AbortSignal, assertCurrent: () => void, expected: string, autoPrepared = false, confirmedConfigs?: AppDocument[], forceOverwrite = false, syncToSource?: boolean) {
     job.status = 'preparing'
     job.failureStage = undefined
     job.error = undefined
     job.sourceSyncConflicts = undefined
-    job.events.push(job.sourcePath ? '正在同步改造至本机源码并生成定版交付包' : '正在生成并检查交付包')
+    const hasLocalChanges = Boolean(job.sourcePath && (job.proposal?.changes?.length ?? 0) > 0)
+    const shouldSyncSource = Boolean(job.sourcePath) && (syncToSource ?? !(autoPrepared && hasLocalChanges))
+    job.events.push(shouldSyncSource ? '正在同步改造至本机源码并生成定版交付包' : '正在生成并检查交付包')
     await this.save(root, job)
     try {
       if (job.proposal?.config_format === 1) {
@@ -1530,7 +1557,7 @@ export class AppDelivery {
         expected_port: job.portAuto ? null : (job.port ?? 8080),
         revision_count: job.revisionCount ?? 1,
         feedback: job.feedbackHistory ?? '',
-        sync_to_source: Boolean(job.sourcePath),
+        sync_to_source: shouldSyncSource,
         force_overwrite: forceOverwrite,
       }, signal)
       signal.throwIfAborted(); assertCurrent()
@@ -1544,6 +1571,7 @@ export class AppDelivery {
           sourceRoot: result.source_sync.source_root,
           files: Array.isArray(result.source_sync.files) ? result.source_sync.files : [],
           syncedAt: Number(result.source_sync.synced_at) || Date.now(),
+          proposalHash: job.proposal ? fingerprint(job.proposal) : undefined,
         }
         job.events.push(`已将 ${job.sourceSync.files.length} 个改造文件同步至本机源码目录，并生成定版交付快照`)
       }
@@ -1826,7 +1854,7 @@ export class AppDelivery {
         })
         const existing = job.proposal.effective_configs ?? []
         if (fingerprint(finalValues) !== fingerprint(existing)) {
-          await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected, false, finalValues)
+          await this.prepareJob(root, job, scope.signal, scope.assertCurrent, expected, false, finalValues, false, false)
           if (job.status !== 'ready' || job.error) throw new Error(job.error || '无法按确认值重新生成交付包')
           config = await this.deploymentConfiguration(job, input, expected)
         }

@@ -4,6 +4,7 @@ import { AppDiscoveryReport } from './AppDiscoveryReport.tsx'
 import { AppIcon, type AppIconName } from './AppIcon.tsx'
 import { translate, useI18n, type ClientLocale } from './i18n.tsx'
 import { NoticeModal } from './NoticeModal.tsx'
+import { SourceSyncConfirmModal } from './SourceSyncConfirmModal.tsx'
 
 type DimensionMeta = {
   label: string
@@ -211,10 +212,16 @@ export function AppDeliveryReview({
   const [protectedValues, setProtectedValues] = useState<Record<string, string>>({})
   const [savingInputs, setSavingInputs] = useState(false)
   const [inputResult, setInputResult] = useState('')
+  const [syncModalOpen, setSyncModalOpen] = useState(false)
+  const [syncModalError, setSyncModalError] = useState('')
+  const [syncModalConflicts, setSyncModalConflicts] = useState<string[]>([])
   useEffect(() => {
     setProtectedValues({})
     setInputResult('')
     setDismissedError('')
+    setSyncModalOpen(false)
+    setSyncModalError('')
+    setSyncModalConflicts([])
   }, [jobId])
   const inFlight = useRef(false)
   const currentRef = useRef(job)
@@ -343,6 +350,37 @@ export function AppDeliveryReview({
   const transformation = (plan?.transformation_report as any) || job?.transformationReport
   const revNum = job?.revision_count ?? job?.revisionCount ?? 1
 
+  const confirmSourceSync = async (forceOverwrite = false) => {
+    const pHash = currentRef.current?.proposalHash
+    if (!pHash || inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    setSyncModalError('')
+    try {
+      const raw = api.appPrepareWithOptions
+        ? await api.appPrepareWithOptions(jobId, pHash, JSON.stringify({ forceOverwrite, syncToSource: true }), contextId)
+        : await api.appPrepare(jobId, pHash, contextId)
+      const result = JSON.parse(raw) as AppDeliveryJob
+      accept(result)
+      if (result.status === 'ready') {
+        setSyncModalOpen(false)
+        setSyncModalConflicts([])
+        onReady(result)
+        onNextStep?.()
+      } else if (result.sourceSyncConflicts?.length) {
+        setSyncModalConflicts(result.sourceSyncConflicts)
+        setSyncModalError(result.error || '')
+      } else {
+        setSyncModalError(result.error || t("apps.review.deliveryBundlePreparationIncomplete"))
+      }
+    } catch (e) {
+      setSyncModalError(String(e))
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
+  }
+
   const next = async () => {
     if (!canContinue) return
     setBusy(true)
@@ -351,6 +389,14 @@ export function AppDeliveryReview({
       if (!result || result.status !== 'ready' || result.artifactHash !== job?.artifactHash || result.proposal?.unresolved?.length) {
         accept(result)
         throw new Error(t("apps.review.appOrConfigurationHasChangedPlease"))
+      }
+      const changes = result.proposal?.changes ?? []
+      if (result.pendingSourceSync && result.sourcePath && changes.length > 0) {
+        accept(result)
+        setSyncModalError('')
+        setSyncModalConflicts(result.sourceSyncConflicts ?? [])
+        setSyncModalOpen(true)
+        return
       }
       onReady(result)
       onNextStep?.()
@@ -739,6 +785,22 @@ export function AppDeliveryReview({
                       )}
                     </div>
                   </div>
+                  {job?.pendingSourceSync && job.sourcePath && (plan?.changes?.length ?? 0) > 0 && (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        padding: '7px 10px',
+                        borderRadius: 8,
+                        background: '#eff6ff',
+                        border: '1px solid #bfdbfe',
+                        color: '#1e40af',
+                        fontSize: 12,
+                      }}
+                    >
+                      以上 {plan?.changes?.length} 项改造尚未写入本机目录，点击「下一步」确认后将同步至{' '}
+                      <code className="oa-mono">{job.sourcePath}</code>。
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -812,6 +874,29 @@ export function AppDeliveryReview({
           )}
         </div>
       </div>
+
+      <SourceSyncConfirmModal
+        open={syncModalOpen}
+        sourcePath={job?.sourcePath ?? ''}
+        changes={plan?.changes ?? []}
+        addedPaths={
+          new Set<string>([
+            ...((transformation?.added_files ?? []).map((item: any) => String(item.path || '')).filter(Boolean)),
+            ...((plan?.changes ?? [])
+              .filter(c => typeof c.diff === 'string' && /@@ -0,0 \+/.test(c.diff))
+              .map(c => c.path)),
+          ])
+        }
+        conflicts={syncModalConflicts}
+        syncing={busy}
+        error={syncModalError}
+        onCancel={() => {
+          setSyncModalOpen(false)
+          setSyncModalError('')
+          setSyncModalConflicts([])
+        }}
+        onConfirm={force => void confirmSourceSync(force)}
+      />
     </section>
   )
 }

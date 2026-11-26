@@ -173,11 +173,13 @@ export interface AppDeliveryJob {
   assessment?: { phase: 'build' | 'runtime'; outcome: 'passed' | 'failed'; report: string; evidence: string[] }
   id: string
   sourcePath?: string
+  pendingSourceSync?: boolean
   sourceSync?: {
     revision: string
     sourceRoot: string
     files: string[]
     syncedAt: number
+    proposalHash?: string
     undone?: boolean
     undoneAt?: number
   }
