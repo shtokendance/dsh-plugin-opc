@@ -235,7 +235,15 @@ export class AuthManager extends EventEmitter {
     const stored = await this.grants.read()
     if (revision !== this.#revision || !stored || stored.platformBaseUrl !== this.http.base.href) return
     this.#refresh = stored.refreshToken
-    await this.#refreshFlight.run()
+    try {
+      await this.#refreshFlight.run()
+    } catch (error) {
+      if (revision !== this.#revision || !this.#refresh) throw error
+      if (error instanceof OpcError && ['REFRESH_REUSE_DETECTED', 'SESSION_REVOKED', 'SUBJECT_NOT_PROVISIONED'].includes(error.code)) throw error
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      if (revision !== this.#revision || !this.#refresh) return
+      await this.#refreshFlight.run()
+    }
   }
   async token(): Promise<string> {
     this.contexts.capture()
