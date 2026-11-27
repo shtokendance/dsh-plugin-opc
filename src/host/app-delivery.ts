@@ -8,7 +8,7 @@ import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { followsDeploymentAttempt, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
+import { followsDeploymentAttempt, isBuildTimeout, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
 import type { OpcCore } from './core.ts'
 import { identityHash } from './context.ts'
 import { DEFAULT_APP_DOMAIN_ROOT } from './opc-config.ts'
@@ -430,10 +430,12 @@ export class AppDelivery {
     if (!['accepted', 'building', 'built', 'activating', 'runtime_ready', 'promoting', 'running', 'failed', 'cancelled'].includes(receipt.status)) return false
     if (receipt.progress?.phase) {
       const known = job.deploymentProgress
+      const progress: DeploymentAttemptProgress = receipt.progress
+      const failureKind = isBuildTimeout(progress, receipt.error_message) ? 'build_timeout' : progress.failure_kind
       job.deploymentProgress = receipt.progress.phase === 'unknown'
-        ? { ...receipt.progress, last_observed_at: known?.last_observed_at,
+        ? { ...progress, failure_kind: failureKind, last_observed_at: known?.last_observed_at,
           last_observed_phase: known?.phase === 'unknown' ? known.last_observed_phase : known?.phase }
-        : { ...receipt.progress, last_observed_at: Date.now() }
+        : { ...progress, failure_kind: failureKind, last_observed_at: Date.now() }
     }
     job.published = true
     job.version = Object.hasOwn(receipt, 'published_version') ? receipt.published_version || undefined : receipt.version
