@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { followsDeploymentAttempt, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
+import { followsDeploymentAttempt, isBuildTimeout, type DeploymentAttemptProgress } from '../deployment-attempt.ts'
 import type {
   AppConfigItem,
   AppDeliveryJob,
@@ -309,6 +309,7 @@ function attemptLabel(job: AppDeliveryJob, phase: DeploymentAttemptProgress['pha
       : (job.upgrade ? '正在启动新版本' : attemptLabels.starting)
   }
   if (phase === 'failed') {
+    if (isBuildTimeout(job.deploymentProgress, job.error)) return '镜像构建超时'
     switch (job.deploymentProgress?.failure_kind) {
       case 'build': return '镜像构建失败'
       case 'startup': return '应用启动失败'
@@ -537,6 +538,7 @@ export function AppsPanel({
   const [wizardError, setWizardError] = useState<string | null>(null)
   const [wizardNotice, setWizardNotice] = useState<string | null>(null)
   const [startupRecheck, setStartupRecheck] = useState<{ key: string; pending?: boolean; message?: string; error?: boolean }>()
+  const [attemptRecheck, setAttemptRecheck] = useState<{ key: string; pending?: boolean; message?: string; error?: boolean }>()
 
   // Step 1 Form State
   const [upgradeTarget, setUpgradeTarget] = useState<DeployedApp | null>(null)
@@ -1409,8 +1411,9 @@ export function AppsPanel({
     setWizardBusy(true)
     setWizardError(null)
     try {
-      const feedback =
-        wizardJob.error ||
+      const feedback = isBuildTimeout(wizardJob.deploymentProgress, wizardJob.error)
+        ? '本次镜像构建超过平台等待上限。请读取本次失败的完整部署日志（@deployment/logs）并核对实际交付包的 Dockerfile、依赖清单和锁定文件。定位耗时步骤，核对仓库访问失败、依赖下载量、缓存未命中或重复下载的证据。若证据指向应用构建流程，请提出最小改动，保留必要依赖、已确认的运行配置和持久化挂载。若证据指向平台服务或网络问题，请说明具体证据和处理方向。'
+        : wizardJob.error ||
         wizardJob.verification?.detail ||
         '请根据本次失败阶段和日志定位根因，沿用已确认的部署方案。'
       if (api.appReopenReview) {
@@ -1493,15 +1496,22 @@ export function AppsPanel({
   const handleCheckAttempt = async () => {
     if (!wizardJob || !api.appVerifyWithOptions) return
     const { id, requestId } = wizardJob
+    const key = progressRequestKey
+    setAttemptRecheck({ key, pending: true })
     setWizardBusy(true)
     setWizardError(null)
     try {
       const updated = JSON.parse(await api.appVerifyWithOptions(id, JSON.stringify({ checkProgress: true }), contextId)) as AppDeliveryJob
       if (updated.id !== id || updated.requestId !== requestId) throw new Error('平台返回了其他部署任务')
       setWizardJob(current => current?.id === id && current.requestId === requestId ? updated : current)
+      const phase = displayedAttempt(updated)?.phase
+      const status = phase === 'cleaning' && isBuildTimeout(updated.deploymentProgress, updated.error)
+        ? t("apps.buildTimeoutCleaning")
+        : deploymentProgress(updated).label
+      setAttemptRecheck({ key, message: t("apps.deploymentRecheckResult", { status }) })
       if (updated.status === 'verified') void loadWorkspaceData(true)
     } catch (error) {
-      setWizardError(readErrorMessage(error, '暂时无法确认部署进度'))
+      setAttemptRecheck({ key, message: readErrorMessage(error, '暂时无法确认部署进度'), error: true })
     } finally {
       setWizardBusy(false)
     }
@@ -2659,7 +2669,9 @@ export function AppsPanel({
             const elapsed = elapsedAttemptTime(attempt?.phase_started_at)
             const previous = attempt?.blocking_request_id ? jobs.find(job => job.slug === wizardJob.slug && job.requestId === attempt.blocking_request_id) : undefined
             const recheck = startupRecheck?.key === progressRequestKey ? startupRecheck : undefined
-            const preferAiRepair = Boolean(attempt?.retry_safe && (attempt.failure_kind === 'build' || attempt.failure_kind === 'startup'))
+            const progressRecheck = attemptRecheck?.key === progressRequestKey ? attemptRecheck : undefined
+            const buildTimeout = isBuildTimeout(attempt, wizardJob.error)
+            const preferAiRepair = Boolean(attempt?.retry_safe && (buildTimeout || attempt.failure_kind === 'build' || attempt.failure_kind === 'startup'))
             const showAttemptFailureAlert = Boolean(attempt && (attempt.phase === 'restored' || (failed && wizardJob.error)))
             const showActionGuide = Boolean(attempt?.retry_safe && (attempt.phase === 'failed' || attempt.phase === 'restored'))
             return (
@@ -2677,7 +2689,9 @@ export function AppsPanel({
                   {attempt && progress.tone !== 'ok' && (
                     <div className="oa-deploy-actions">
                       {!['submitting', 'submission_rejected', 'cancelled', 'restored'].includes(attempt.phase) && api.appVerifyWithOptions && (
-                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCheckAttempt()}>{t("apps.recheck")}</button>
+                        <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCheckAttempt()}>
+                          {progressRecheck?.pending ? t("apps.checking_2") : t("apps.recheck")}
+                        </button>
                       )}
                       {attempt.can_cancel && !['unknown', 'cancelling', 'cleaning'].includes(attempt.phase) && api.appCancelDeployment && (
                         <button type="button" className="oa-btn oa-btn-sm" disabled={wizardBusy} onClick={() => void handleCancelAttempt()}>{t("apps.cancelDeployment")}</button>
@@ -2725,7 +2739,9 @@ export function AppsPanel({
                           </strong>
                         </div>
                       )}
-                      {wizardJob.error && <div>{wizardJob.error}</div>}
+                      {buildTimeout && attempt.retry_safe
+                        ? <div>{t("apps.buildTimeoutEnded")}</div>
+                        : wizardJob.error && <div>{wizardJob.error}</div>}
                     </div>
                   </div>
                 )}
@@ -2737,6 +2753,7 @@ export function AppsPanel({
                       {attempt.last_observed_at && ` ${new Date(attempt.last_observed_at).toLocaleTimeString(getIntlLocale(locale))}`}
                     </div>}
                     {attempt.phase === 'blocked_previous' && <div>{t("apps.onceThePreviousDeploymentFinishesCleanup")}</div>}
+                    {buildTimeout && attempt.phase === 'cleaning' && <div>{t("apps.buildTimeoutCleaning")}</div>}
                     {attempt.stalled && elapsed && <div>{t("apps.elapsed", { elapsed })}{attempt.phase === 'starting' ? t("apps.appIsStillStarting") : '.'}</div>}
                     {attempt.active_version && progress.tone !== 'ok' && attempt.phase !== 'restored' ? <div>{t("apps.latestLiveVersionV", { version: attempt.active_version })}</div> : null}
                     {attempt.phase === 'recovery_required' && <div>{t("apps.platformIsProtectingAppDataPlease")}</div>}
@@ -2779,6 +2796,9 @@ export function AppsPanel({
                       )}
                     </div>
                   </>
+                )}
+                {progressRecheck?.message && (
+                  <div className={`oa-hint oa-deploy-message${progressRecheck.error ? ' oa-deploy-recheck-error' : ''}`} role="status">{progressRecheck.message}</div>
                 )}
                 {recheck?.message && (
                   <div className={`oa-hint oa-deploy-message${recheck.error ? ' oa-deploy-recheck-error' : ''}`} role="status">{recheck.message}</div>
