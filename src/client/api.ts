@@ -70,6 +70,40 @@ export interface AppStorageOverview {
   mounts: AppStorageMountDetail[]
 }
 
+export interface AppResourceOverview {
+  app_slug: string
+  app_name: string
+  app_status: string
+  available: boolean
+  message?: string
+  replicas_running: number
+  replicas_desired: number
+  cpu_percent: number
+  online_cpus: number
+  cpu_limit_cores: number
+  memory_usage_bytes: number
+  memory_limit_bytes: number
+  host_memory_bytes: number
+  memory_percent: number
+  container_rw_bytes: number
+  container_rootfs_bytes: number
+  persistent_bytes: number
+  persistent_mounts: number
+  persistent_files: number
+  server_total_bytes: number
+  server_used_bytes: number
+  server_available_bytes: number
+  network_rx_bytes: number
+  network_tx_bytes: number
+  block_read_bytes: number
+  block_write_bytes: number
+  pids: number
+  restart_count: number
+  started_at?: string
+  node_hostname?: string
+  collected_at: string
+}
+
 export interface AppVolumeBackupMount {
   container_path: string
   archive_path: string
@@ -326,6 +360,7 @@ export interface OpcApi {
   appDownload?(slug: string, selection: string, context: string): Promise<string>
   appSaveDownload(slug: string, selection: string, context: string): Promise<string>
   appStorage?(slug: string, context: string): Promise<string>
+  appMetrics?(slug: string, context: string): Promise<string>
   appRecheck?(slug: string, context: string): Promise<string>
   appSyncSkill?(slug: string, context: string): Promise<string>
   appRuntimeStatus?(slug: string, context: string): Promise<string>

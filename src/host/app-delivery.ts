@@ -2410,6 +2410,10 @@ export class AppDelivery {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     return this.platform(`/${slug}/storage`, expected)
   }
+  async metrics(slug: string, expected: string) {
+    if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
+    return this.platform(`/${slug}/metrics`, expected)
+  }
   private downloadTarget(slug: string, selection: AppDocument) {
     if (!/^[a-z][a-z0-9-]{2,39}$/.test(slug)) throw new Error('无效应用标识')
     if (selection.storage === true || typeof selection.mount === 'string' && selection.mount) {

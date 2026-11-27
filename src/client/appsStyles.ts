@@ -1374,4 +1374,108 @@ export const appsCss = `
 .oa-text-danger {
   color: var(--oa-danger);
 }
+@keyframes oa-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.oa-skeleton {
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 200% 100%;
+  animation: oa-shimmer 1.6s ease-in-out infinite;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .oa-skeleton {
+    animation: none;
+    background: #e2e8f0;
+  }
+}
+.oa-skeleton-pill {
+  display: inline-block;
+  height: 22px;
+  border-radius: 999px;
+}
+.oa-skeleton-btn {
+  display: inline-block;
+  height: 30px;
+  border-radius: 8px;
+}
+.oa-skeleton-line {
+  height: 13px;
+  border-radius: 6px;
+}
+.oa-skeleton-title {
+  height: 18px;
+  border-radius: 6px;
+}
+.oa-resource-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.oa-resource-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.oa-resource-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.oa-resource-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--oa-muted);
+  cursor: pointer;
+}
+.oa-resource-metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--oa-ink);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.oa-resource-progress {
+  appearance: none;
+  border: 0 solid;
+  overflow: clip;
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  --oa-progress-fill: var(--oa-accent);
+}
+.oa-resource-progress.tone-ok { --oa-progress-fill: var(--oa-ok); }
+.oa-resource-progress.tone-warn { --oa-progress-fill: var(--oa-warn); }
+.oa-resource-progress.tone-danger { --oa-progress-fill: var(--oa-danger); }
+.oa-resource-progress::-webkit-progress-bar {
+  background: transparent;
+}
+.oa-resource-progress::-webkit-progress-value {
+  background: var(--oa-progress-fill);
+  border-radius: 999px;
+  transition: inline-size 0.3s ease;
+}
+.oa-resource-progress::-moz-progress-bar {
+  background: var(--oa-progress-fill);
+  border-radius: 999px;
+  transition: inline-size 0.3s ease;
+}
+.oa-resource-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (max-width: 780px) {
+  .oa-resource-kv-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 `

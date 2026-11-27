@@ -4,6 +4,7 @@ import type {
   AppConfigItem,
   AppDeliveryJob,
   AppModelGroup,
+  AppResourceOverview,
   AppStorageOverview,
   AppStorageMountDetail,
   AppVersionItem,
@@ -70,7 +71,7 @@ function runtimeOperationNeedsCheck(operation?: RuntimeOperation | null) {
   return Boolean(operation && (operation.state === 'unknown' || operation.state === 'recovery_unknown' || (operation.state === 'failed' && operation.kind === 'restart')))
 }
 
-type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs'
+type DetailTab = 'artifacts' | 'configs' | 'storage' | 'versions' | 'logs' | 'resources'
 type LogSubTab = 'runtime' | 'build' | 'dockerfile'
 
 interface OpcRuntimeConfig {
@@ -152,7 +153,14 @@ function formatFileSize(bytes?: number | null): string {
   if (!bytes || bytes <= 0) return '0 B'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function resourceTone(percent: number): string {
+  if (percent >= 85) return 'tone-danger'
+  if (percent >= 65) return 'tone-warn'
+  return 'tone-ok'
 }
 
 function triggerBrowserDownload(filename: string, base64: string) {
@@ -637,6 +645,10 @@ export function AppsPanel({
   const formId = useId()
   const [versions, setVersions] = useState<AppVersionItem[]>([])
   const [storageOverview, setStorageOverview] = useState<AppStorageOverview | null>(null)
+  const [resourceOverview, setResourceOverview] = useState<AppResourceOverview | null>(null)
+  const [resourceLoading, setResourceLoading] = useState(false)
+  const [resourceError, setResourceError] = useState<string | null>(null)
+  const [resourceAutoRefresh, setResourceAutoRefresh] = useState(false)
   const [volumeBackups, setVolumeBackups] = useState<AppVolumeBackupItem[]>([])
   const [loadingBackups, setLoadingBackups] = useState(false)
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
@@ -908,6 +920,8 @@ export function AppsPanel({
       }
       setVersionsError(null)
       setLogsError(null)
+      setResourceOverview(null)
+      setResourceError(null)
       setRollbackTarget(null)
       try {
         const detail = JSON.parse(await api.appDetails(slug, contextId)) as DeployedApp | null
@@ -946,6 +960,31 @@ export function AppsPanel({
     },
     [api, contextId, opcConfig.defaultPort],
   )
+
+  const loadAppMetrics = useCallback(async (slug: string, background = false) => {
+    if (!api.appMetrics) return
+    if (!background) setResourceLoading(true)
+    setResourceError(null)
+    try {
+      const parsed = parseJson<AppResourceOverview | null>(await api.appMetrics(slug, contextId), null)
+      if (!parsed) throw new Error(t("apps.resourceUnavailable"))
+      setResourceOverview(parsed)
+    } catch (error) {
+      setResourceError(readErrorMessage(error, t("apps.resourceUnavailable")))
+    } finally {
+      if (!background) setResourceLoading(false)
+    }
+  }, [api, contextId, t])
+
+  useEffect(() => {
+    if (viewMode !== 'detail' || detailTab !== 'resources' || !detailApp?.slug || !api.appMetrics) return
+    void loadAppMetrics(detailApp.slug)
+    if (!resourceAutoRefresh) return
+    const timer = setInterval(() => {
+      void loadAppMetrics(detailApp.slug, true)
+    }, 10000)
+    return () => clearInterval(timer)
+  }, [viewMode, detailTab, detailApp?.slug, api.appMetrics, resourceAutoRefresh, loadAppMetrics])
 
   const runtimeSlug = runtimePanel?.app.slug ?? (viewMode === 'detail' && detailApp?.can_manage === true ? detailApp.slug : undefined)
   const runtimeStatus = runtimeData?.slug === runtimeSlug ? runtimeData?.status : undefined
@@ -2908,8 +2947,51 @@ export function AppsPanel({
   const renderDetailView = () => {
     if (!detailApp && detailLoading) {
       return (
-        <div className="oa-form-card" style={{ textAlign: 'center', padding: '44px 20px', color: '#64748b' }}>
-          {t("apps.loadingAppDetails")}
+        <div className="oa-overlay-view oa-app-detail-view" role="status" aria-label={t("apps.loadingAppDetails")}>
+          <div className="oa-overlay-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 84 }} />
+              <span className="oa-skeleton oa-skeleton-title" style={{ width: 148 }} />
+              <span className="oa-skeleton oa-skeleton-pill" style={{ width: 56 }} />
+              <span className="oa-skeleton oa-skeleton-pill" style={{ width: 64 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 68 }} />
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 92 }} />
+            </div>
+          </div>
+          <div className="oa-overlay-body">
+            <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                <span className="oa-skeleton oa-skeleton-line" style={{ width: '42%' }} />
+                <span className="oa-skeleton oa-skeleton-btn" style={{ width: 88, height: 24 }} />
+              </div>
+              <span className="oa-skeleton oa-skeleton-line" style={{ width: '88%' }} />
+              <span className="oa-skeleton oa-skeleton-line" style={{ width: '64%' }} />
+              <div style={{ display: 'flex', gap: 18, paddingTop: 10, borderTop: '1px solid #e2e8f0' }}>
+                <span className="oa-skeleton oa-skeleton-line" style={{ width: 76 }} />
+                <span className="oa-skeleton oa-skeleton-line" style={{ width: 96 }} />
+                <span className="oa-skeleton oa-skeleton-line" style={{ width: 128 }} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 82 }} />
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 90 }} />
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 96 }} />
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 110 }} />
+              <span className="oa-skeleton oa-skeleton-btn" style={{ width: 86 }} />
+            </div>
+            <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <span className="oa-skeleton oa-skeleton-title" style={{ width: 140 }} />
+              <div className="oa-grid-3">
+                <div className="oa-subcard"><span className="oa-skeleton oa-skeleton-line" style={{ width: '50%' }} /><span className="oa-skeleton oa-skeleton-title" style={{ width: '70%' }} /></div>
+                <div className="oa-subcard"><span className="oa-skeleton oa-skeleton-line" style={{ width: '55%' }} /><span className="oa-skeleton oa-skeleton-title" style={{ width: '65%' }} /></div>
+                <div className="oa-subcard"><span className="oa-skeleton oa-skeleton-line" style={{ width: '45%' }} /><span className="oa-skeleton oa-skeleton-title" style={{ width: '75%' }} /></div>
+              </div>
+              <span className="oa-skeleton oa-skeleton-line" style={{ width: '100%', height: 42 }} />
+              <span className="oa-skeleton oa-skeleton-line" style={{ width: '100%', height: 42 }} />
+            </div>
+          </div>
         </div>
       )
     }
@@ -2938,13 +3020,15 @@ export function AppsPanel({
     const requiresAIUpdate = !activeVersion || Boolean(activeVersion.download_urls?.['delivery.json']) ||
       (matchingJob?.version === detailApp.current_version && matchingJob?.proposal?.delivery_format === 1)
     const activeLocalJob = matchingJob?.version === detailApp.current_version && matchingJob?.status === 'verified' ? matchingJob : undefined
-    const detailTabs = {
+    const showResourceDashboard = detailApp.status === 'running' || (detailApp.current_version ?? 0) > 0
+    const detailTabs: Partial<Record<DetailTab, string>> = {
       configs: t("apps.runtimeConfig"),
       storage: t("apps.storage"),
       versions: t("apps.versions_2", { n: visibleVersions.length }),
       logs: t("apps.logsAndDockerfile"),
       artifacts: t("apps.capabilitiesAndSkill"),
-    } satisfies Record<DetailTab, string>
+      ...(showResourceDashboard ? { resources: t("apps.resourceDashboard") } : {}),
+    }
 
     const onlineRuntime = api.appRuntimeChange ? runtimeStatus : undefined
     const runtimeBlocked = runtimeOperationBusy(runtimeOperation) || runtimeOperation?.state === 'unknown' || runtimeOperation?.state === 'recovery_unknown'
@@ -3358,6 +3442,191 @@ export function AppsPanel({
                   )}
                 </>
               )}
+            </div>
+          )}
+
+          {detailTab === 'resources' && (
+            <div className="oa-form-card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div className="oa-resource-toolbar">
+                <div className="oa-resource-meta">
+                  <span className={`oa-pill ${resourceOverview?.available ? 'oa-pill-ok' : ''}`}>
+                    {t("apps.resourceReplicas")}: {resourceOverview ? `${resourceOverview.replicas_running}/${resourceOverview.replicas_desired}` : '—'}
+                  </span>
+                  {resourceOverview?.node_hostname && (
+                    <span className="oa-pill oa-mono">{t("apps.resourceNode")}: {resourceOverview.node_hostname}</span>
+                  )}
+                  {resourceOverview?.started_at && (
+                    <span className="oa-hint">{t("apps.resourceUptime")}: {formatDateTime(resourceOverview.started_at)}</span>
+                  )}
+                  {resourceOverview?.collected_at && (
+                    <span className="oa-hint">{t("apps.resourceCollectedAt", { time: formatDateTime(resourceOverview.collected_at) })}</span>
+                  )}
+                </div>
+                <div className="oa-resource-actions">
+                  <label className="oa-resource-toggle">
+                    <input
+                      type="checkbox"
+                      checked={resourceAutoRefresh}
+                      onChange={e => setResourceAutoRefresh(e.target.checked)}
+                    />
+                    <span>{t("apps.resourceAutoRefresh")}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="oa-btn oa-btn-sm"
+                    disabled={resourceLoading}
+                    onClick={() => void loadAppMetrics(detailApp.slug)}
+                  >
+                    <AppIcon name="refresh" size={13} className={resourceLoading ? 'oa-spin' : ''} />
+                    <span>{t("apps.resourceRefresh")}</span>
+                  </button>
+                </div>
+              </div>
+
+              {resourceLoading && !resourceOverview && (
+                <div className="oa-alert" role="status"><span className="oa-dot oa-pulse" /> {t("apps.resourceLoading")}</div>
+              )}
+
+              {resourceError && (
+                <div className="oa-alert oa-alert-warn">{resourceError}</div>
+              )}
+
+              {resourceOverview && !resourceOverview.available && (
+                <div className="oa-alert oa-alert-info">
+                  {resourceOverview.message || t("apps.resourceUnavailable")}
+                </div>
+              )}
+
+              {(() => {
+                const cpuPct = Math.min(100, Math.max(0, resourceOverview?.cpu_percent ?? 0))
+                const memPct = Math.min(100, Math.max(0, resourceOverview?.memory_percent ?? 0))
+                const memDenominator = resourceOverview?.memory_limit_bytes || resourceOverview?.host_memory_bytes || 0
+                const persistentBytes = resourceOverview?.persistent_bytes ?? storageOverview?.total_bytes ?? 0
+                const persistentMounts = resourceOverview?.persistent_mounts ?? storageOverview?.mounts_count ?? 0
+                const persistentFiles = resourceOverview?.persistent_files ?? storageOverview?.total_files ?? 0
+                const containerRwBytes = resourceOverview?.container_rw_bytes ?? 0
+                const appDiskBytes = persistentBytes + containerRwBytes
+                const serverTotal = resourceOverview?.server_total_bytes ?? 0
+                const serverUsed = resourceOverview?.server_used_bytes ?? 0
+                const serverPct = serverTotal > 0 ? Math.min(100, Math.round((serverUsed / serverTotal) * 1000) / 10) : 0
+
+                return (
+                  <>
+                    <div className="oa-grid-3">
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourceCpuUsage")}</div>
+                        <div className="oa-resource-metric-value">
+                          {resourceOverview?.available ? `${resourceOverview.cpu_percent.toFixed(1)}%` : '—'}
+                        </div>
+                        <progress
+                          className={`oa-resource-progress ${resourceTone(cpuPct)}`}
+                          value={resourceOverview?.available ? cpuPct : 0}
+                          max={100}
+                          aria-label={t("apps.resourceCpuUsage")}
+                        />
+                        <div className="oa-hint">
+                          {resourceOverview?.cpu_limit_cores
+                            ? t("apps.resourceCpuLimit", { limit: resourceOverview.cpu_limit_cores })
+                            : resourceOverview?.online_cpus
+                              ? t("apps.resourceCpuCores", { cores: resourceOverview.online_cpus })
+                              : '—'}
+                        </div>
+                      </div>
+
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourceMemoryUsage")}</div>
+                        <div className="oa-resource-metric-value">
+                          {resourceOverview?.available ? formatFileSize(resourceOverview.memory_usage_bytes) : '—'}
+                        </div>
+                        <progress
+                          className={`oa-resource-progress ${resourceTone(memPct)}`}
+                          value={resourceOverview?.available ? memPct : 0}
+                          max={100}
+                          aria-label={t("apps.resourceMemoryUsage")}
+                        />
+                        <div className="oa-hint">
+                          {resourceOverview?.available && memDenominator > 0
+                            ? `${memPct.toFixed(1)}% · ${resourceOverview.memory_limit_bytes > 0
+                              ? t("apps.resourceMemoryLimit", { limit: formatFileSize(resourceOverview.memory_limit_bytes) })
+                              : t("apps.resourceMemoryHost", { total: formatFileSize(resourceOverview.host_memory_bytes) })}`
+                            : '—'}
+                        </div>
+                      </div>
+
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourceDiskUsage")}</div>
+                        <div className="oa-resource-metric-value">
+                          {resourceOverview || storageOverview ? formatFileSize(appDiskBytes) : '—'}
+                        </div>
+                        <progress
+                          className={`oa-resource-progress ${resourceTone(serverPct)}`}
+                          value={serverTotal > 0 ? serverPct : 0}
+                          max={100}
+                          aria-label={t("apps.resourceDiskUsage")}
+                        />
+                        <div className="oa-hint">{t("apps.resourceDiskTotal")}</div>
+                      </div>
+                    </div>
+
+                    <div className="oa-subcard">
+                      <div className="oa-subcard-head">
+                        <strong>{t("apps.resourceDiskBreakdown")}</strong>
+                        {serverTotal > 0 && (
+                          <span className="oa-hint">
+                            {t("apps.resourceHostDisk")}: {formatFileSize(serverUsed)} / {formatFileSize(serverTotal)} ({serverPct}%)
+                          </span>
+                        )}
+                      </div>
+                      <div className="oa-resource-kv-grid">
+                        <div>
+                          <div className="oa-hint">{t("apps.resourcePersistentStorage")}</div>
+                          <div style={{ fontWeight: 600, marginTop: 2 }}>{formatFileSize(persistentBytes)}</div>
+                          <div className="oa-hint">{persistentMounts} · {persistentFiles}</div>
+                        </div>
+                        <div>
+                          <div className="oa-hint">{t("apps.resourceContainerRw")}</div>
+                          <div style={{ fontWeight: 600, marginTop: 2 }}>{resourceOverview?.available ? formatFileSize(containerRwBytes) : '—'}</div>
+                        </div>
+                        <div>
+                          <div className="oa-hint">{t("apps.resourceContainerRootfs")}</div>
+                          <div style={{ fontWeight: 600, marginTop: 2 }}>{resourceOverview?.available ? formatFileSize(resourceOverview.container_rootfs_bytes) : '—'}</div>
+                        </div>
+                        <div>
+                          <div className="oa-hint">{t("apps.resourceHostDisk")}</div>
+                          <div style={{ fontWeight: 600, marginTop: 2 }}>{serverTotal > 0 ? formatFileSize(resourceOverview?.server_available_bytes) : '—'}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="oa-resource-kv-grid">
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourceNetworkIo")}</div>
+                        <div style={{ fontWeight: 600 }}>
+                          {resourceOverview?.available
+                            ? `${formatFileSize(resourceOverview.network_rx_bytes)} / ${formatFileSize(resourceOverview.network_tx_bytes)}`
+                            : '—'}
+                        </div>
+                      </div>
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourceBlockIo")}</div>
+                        <div style={{ fontWeight: 600 }}>
+                          {resourceOverview?.available
+                            ? `${formatFileSize(resourceOverview.block_read_bytes)} / ${formatFileSize(resourceOverview.block_write_bytes)}`
+                            : '—'}
+                        </div>
+                      </div>
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourcePids")}</div>
+                        <div style={{ fontWeight: 600 }}>{resourceOverview?.available ? resourceOverview.pids : '—'}</div>
+                      </div>
+                      <div className="oa-subcard">
+                        <div className="oa-hint">{t("apps.resourceRestarts")}</div>
+                        <div style={{ fontWeight: 600 }}>{resourceOverview?.available ? resourceOverview.restart_count : '—'}</div>
+                      </div>
+                    </div>
+                  </>
+                )
+              })()}
             </div>
           )}
 
