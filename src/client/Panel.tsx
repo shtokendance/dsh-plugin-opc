@@ -1127,11 +1127,19 @@ export function Panel({ api, sessionId, requestedPage, navigationRevision, visib
 
   useEffect(() => {
     const controller = new AbortController()
+    let unloading = false
+    const onUnload = () => { unloading = true; controller.abort() }
+    window.addEventListener('pagehide', onUnload)
+    window.addEventListener('beforeunload', onUnload)
     void (async () => {
       try { for await (const frame of api.watchState(controller.signal)) { if (!controller.signal.aborted) setState(JSON.parse(frame)) } }
-      catch (e) { if (!controller.signal.aborted) setError(t("panel.connectionLost", { msg: e instanceof Error ? e.message : t("panel.pleaseReopenThePanel") })) }
+      catch (e) { if (!controller.signal.aborted && !unloading) setError(t("panel.connectionLost", { msg: e instanceof Error ? e.message : t("panel.pleaseReopenThePanel") })) }
     })()
-    return () => controller.abort()
+    return () => {
+      window.removeEventListener('pagehide', onUnload)
+      window.removeEventListener('beforeunload', onUnload)
+      controller.abort()
+    }
   }, [api, t])
 
   const load = useCallback(async (query = q) => {
