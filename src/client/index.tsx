@@ -104,6 +104,7 @@ function registerPanels(ctx: Context): void {
     appLogs: (...args) => unwrap(wire.appLogs!(...args)),
     appDeploymentLogs: (...args) => unwrap(wire.appDeploymentLogs!(...args)),
     appStorage: (...args) => unwrap(wire.appStorage!(...args)),
+    appMetrics: (...args) => unwrap(wire.appMetrics!(...args)),
     appRecheck: (...args) => unwrap(wire.appRecheck!(...args)),
     appSyncSkill: (...args) => unwrap(wire.appSyncSkill!(...args)),
     appRuntimeStatus: (...args) => unwrap(wire.appRuntimeStatus!(...args)),
