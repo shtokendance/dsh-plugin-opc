@@ -246,7 +246,8 @@ export async function worker(input: AppDocument, signal?: AbortSignal): Promise<
   return serializeByRoot(rootKey, signal, async () => {
     const path = fileURLToPath(new URL('../../runtime/worker.py', import.meta.url))
     // Bundled Host entry lives in lib/index.js; source tests live in src/host/.
-    const runtime = import.meta.url.endsWith('/lib/index.js') ? fileURLToPath(new URL('../runtime/worker.py', import.meta.url)) : path
+    const workerPath = import.meta.url.endsWith('/lib/index.js') ? fileURLToPath(new URL('../runtime/worker.py', import.meta.url)) : path
+    const runtime = workerPath.replace(/([\\/])app\.asar([\\/]dsh[\\/]node_modules[\\/]dsh-plugin-opc[\\/]runtime[\\/])/u, '$1app.asar.unpacked$2')
     const python = await resolvePythonInterpreter({ signal })
     return new Promise((resolve, reject) => {
       const child = spawn(python.command, [...python.prefixArgs, '-I', '-B', '-X', 'utf8', runtime], {
