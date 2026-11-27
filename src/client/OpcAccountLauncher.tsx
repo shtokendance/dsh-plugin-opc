@@ -133,19 +133,40 @@ export function OpcAccountLauncher({ api, wide, settingsShortcut, openSettings }
       } catch {
       }
     }
-    void api.state().then(applyRaw).catch(() => {})
+    const syncState = () => api.state().then(applyRaw).catch(() => {})
+    const onFocus = () => { void syncState() }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void syncState()
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
+    void syncState()
     void (async () => {
-      try {
-        for await (const frame of api.watchState(controller.signal)) {
-          if (!active) break
-          applyRaw(frame)
+      while (active && !controller.signal.aborted) {
+        try {
+          for await (const frame of api.watchState(controller.signal)) {
+            if (!active || controller.signal.aborted) break
+            applyRaw(frame)
+          }
+        } catch {
         }
-      } catch {
+        if (!active || controller.signal.aborted) break
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 500)
+          controller.signal.addEventListener('abort', () => {
+            clearTimeout(timer)
+            resolve()
+          }, { once: true })
+        })
+        if (!active || controller.signal.aborted) break
+        await syncState()
       }
     })()
     return () => {
       active = false
       controller.abort()
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [api])
 
@@ -184,6 +205,12 @@ export function OpcAccountLauncher({ api, wide, settingsShortcut, openSettings }
       setMenuPos({ left: Math.max(8, rect.left), bottom: Math.max(8, window.innerHeight - rect.top + 6) })
     }
     setMenuOpen(true)
+    void api.state().then((raw) => {
+      try {
+        setAuth(JSON.parse(raw) as AuthState)
+      } catch {
+      }
+    }).catch(() => {})
   }
 
   const handleLogin = async () => {
