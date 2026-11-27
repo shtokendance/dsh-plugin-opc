@@ -4,7 +4,9 @@ import React, { useEffect } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { contribution } from '../remote-contract.ts'
@@ -166,8 +168,28 @@ function registerPanels(ctx: Context): void {
     if (cfg.workbench_name) setWorkbenchName(cfg.workbench_name)
   }).catch(() => {})
   const id = 'dsh-plugin-opc/workbench'
+  const mainPanelId = 'opc-workbench' as MainPanelId
   const getTitle = () => getWorkbenchName()
   const getDesc = () => translate(getActiveClientLocale(), "workbench.knowledgeBasesSkillsMcpAndApps")
+  ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: mainPanelId,
+  }, () => (
+    <LocaleProvider>
+      <Panel
+        api={api}
+        sessionId="opc-main-panel"
+        prepareAnalysisNavigation={prepareAnalysisNavigation}
+        onOpenPluginDetail={onOpenPluginDetail}
+      />
+    </LocaleProvider>
+  ))))
+  ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: mainPanelId,
+    order: 5,
+    label: getTitle,
+  }, () => <OpcIcon />)))
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id, kind: workbenchKind, priority: 'extension', title: getTitle,
     guide: [{ id: workbenchKind, order: 10, icon: OpcIcon, title: getTitle, description: getDesc }],
